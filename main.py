@@ -97,7 +97,7 @@ class SimulateMatchPayload(BaseModel):
     simulations: int = 1  # can allow multi-run sims later
 
 class PlayerBattingAnalysisPayload(BaseModel):
-    player_id: int
+    player_ids: List[int]
     tournaments: List[str]
     team_category: str
     bowling_arm: Optional[List[str]] = None
@@ -768,6 +768,7 @@ def get_players_by_team_category(team_category: str):
 
 @app.post("/player-batting-analysis")
 def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
+    import os
     import sqlite3
 
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -776,77 +777,69 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
     cursor = conn.cursor()
 
     # 🎯 Resolve tournament IDs
-    tournament_rows = []
     tournament_ids = []
     tournament_filter = ""
-
     if payload.tournaments:
         placeholders = ",".join(["?"] * len(payload.tournaments))
         cursor.execute(f"""
             SELECT tournament_id FROM tournaments
             WHERE tournament_name IN ({placeholders})
         """, payload.tournaments)
-        tournament_rows = cursor.fetchall()
-        tournament_ids = [row["tournament_id"] for row in tournament_rows]
-
+        tournament_ids = [row["tournament_id"] for row in cursor.fetchall()]
         if tournament_ids:
             tournament_filter = f" AND m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})"
 
-    # 🌎 Resolve country name
-    cursor.execute("SELECT country_id FROM players WHERE player_id = ?", (payload.player_id,))
-    country_row = cursor.fetchone()
-    if not country_row:
+    # 🌎 Resolve country name using the first player ID
+    cursor.execute("SELECT country_id FROM players WHERE player_id = ?", (payload.player_ids[0],))
+    row = cursor.fetchone()
+    if not row:
         return {"overall": [], "partnerships": [], "ten_ball": [], "by_position": [], "wagon_wheel": []}
-    selected_country_id = country_row["country_id"]
+    country_id = row["country_id"]
 
-    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (selected_country_id,))
-    selected_country_name = cursor.fetchone()["country_name"]
+    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (country_id,))
+    country_name = cursor.fetchone()["country_name"]
 
-    # 🎯 Build additional filters
-    bowling_arm_filter = ""
-    if payload.bowling_arm:
-        arm_placeholders = ",".join(["?"] * len(payload.bowling_arm))
-        bowling_arm_filter = f" AND p.bowling_arm IN ({arm_placeholders})"
+    # 🎯 Build filters
+    def list_filter_sql(column, values):
+        if values:
+            placeholders = ",".join(["?"] * len(values))
+            return f" AND {column} IN ({placeholders})", values
+        return "", []
 
-    bowling_style_filter = ""
-    if payload.bowling_style:
-        style_placeholders = ",".join(["?"] * len(payload.bowling_style))
-        bowling_style_filter = f" AND p.bowling_style IN ({style_placeholders})"
+    bowling_arm_filter, bowling_arm_params = list_filter_sql("p.bowling_arm", payload.bowling_arm)
+    bowling_style_filter, bowling_style_params = list_filter_sql("p.bowling_style", payload.bowling_style)
 
     length_filter = ""
     if payload.lengths:
-        length_conditions = []
+        conditions = []
         for length in payload.lengths:
             if length == "Full Toss":
-                length_conditions.append("(be.pitch_y BETWEEN 0.0 AND 0.1)")
+                conditions.append("be.pitch_y BETWEEN 0.0 AND 0.1")
             elif length == "Yorker":
-                length_conditions.append("(be.pitch_y BETWEEN 0.1 AND 0.25)")
+                conditions.append("be.pitch_y BETWEEN 0.1 AND 0.25")
             elif length == "Full":
-                length_conditions.append("(be.pitch_y BETWEEN 0.25 AND 0.4)")
+                conditions.append("be.pitch_y BETWEEN 0.25 AND 0.4")
             elif length == "Good":
-                length_conditions.append("(be.pitch_y BETWEEN 0.4 AND 0.6)")
+                conditions.append("be.pitch_y BETWEEN 0.4 AND 0.6")
             elif length == "Short":
-                length_conditions.append("(be.pitch_y BETWEEN 0.6 AND 1.0)")
-        if length_conditions:
-            length_filter = " AND (" + " OR ".join(length_conditions) + ")"
+                conditions.append("be.pitch_y BETWEEN 0.6 AND 1.0")
+        if conditions:
+            length_filter = f" AND ({' OR '.join(conditions)})"
 
-    # 📦 Build overall_params
-    overall_params = [
-        payload.player_id, selected_country_name, selected_country_name,
-    ] + tournament_ids
-    if payload.bowling_arm:
-        overall_params += payload.bowling_arm
-    if payload.bowling_style:
-        overall_params += payload.bowling_style
-    overall_params += [
-        payload.player_id, selected_country_name,
-    ] + tournament_ids
-    if payload.bowling_arm:
-        overall_params += payload.bowling_arm
-    if payload.bowling_style:
-        overall_params += payload.bowling_style
+    # 🎯 Build overall query
+    player_placeholders = ",".join(["?"] * len(payload.player_ids))
+    overall_params = (
+        payload.player_ids +
+        tournament_ids +
+        bowling_arm_params +
+        bowling_style_params +
+        payload.player_ids +
+        [country_name] +
+        tournament_ids +
+        bowling_arm_params +
+        bowling_style_params
+    )
 
-    # 🏏 Fetch Overall Stats
     cursor.execute(f"""
         WITH innings_summary AS (
             SELECT
@@ -860,7 +853,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             JOIN matches m ON i.match_id = m.match_id
             JOIN tournaments t ON m.tournament_id = t.tournament_id
             JOIN players p ON be.bowler_id = p.player_id
-            WHERE be.batter_id = ?
+            WHERE be.batter_id IN ({player_placeholders})
               {tournament_filter}
               {bowling_arm_filter}
               {bowling_style_filter}
@@ -868,21 +861,15 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             GROUP BY be.innings_id
         ),
         high_scores AS (
-            SELECT
-                tournament_name,
-                MAX(runs) AS high_score
+            SELECT tournament_name, MAX(runs) AS high_score
             FROM innings_summary
             WHERE batting_team = ?
             GROUP BY tournament_name
         ),
         hs_dismissals AS (
-            SELECT
-                s.tournament_name,
-                s.runs AS high_score,
-                s.dismissed AS high_score_dismissed
+            SELECT s.tournament_name, s.runs AS high_score, s.dismissed AS high_score_dismissed
             FROM innings_summary s
-            JOIN high_scores hs ON s.tournament_name = hs.tournament_name
-             AND s.runs = hs.high_score
+            JOIN high_scores hs ON s.tournament_name = hs.tournament_name AND s.runs = hs.high_score
             WHERE s.batting_team = ?
         )
         SELECT 
@@ -906,7 +893,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         JOIN tournaments t ON m.tournament_id = t.tournament_id
         JOIN players p ON be.bowler_id = p.player_id
         LEFT JOIN hs_dismissals hs ON hs.tournament_name = t.tournament_name
-        WHERE be.batter_id = ?
+        WHERE be.batter_id IN ({player_placeholders})
           AND i.batting_team = ?
           {tournament_filter}
           {bowling_arm_filter}
@@ -914,63 +901,56 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
           {length_filter}
         GROUP BY t.tournament_name
     """, overall_params)
-
     overall_stats = cursor.fetchall()
 
-    # 🏏 Fetch Partnership Stats
+    # 🎯 Partnership stats
     cursor.execute(f"""
         SELECT p.start_wicket, p.runs, p.balls,
-            CASE WHEN p.unbeaten = 1 THEN 1 ELSE 0 END AS unbeaten,
-            c.country_name AS opponent,
-            t.tournament_name,
-            m.match_date
+               CASE WHEN p.unbeaten = 1 THEN 1 ELSE 0 END AS unbeaten,
+               c.country_name AS opponent,
+               t.tournament_name,
+               m.match_date
         FROM partnerships p
         JOIN innings i ON p.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         LEFT JOIN countries c ON p.opponent_team = c.country_name
         LEFT JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE (p.batter1_id = ? OR p.batter2_id = ?)
+        WHERE (p.batter1_id IN ({player_placeholders}) OR p.batter2_id IN ({player_placeholders}))
           AND i.batting_team = ?
           {tournament_filter}
         ORDER BY p.runs DESC, p.balls ASC
         LIMIT 5
-    """, [payload.player_id, payload.player_id, selected_country_name] + tournament_ids)
+    """, payload.player_ids + payload.player_ids + [country_name] + tournament_ids)
     partnership_stats = cursor.fetchall()
 
-    # 🏏 Fetch 10-ball Segments
+    # 🎯 10-ball segments
     cursor.execute(f"""
-        SELECT 
-            be.innings_id, be.ball_id, be.runs, be.dismissal_type, be.batting_intent_score
+        SELECT be.innings_id, be.ball_id, be.runs, be.dismissal_type, be.batting_intent_score
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.batter_id = ?
+        WHERE be.batter_id IN ({player_placeholders})
           AND i.batting_team = ?
           {tournament_filter}
         ORDER BY be.innings_id, be.ball_id
-    """, [payload.player_id, selected_country_name] + tournament_ids)
-    segment_rows = cursor.fetchall()
+    """, payload.player_ids + [country_name] + tournament_ids)
+    rows = cursor.fetchall()
 
-    # Process 10-ball segments
     segment_stats = {}
     current_innings = None
     ball_count = 0
-    for row in segment_rows:
+    for row in rows:
         innings_id = row["innings_id"]
         runs = row["runs"]
-        dismissal = (row["dismissal_type"] or "").lower().strip()
+        dismissal = (row["dismissal_type"] or "").lower()
         intent = row["batting_intent_score"] or 0
-
         if current_innings != innings_id:
             current_innings = innings_id
             ball_count = 0
-
         segment = (ball_count // 10) * 10
         label = f"{segment}-{segment+9}"
-
         if label not in segment_stats:
             segment_stats[label] = {"runs": 0, "balls": 0, "scoring": 0, "dismissals": 0, "intent_total": 0}
-
         seg = segment_stats[label]
         seg["runs"] += runs
         seg["balls"] += 1
@@ -979,13 +959,10 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             seg["scoring"] += 1
         if dismissal and dismissal != "not out":
             seg["dismissals"] += 1
-
         ball_count += 1
 
-    ten_ball_output = []
-    for label in sorted(segment_stats.keys(), key=lambda s: int(s.split("-")[0])):
-        seg = segment_stats[label]
-        ten_ball_output.append({
+    ten_ball_output = [
+        {
             "Segment": label,
             "Balls Faced": seg["balls"],
             "Runs": seg["runs"],
@@ -993,41 +970,32 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             "Scoring %": round((seg["scoring"] / seg["balls"]) * 100, 2),
             "Dismissal %": round((seg["dismissals"] / seg["balls"]) * 100, 2),
             "Avg Intent": round(seg["intent_total"] / max(1, seg["balls"]), 2)
-        })
+        }
+        for label, seg in sorted(segment_stats.items(), key=lambda kv: int(kv[0].split("-")[0]))
+    ]
 
-
+    # 🎯 Batting position breakdown
     cursor.execute(f"""
         WITH high_scores_raw AS (
-            SELECT
-                be.innings_id,
-                be.batting_position,
-                SUM(be.runs) AS runs,
-                MAX(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissed
+            SELECT be.innings_id, be.batting_position, SUM(be.runs) AS runs,
+                   MAX(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissed
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
-            WHERE be.batter_id = ?
-            AND i.batting_team = ?
-            {tournament_filter}
+            WHERE be.batter_id IN ({player_placeholders})
+              AND i.batting_team = ?
+              {tournament_filter}
             GROUP BY be.innings_id
         ),
-        position_high_scores AS (
-            SELECT 
-                batting_position,
-                MAX(runs) AS high_score
-            FROM high_scores_raw
-            GROUP BY batting_position
+        high_scores_pos AS (
+            SELECT batting_position, MAX(runs) AS high_score
+            FROM high_scores_raw GROUP BY batting_position
         ),
-        position_hs_dismissal AS (
-            SELECT 
-                hs.batting_position,
-                hs.runs AS high_score,
-                hs.dismissed AS high_score_dismissed
+        hs_final AS (
+            SELECT hs.batting_position, hs.runs AS high_score, hs.dismissed AS high_score_dismissed
             FROM high_scores_raw hs
-            JOIN position_high_scores phs 
-            ON hs.batting_position = phs.batting_position AND hs.runs = phs.high_score
+            JOIN high_scores_pos hp ON hs.batting_position = hp.batting_position AND hs.runs = hp.high_score
         )
-
         SELECT 
             be.batting_position,
             COUNT(*) AS balls_faced,
@@ -1038,27 +1006,24 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_balls,
             SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
             SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
-            hs.high_score,
-            hs.high_score_dismissed
+            hf.high_score,
+            hf.high_score_dismissed
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        LEFT JOIN position_hs_dismissal hs ON be.batting_position = hs.batting_position
-        WHERE be.batter_id = ?
-        AND i.batting_team = ?
-        {tournament_filter}
+        LEFT JOIN hs_final hf ON be.batting_position = hf.batting_position
+        WHERE be.batter_id IN ({player_placeholders})
+          AND i.batting_team = ?
+          {tournament_filter}
         GROUP BY be.batting_position
         ORDER BY be.batting_position
-    """, [payload.player_id, selected_country_name] + tournament_ids + [payload.player_id, selected_country_name] + tournament_ids
-
-)
-
-
+    """, payload.player_ids + [country_name] + tournament_ids)
     batting_position_stats = cursor.fetchall()
 
-    wagon_wheel_data = get_individual_wagon_wheel_data(payload.player_id, selected_country_name, tournament_ids)
-
-
+    # 🎯 Wagon wheel
+    wagon_wheel_data = []
+    for player_id in payload.player_ids:
+        wagon_wheel_data += get_individual_wagon_wheel_data(player_id, country_name, tournament_ids)
 
     return {
         "overall": [dict(row) for row in overall_stats],
@@ -1067,6 +1032,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         "by_position": [dict(row) for row in batting_position_stats],
         "wagon_wheel": wagon_wheel_data
     }
+
 
 @app.post("/player-bowling-analysis")
 def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):

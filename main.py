@@ -2238,6 +2238,7 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             be.pitch_x,
             be.pitch_y,
             be.runs,
+            be.ball_id,
             CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END AS wicket,
             be.dismissal_type,
             p.player_name AS bowler_name,
@@ -2271,6 +2272,7 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"]
         })
@@ -2279,6 +2281,7 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"],
             "bowler_name": row["bowler_name"],
@@ -2300,7 +2303,8 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             be.runs,
             be.over_number,
             be.balls_this_over,
-            be.dismissal_type
+            be.dismissal_type,
+            be.ball_id
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
@@ -2324,7 +2328,8 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             "runs": row["runs"],
             "over": row["over_number"],
             "balls_this_over": row["balls_this_over"],
-            "dismissal_type": row["dismissal_type"]
+            "dismissal_type": row["dismissal_type"],
+            "ball_id": row["ball_id"]
         })
 
     conn.close()

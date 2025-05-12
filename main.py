@@ -885,10 +885,12 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
             SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
             SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
             SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissals,
             ROUND(SUM(be.runs) * 1.0 / COUNT(*), 2) AS rpb,
             ROUND(AVG(be.batting_intent_score), 2) AS avg_intent,
             hs.high_score,
             hs.high_score_dismissed
+
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id

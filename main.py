@@ -250,22 +250,26 @@ def get_matches(teamCategory: Optional[str] = None):
             query += " WHERE LOWER(c1.country_name) LIKE ? OR LOWER(c2.country_name) LIKE ?"
             cursor.execute(query + " ORDER BY m.match_date DESC", ("%training%", "%training%"))
         else:
-            query += " WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?"
-            cursor.execute(query + " ORDER BY m.match_date DESC", (f"% {teamCategory}", f"% {teamCategory}"))
-
+            query += """
+                WHERE 
+                    (c1.country_name LIKE ? AND LOWER(c1.country_name) NOT LIKE ?) OR 
+                    (c2.country_name LIKE ? AND LOWER(c2.country_name) NOT LIKE ?)
+            """
+            cursor.execute(query + " ORDER BY m.match_date DESC", 
+                (f"%{teamCategory}", "%training%", f"%{teamCategory}", "%training%"))
+    else:
+        cursor.execute(query + " ORDER BY m.match_date DESC")
 
     rows = cursor.fetchall()
     conn.close()
 
-    matches = []
-    for row in rows:
-        matches.append({
-            "match_id": row[0],
-            "tournament": row[1],
-            "team_a": row[2],
-            "team_b": row[3],
-            "match_date": row[4]
-        })
+    matches = [{
+        "match_id": row[0],
+        "tournament": row[1],
+        "team_a": row[2],
+        "team_b": row[3],
+        "match_date": row[4]
+    } for row in rows]
 
     return matches
 
@@ -277,12 +281,20 @@ def get_countries(teamCategory: Optional[str] = None):
 
     if teamCategory:
         if teamCategory.lower() == "training":
-            c.execute("SELECT country_name FROM countries WHERE LOWER(country_name) LIKE ? ORDER BY country_name ASC", ("%training%",))
+            c.execute("""
+                SELECT country_name FROM countries 
+                WHERE LOWER(country_name) LIKE ? 
+                ORDER BY country_name ASC
+            """, ("%training%",))
         else:
-            c.execute("SELECT country_name FROM countries WHERE country_name LIKE ? ORDER BY country_name ASC", (f"% {teamCategory}",))
+            c.execute("""
+                SELECT country_name FROM countries 
+                WHERE country_name LIKE ? 
+                  AND LOWER(country_name) NOT LIKE ? 
+                ORDER BY country_name ASC
+            """, (f"%{teamCategory}", "%training%"))
     else:
         c.execute("SELECT country_name FROM countries ORDER BY country_name ASC")
-
 
     countries = [row[0] for row in c.fetchall()]
     conn.close()
@@ -314,12 +326,12 @@ def get_tournaments(teamCategory: Optional[str] = None):
                 JOIN matches m ON m.tournament_id = t.tournament_id
                 JOIN countries c1 ON m.team_a = c1.country_id
                 JOIN countries c2 ON m.team_b = c2.country_id
-                WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?
+                WHERE 
+                    (c1.country_name LIKE ? AND LOWER(c1.country_name) NOT LIKE ?) OR 
+                    (c2.country_name LIKE ? AND LOWER(c2.country_name) NOT LIKE ?)
                 ORDER BY t.tournament_name ASC
             """
-            like_filter = f"%{teamCategory}"
-            c.execute(query, (like_filter, like_filter))
-
+            c.execute(query, (f"%{teamCategory}", "%training%", f"%{teamCategory}", "%training%"))
     else:
         c.execute("SELECT tournament_name FROM tournaments ORDER BY tournament_name ASC")
 
@@ -695,6 +707,7 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+
     if team_category:
         if team_category.lower() == "training":
             cursor.execute("""
@@ -709,10 +722,9 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
                 SELECT player_id, player_name
                 FROM players p
                 JOIN countries c ON p.country_id = c.country_id
-                WHERE c.country_name = ? AND c.country_name LIKE ?
+                WHERE c.country_name = ? AND LOWER(c.country_name) NOT LIKE ?
                 ORDER BY player_name
-            """, (country_name, f"%{team_category}"))
-
+            """, (country_name, "%training%"))
     else:
         cursor.execute("""
             SELECT player_id, player_name
@@ -721,6 +733,7 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
             WHERE c.country_name = ?
             ORDER BY player_name
         """, (country_name,))
+    
     players = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
     conn.close()
     return players
@@ -744,14 +757,14 @@ def get_players_by_team_category(team_category: str):
             SELECT player_id, player_name
             FROM players p
             JOIN countries c ON p.country_id = c.country_id
-            WHERE c.country_name LIKE ?
+            WHERE c.country_name LIKE ? AND LOWER(c.country_name) NOT LIKE ?
             ORDER BY player_name
-        """, (f"%{team_category}",))
-
+        """, (f"%{team_category}", "%training%"))
 
     players = [{"player_id": row[0], "player_name": row[1]} for row in cursor.fetchall()]
     conn.close()
     return players
+
 
 @app.post("/player-batting-analysis")
 def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
@@ -1998,10 +2011,12 @@ def get_matches(team_category: str, tournament: str):
             JOIN countries t1 ON m.team1_id = t1.country_id
             JOIN countries t2 ON m.team2_id = t2.country_id
             JOIN tournaments t ON m.tournament_id = t.tournament_id
-            WHERE t.tournament_name = ? AND (t1.country_name LIKE ? OR t2.country_name LIKE ?)
+            WHERE t.tournament_name = ? AND (
+                (t1.country_name LIKE ? AND LOWER(t1.country_name) NOT LIKE ?) OR
+                (t2.country_name LIKE ? AND LOWER(t2.country_name) NOT LIKE ?)
+            )
             ORDER BY m.match_date DESC
-        """, (tournament, f"% {team_category}", f"% {team_category}"))
-
+        """, (tournament, f"%{team_category}", "%training%", f"%{team_category}", "%training%"))
 
     matches = cursor.fetchall()
     return [f"{row['match_date']} - {row['team1']} vs {row['team2']} (ID: {row['match_id']})" for row in matches]

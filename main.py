@@ -152,6 +152,14 @@ class PlayerIntentSummaryPayload(BaseModel):
     bowling_style: List[str] = []
     lengths: Optional[List[str]] = None
 
+class PlayerDetailedBowlingPayload(BaseModel):
+    team_category: str
+    tournaments: List[str]
+    player_ids: List[int]
+    match_id: Optional[int] = None
+    batting_hand: List[str] = []
+    bowling_style: List[str] = []
+    lengths: Optional[List[str]] = None
 
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
@@ -2391,6 +2399,166 @@ def get_player_intent_summary(payload: PlayerIntentSummaryPayload):
         "shot_selection": dict(shot_selection_counter)
     }
 
+
+@app.post("/player-detailed-bowling")
+def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Get tournament_ids
+    cursor.execute(f"""
+        SELECT tournament_id FROM tournaments
+        WHERE tournament_name IN ({','.join(['?'] * len(payload.tournaments))})
+    """, payload.tournaments)
+    tournament_ids = [row["tournament_id"] for row in cursor.fetchall()]
+
+    if not tournament_ids:
+        conn.close()
+        return {"pitch_map": [], "wagon_wheel": [], "full_balls": []}
+
+    filters = list(payload.player_ids) + tournament_ids
+
+    bowler_filter = f"AND be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})"
+    tournament_filter = f"AND m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})"
+
+    match_filter = ""
+    if payload.match_id:
+        match_filter = "AND m.match_id = ?"
+        filters.append(payload.match_id)
+
+    batting_hand_filter = ""
+    if payload.batting_hand:
+        placeholders = ",".join(["?"] * len(payload.batting_hand))
+        batting_hand_filter = f"AND batter.batting_hand IN ({placeholders})"
+        filters.extend(payload.batting_hand)
+
+    bowling_style_filter = ""
+    if payload.bowling_style:
+        placeholders = ",".join(["?"] * len(payload.bowling_style))
+        bowling_style_filter = f"AND p.bowling_style IN ({placeholders})"
+        filters.extend(payload.bowling_style)
+
+    length_filter = ""
+    if payload.lengths:
+        conditions = []
+        for length in payload.lengths:
+            if length == "Full Toss":
+                conditions.append("(be.pitch_y BETWEEN -0.090909 AND 0.036363636)")
+            elif length == "Yorker":
+                conditions.append("(be.pitch_y BETWEEN 0.036363636 AND 0.1636363636)")
+            elif length == "Full":
+                conditions.append("(be.pitch_y BETWEEN 0.1636363636 AND 0.318181818)")
+            elif length == "Good":
+                conditions.append("(be.pitch_y BETWEEN 0.318181818 AND 0.5454545454)")
+            elif length == "Short":
+                conditions.append("(be.pitch_y BETWEEN 0.5454545454 AND 1.0)")
+        if conditions:
+            length_filter = "AND (" + " OR ".join(conditions) + ")"
+
+    # PITCH MAP + FULL BALL DATA
+    cursor.execute(f"""
+        SELECT 
+            be.pitch_x,
+            be.pitch_y,
+            be.runs,
+            CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END AS wicket,
+            be.dismissal_type,
+            batter.player_name AS batter_name,
+            batter.batting_hand,
+            be.delivery_type,
+            be.over_number,
+            be.balls_this_over,
+            be.shot_type,
+            be.footwork,
+            be.shot_selection
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN players batter ON be.batter_id = batter.player_id
+        WHERE 1=1
+        {bowler_filter}
+        {tournament_filter}
+        {match_filter}
+        {batting_hand_filter}
+        {bowling_style_filter}
+        {length_filter}
+        AND be.pitch_x IS NOT NULL
+        AND be.pitch_y IS NOT NULL
+    """, filters)
+
+    pitch_map = []
+    full_balls = []
+    for row in cursor.fetchall():
+        pitch_map.append({
+            "pitch_x": row["pitch_x"],
+            "pitch_y": row["pitch_y"],
+            "runs": row["runs"],
+            "wicket": bool(row["wicket"]),
+            "dismissal_type": row["dismissal_type"]
+        })
+
+        full_balls.append({
+            "pitch_x": row["pitch_x"],
+            "pitch_y": row["pitch_y"],
+            "runs": row["runs"],
+            "wicket": bool(row["wicket"]),
+            "dismissal_type": row["dismissal_type"],
+            "batter_name": row["batter_name"],
+            "batting_hand": row["batting_hand"],
+            "delivery_type": row["delivery_type"],
+            "over": row["over_number"],
+            "balls_this_over": row["balls_this_over"],
+            "shot_type": row["shot_type"],
+            "footwork": row["footwork"],
+            "shot_selection": row["shot_selection"]
+        })
+
+    # WAGON WHEEL — runs conceded by bowler
+    cursor.execute(f"""
+        SELECT 
+            be.shot_x,
+            be.shot_y,
+            be.runs,
+            be.over_number,
+            be.balls_this_over,
+            be.dismissal_type
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN players batter ON be.batter_id = batter.player_id
+        WHERE 1=1
+        {bowler_filter}
+        {tournament_filter}
+        {match_filter}
+        {batting_hand_filter}
+        {bowling_style_filter}
+        {length_filter}
+        AND be.shot_x IS NOT NULL
+        AND be.shot_y IS NOT NULL
+    """, filters)
+
+    wagon_wheel = []
+    for row in cursor.fetchall():
+        wagon_wheel.append({
+            "shot_x": row["shot_x"],
+            "shot_y": row["shot_y"],
+            "runs": row["runs"],
+            "over": row["over_number"],
+            "balls_this_over": row["balls_this_over"],
+            "dismissal_type": row["dismissal_type"]
+        })
+
+    conn.close()
+
+    return {
+        "pitch_map": pitch_map,
+        "wagon_wheel": wagon_wheel,
+        "full_balls": full_balls
+    }
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category):

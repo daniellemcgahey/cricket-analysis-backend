@@ -246,10 +246,13 @@ def get_matches(teamCategory: Optional[str] = None):
     """
 
     if teamCategory:
-        query += " WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?"
-        cursor.execute(query + " ORDER BY m.match_date DESC", (f"% {teamCategory}", f"% {teamCategory}"))
-    else:
-        cursor.execute(query + " ORDER BY m.match_date DESC")
+        if teamCategory.lower() == "training":
+            query += " WHERE LOWER(c1.country_name) LIKE ? OR LOWER(c2.country_name) LIKE ?"
+            cursor.execute(query + " ORDER BY m.match_date DESC", ("%training%", "%training%"))
+        else:
+            query += " WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?"
+            cursor.execute(query + " ORDER BY m.match_date DESC", (f"% {teamCategory}", f"% {teamCategory}"))
+
 
     rows = cursor.fetchall()
     conn.close()
@@ -273,9 +276,13 @@ def get_countries(teamCategory: Optional[str] = None):
     c = conn.cursor()
 
     if teamCategory:
-         c.execute("SELECT country_name FROM countries WHERE country_name LIKE ? ORDER BY country_name ASC", (f"% {teamCategory}",))
+        if teamCategory.lower() == "training":
+            c.execute("SELECT country_name FROM countries WHERE LOWER(country_name) LIKE ? ORDER BY country_name ASC", ("%training%",))
+        else:
+            c.execute("SELECT country_name FROM countries WHERE country_name LIKE ? ORDER BY country_name ASC", (f"% {teamCategory}",))
     else:
         c.execute("SELECT country_name FROM countries ORDER BY country_name ASC")
+
 
     countries = [row[0] for row in c.fetchall()]
     conn.close()
@@ -289,17 +296,30 @@ def get_tournaments(teamCategory: Optional[str] = None):
     c = conn.cursor()
 
     if teamCategory:
-        query = """
-            SELECT DISTINCT t.tournament_name
-            FROM tournaments t
-            JOIN matches m ON m.tournament_id = t.tournament_id
-            JOIN countries c1 ON m.team_a = c1.country_id
-            JOIN countries c2 ON m.team_b = c2.country_id
-            WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?
-            ORDER BY t.tournament_name ASC
-        """
-        like_filter = f"%{teamCategory}"  # e.g., '%Women'
-        c.execute(query, (like_filter, like_filter))
+        if teamCategory.lower() == "training":
+            query = """
+                SELECT DISTINCT t.tournament_name
+                FROM tournaments t
+                JOIN matches m ON m.tournament_id = t.tournament_id
+                JOIN countries c1 ON m.team_a = c1.country_id
+                JOIN countries c2 ON m.team_b = c2.country_id
+                WHERE LOWER(c1.country_name) LIKE ? OR LOWER(c2.country_name) LIKE ?
+                ORDER BY t.tournament_name ASC
+            """
+            c.execute(query, ("%training%", "%training%"))
+        else:
+            query = """
+                SELECT DISTINCT t.tournament_name
+                FROM tournaments t
+                JOIN matches m ON m.tournament_id = t.tournament_id
+                JOIN countries c1 ON m.team_a = c1.country_id
+                JOIN countries c2 ON m.team_b = c2.country_id
+                WHERE c1.country_name LIKE ? OR c2.country_name LIKE ?
+                ORDER BY t.tournament_name ASC
+            """
+            like_filter = f"%{teamCategory}"
+            c.execute(query, (like_filter, like_filter))
+
     else:
         c.execute("SELECT tournament_name FROM tournaments ORDER BY tournament_name ASC")
 
@@ -676,13 +696,23 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     if team_category:
-        cursor.execute("""
-            SELECT player_id, player_name
-            FROM players p
-            JOIN countries c ON p.country_id = c.country_id
-            WHERE c.country_name = ? AND c.country_name LIKE ?
-            ORDER BY player_name
-        """, (country_name, f"%{team_category}"))
+        if team_category.lower() == "training":
+            cursor.execute("""
+                SELECT player_id, player_name
+                FROM players p
+                JOIN countries c ON p.country_id = c.country_id
+                WHERE c.country_name = ? AND LOWER(c.country_name) LIKE ?
+                ORDER BY player_name
+            """, (country_name, "%training%"))
+        else:
+            cursor.execute("""
+                SELECT player_id, player_name
+                FROM players p
+                JOIN countries c ON p.country_id = c.country_id
+                WHERE c.country_name = ? AND c.country_name LIKE ?
+                ORDER BY player_name
+            """, (country_name, f"%{team_category}"))
+
     else:
         cursor.execute("""
             SELECT player_id, player_name
@@ -701,13 +731,23 @@ def get_players_by_team_category(team_category: str):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT player_id, player_name
-        FROM players p
-        JOIN countries c ON p.country_id = c.country_id
-        WHERE c.country_name LIKE ?
-        ORDER BY player_name
-    """, (f"%{team_category}",))
+    if team_category.lower() == "training":
+        cursor.execute("""
+            SELECT player_id, player_name
+            FROM players p
+            JOIN countries c ON p.country_id = c.country_id
+            WHERE LOWER(c.country_name) LIKE ?
+            ORDER BY player_name
+        """, ("%training%",))
+    else:
+        cursor.execute("""
+            SELECT player_id, player_name
+            FROM players p
+            JOIN countries c ON p.country_id = c.country_id
+            WHERE c.country_name LIKE ?
+            ORDER BY player_name
+        """, (f"%{team_category}",))
+
 
     players = [{"player_id": row[0], "player_name": row[1]} for row in cursor.fetchall()]
     conn.close()
@@ -1941,15 +1981,27 @@ def get_matches(team_category: str, tournament: str):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute("""
-        SELECT m.match_id, m.match_date, t1.country_name AS team1, t2.country_name AS team2
-        FROM matches m
-        JOIN countries t1 ON m.team1_id = t1.country_id
-        JOIN countries t2 ON m.team2_id = t2.country_id
-        JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE t.tournament_name = ? AND t.team_category = ?
-        ORDER BY m.match_date DESC
-    """, (tournament, team_category))
+    if team_category.lower() == "training":
+        cursor.execute("""
+            SELECT m.match_id, m.match_date, t1.country_name AS team1, t2.country_name AS team2
+            FROM matches m
+            JOIN countries t1 ON m.team1_id = t1.country_id
+            JOIN countries t2 ON m.team2_id = t2.country_id
+            JOIN tournaments t ON m.tournament_id = t.tournament_id
+            WHERE t.tournament_name = ? AND (LOWER(t1.country_name) LIKE ? OR LOWER(t2.country_name) LIKE ?)
+            ORDER BY m.match_date DESC
+        """, (tournament, "%training%", "%training%"))
+    else:
+        cursor.execute("""
+            SELECT m.match_id, m.match_date, t1.country_name AS team1, t2.country_name AS team2
+            FROM matches m
+            JOIN countries t1 ON m.team1_id = t1.country_id
+            JOIN countries t2 ON m.team2_id = t2.country_id
+            JOIN tournaments t ON m.tournament_id = t.tournament_id
+            WHERE t.tournament_name = ? AND (t1.country_name LIKE ? OR t2.country_name LIKE ?)
+            ORDER BY m.match_date DESC
+        """, (tournament, f"% {team_category}", f"% {team_category}"))
+
 
     matches = cursor.fetchall()
     return [f"{row['match_date']} - {row['team1']} vs {row['team2']} (ID: {row['match_id']})" for row in matches]

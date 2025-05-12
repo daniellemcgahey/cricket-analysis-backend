@@ -977,16 +977,25 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
     ]
 
     # 🎯 Batting position breakdown
+    bat_pos_params = (
+        payload.player_ids +            # used in high_scores_raw
+        [country_name] +                # used in high_scores_raw
+        tournament_ids +                # used in high_scores_raw
+        payload.player_ids +            # used in final SELECT
+        [country_name] +                # used in final SELECT
+        tournament_ids                  # used in final SELECT
+    )
+
     cursor.execute(f"""
         WITH high_scores_raw AS (
             SELECT be.innings_id, be.batting_position, SUM(be.runs) AS runs,
-                   MAX(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissed
+                MAX(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissed
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
-            WHERE be.batter_id IN ({player_placeholders})
-              AND i.batting_team = ?
-              {tournament_filter}
+            WHERE be.batter_id IN ({','.join(['?'] * len(payload.player_ids))})
+            AND i.batting_team = ?
+            {f"AND m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})" if tournament_ids else ""}
             GROUP BY be.innings_id
         ),
         high_scores_pos AS (
@@ -1014,12 +1023,12 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         LEFT JOIN hs_final hf ON be.batting_position = hf.batting_position
-        WHERE be.batter_id IN ({player_placeholders})
-          AND i.batting_team = ?
-          {tournament_filter}
+        WHERE be.batter_id IN ({','.join(['?'] * len(payload.player_ids))})
+        AND i.batting_team = ?
+        {f"AND m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})" if tournament_ids else ""}
         GROUP BY be.batting_position
         ORDER BY be.batting_position
-    """, payload.player_ids + [country_name] + tournament_ids)
+    """, bat_pos_params)
     batting_position_stats = cursor.fetchall()
 
     # 🎯 Wagon wheel

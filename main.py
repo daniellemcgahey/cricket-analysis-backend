@@ -830,6 +830,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
     player_placeholders = ",".join(["?"] * len(payload.player_ids))
     overall_params = (
         payload.player_ids +
+        [country_name, country_name] +  # used for two subqueries
         tournament_ids +
         bowling_arm_params +
         bowling_style_params +
@@ -839,6 +840,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         bowling_arm_params +
         bowling_style_params
     )
+
 
     cursor.execute(f"""
         WITH innings_summary AS (

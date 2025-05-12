@@ -2399,7 +2399,6 @@ def get_player_intent_summary(payload: PlayerIntentSummaryPayload):
         "shot_selection": dict(shot_selection_counter)
     }
 
-
 @app.post("/player-detailed-bowling")
 def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -2463,10 +2462,14 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             be.pitch_x,
             be.pitch_y,
             be.runs,
+            be.ball_id,
             CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END AS wicket,
             be.dismissal_type,
             batter.player_name AS batter_name,
             batter.batting_hand,
+            p.player_name AS bowler_name,
+            p.bowling_arm,
+            p.bowling_style AS bowler_type,
             be.delivery_type,
             be.over_number,
             be.balls_this_over,
@@ -2496,6 +2499,7 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"]
         })
@@ -2504,10 +2508,14 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"],
             "batter_name": row["batter_name"],
             "batting_hand": row["batting_hand"],
+            "bowler_name": row["bowler_name"],
+            "bowling_arm": row["bowling_arm"],
+            "bowler_type": row["bowler_type"],
             "delivery_type": row["delivery_type"],
             "over": row["over_number"],
             "balls_this_over": row["balls_this_over"],
@@ -2515,6 +2523,7 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             "footwork": row["footwork"],
             "shot_selection": row["shot_selection"]
         })
+
 
     # WAGON WHEEL — runs conceded by bowler
     cursor.execute(f"""

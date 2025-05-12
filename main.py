@@ -220,7 +220,7 @@ def pressure_analysis(payload: PressurePayload):
 
 @app.get("/matches")
 def get_matches(teamCategory: Optional[str] = None):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
 
     query = """
@@ -259,7 +259,7 @@ def get_matches(teamCategory: Optional[str] = None):
 
 @app.get("/countries")
 def get_countries(teamCategory: Optional[str] = None):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     c = conn.cursor()
 
     if teamCategory:
@@ -273,7 +273,7 @@ def get_countries(teamCategory: Optional[str] = None):
 
 @app.get("/tournaments")
 def get_tournaments(teamCategory: Optional[str] = None):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
 
@@ -304,7 +304,7 @@ def pitch_map_comparison(payload: PitchMapPayload):
 def get_tactical_matchups(payload: TacticalMatchupPayload):
     print("📨 Tactical matchup request received:", payload.dict())
 
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -454,7 +454,7 @@ def simulate_match(payload: SimulateMatchPayload):
     import random
     from collections import defaultdict
 
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -587,7 +587,7 @@ def simulate_match(payload: SimulateMatchPayload):
         return score, wickets, over_data
 
     # Setup
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -658,7 +658,7 @@ def simulate_match(payload: SimulateMatchPayload):
 
 @app.get("/team-players")
 def get_players_for_team(country_name: str, team_category: Optional[str] = None):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
     if team_category:
         cursor.execute("""
@@ -682,7 +682,7 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
 
 @app.get("/players")
 def get_players_by_team_category(team_category: str):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -701,7 +701,7 @@ def get_players_by_team_category(team_category: str):
 def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
     import sqlite3
 
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1000,7 +1000,7 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
 
 @app.post("/player-bowling-analysis")
 def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1299,7 +1299,7 @@ def player_trend_analysis(payload: TrendAnalysisPayload):
     print(f"👤 Player ID: {payload.player_id}")
     print(f"🏆 Tournaments: {payload.tournaments}")
     print(f"📂 Team Category: {payload.team_category}")
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1450,7 +1450,7 @@ def player_trend_analysis(payload: TrendAnalysisPayload):
 @app.post("/player-bowling-trend-analysis")
 def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
     print("📥 Received Bowling Trend Payload:", payload.dict())
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1632,7 +1632,7 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
 
 @app.post("/match-scorecard")
 def get_match_scorecard(payload: MatchScorecardPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1915,7 +1915,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
 
 @app.get("/match-list")
 def get_matches(team_category: str, tournament: str):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1938,7 +1938,7 @@ def get_match_momentum(payload: MatchPressurePayload):
     match_id = payload.match_id
     print(f"📥 Generating momentum for match_id = {match_id}")
 
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -1997,7 +1997,7 @@ def get_match_momentum(payload: MatchPressurePayload):
 
 @app.post("/match-partnerships")
 def get_match_partnerships(payload: MatchPartnershipsPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -2085,7 +2085,7 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
 
 @app.post("/player-detailed-batting")
 def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -2245,7 +2245,7 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
 
 @app.post("/player-intent-summary")
 def get_player_intent_summary(payload: PlayerIntentSummaryPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -2376,7 +2376,7 @@ def get_player_intent_summary(payload: PlayerIntentSummaryPayload):
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     c = conn.cursor()
 
     # ✅ Get country ID
@@ -2873,7 +2873,7 @@ def fetch_top_bottom_players(conn, match_ids):
 
 def get_pressure_analysis(payload: PressurePayload):
     print("\U0001F680 Running get_pressure_analysis")
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
 
     team_names = [payload.country1, payload.country2]
@@ -2932,7 +2932,7 @@ def get_pressure_analysis(payload: PressurePayload):
 
 def get_wagon_wheel_data(payload: WagonWheelPayload):
     import sqlite3
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
 
     # ✅ Get team IDs
@@ -3081,7 +3081,7 @@ def get_wagon_wheel_data(payload: WagonWheelPayload):
     return result
 
 def get_pitch_map_data(payload: PitchMapPayload):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     cursor = conn.cursor()
 
     # ✅ Resolve team IDs
@@ -3196,7 +3196,7 @@ def get_pitch_map_data(payload: PitchMapPayload):
     return result
 
 def get_individual_wagon_wheel_data(player_id, batting_team, tournament_ids):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
@@ -3224,7 +3224,7 @@ def get_individual_wagon_wheel_data(player_id, batting_team, tournament_ids):
     return [dict(row) for row in cursor.fetchall()]
 
 def get_individual_pitch_map_data(player_id, bowling_team, tournament_ids):
-    conn = sqlite3.connect("C:/Users/Danielle/Desktop/Cricket Analysis Program/cricket_analysis.db")
+    conn = sqlite3.connect("cricket_analysis.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 

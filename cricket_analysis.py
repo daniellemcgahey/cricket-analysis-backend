@@ -1733,7 +1733,6 @@ class BallByBallInterface:
         #print("✅ Non-striker:", self.match_data.non_striker)
         self.window.after(200, lambda: self._start_new_partnership({'dismissed_player_id': None}, opening=True))
 
-
     def create_center_input_panel(self, parent):
         """Center panel: All input controls including shot details"""
         center_panel = ttk.Frame(parent)
@@ -2292,7 +2291,6 @@ class BallByBallInterface:
     def update_blind_turn_labels(self):
         self.batter_blind_turn_label.config(text=f"{self.get_player_name(self.match_data.striker)} Blind Turn:")
         self.non_striker_blind_turn_label.config(text=f"{self.get_player_name(self.match_data.non_striker)} Blind Turn:")
-
 
     def record_pitch_location(self, event):
         """Record normalized coordinates with batter's end at top"""
@@ -3230,7 +3228,7 @@ class BallByBallInterface:
         # Handle dismissal data
         if ball_data['dismissal']:
             # Show dismissal dialog first
-            self.handle_dismissal()
+            self.handle_dismissal(ball_data)
             # Assign dismissal data
             ball_data['dismissed_player_id'] = self.dismissed_batter.get()
             ball_data['dismissal_type'] = self.dismissal_combo.get()
@@ -3666,7 +3664,7 @@ class BallByBallInterface:
         messagebox.showinfo("Match Over", f"{winner} wins the match in Super Over Round {self.match_data.super_over_round}!")
         #print(f"🏏 Super Over Result: {score_a} vs {score_b} → Winner: {winner}")
 
-    def handle_dismissal(self):
+    def handle_dismissal(self, current_ball):
         # Create dismissal selection window
         dismiss_window = ttkb.Toplevel(self.window)
         dismiss_window.title("Select Dismissed Batter")
@@ -3687,7 +3685,7 @@ class BallByBallInterface:
                     value=self.match_data.non_striker).pack(anchor=tk.W)
         
         ttkb.Button(dismiss_window, text="Confirm Dismissal", 
-                command=lambda: self.process_dismissal(dismiss_window),
+                command=lambda: self.process_dismissal(dismiss_window, current_ball),
                 bootstyle=DANGER).pack(pady=10) 
 
     def calculate_bpi(self, ball_events, current_ball):
@@ -4006,7 +4004,7 @@ class BallByBallInterface:
         innings = current_ball.get("innings", 1)
         current_rr = current_ball.get("current_run_rate", 0)
         required_rr = current_ball.get("required_run_rate", 0)
-        expected_rr = 7.5  # You can adjust this baseline for 1st innings
+        expected_rr = 6  # You can adjust this baseline for 1st innings
         #print(f"[DEBUG] Innings: {innings}, Required RR: {required_rr}, Current RR: {current_rr}")
 
         if innings == 2 and required_rr > 0:
@@ -4385,13 +4383,22 @@ class BallByBallInterface:
         conn.close()
         return result[0] if result and result[0] else None
     
-    def process_dismissal(self, window):
+    def process_dismissal(self, window, current_ball):
         window.destroy()
         dismissed_id = self.dismissed_batter.get()
 
         # Update match data
         self.match_data.wickets += 1
-        self.match_data.bowlers[self.match_data.current_bowler]['wickets'] += 1
+
+        # Only credit bowler if it’s a valid dismissal
+        bowler_credit_dismissals = {
+            'bowled', 'caught', 'lbw', 'stumped', 'hit wicket', 'hit the ball twice'
+        }
+        dismissal_type = (current_ball.get("dismissal_type") or "").lower()
+
+        if dismissal_type in bowler_credit_dismissals:
+            self.match_data.bowlers[self.match_data.current_bowler]['wickets'] += 1
+            
         self.match_data.batters[dismissed_id]['status'] = 'out'
         self.match_data.dismissed_players.add(dismissed_id)
 

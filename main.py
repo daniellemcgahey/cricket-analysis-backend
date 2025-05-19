@@ -2747,7 +2747,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
             SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END),
             SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END),
             SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END),
-            AVE(be.batting_intent_score)
+            AVG(be.batting_intent_score)
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE {global_batting_conditions}

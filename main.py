@@ -2640,7 +2640,9 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     if not tournament_ids:
         return defaultdict(lambda: defaultdict(float))
 
-    # ✅ Get matches for that country in those tournaments and team names matching the selected category
+    # ✅ Get matches for that country in those tournaments and matching the team category
+    team_category_likes = [f"%{team_category}%", f"{team_category}%"]
+
     c.execute(f"""
         SELECT m.match_id
         FROM matches m
@@ -2648,11 +2650,18 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         JOIN countries c2 ON m.team_b = c2.country_id
         WHERE m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})
         AND (m.team_a = ? OR m.team_b = ?)
-        AND (c1.country_name LIKE ? OR c2.country_name LIKE ?)
-    """, tournament_ids + [country_id, country_id, f"%{team_category}", f"%{team_category}"])
+        AND (
+            c1.country_name LIKE ? OR c1.country_name LIKE ?
+            OR c2.country_name LIKE ? OR c2.country_name LIKE ?
+        )
+    """, tournament_ids + [country_id, country_id] + team_category_likes * 2)
+
     match_ids = [row[0] for row in c.fetchall()]
+
     if not match_ids:
+        print("❌ No matches found for country ID", country_id, "with teamCategory", team_category)
         return defaultdict(lambda: defaultdict(float))
+
 
     # Bowler filters
     bowler_type_conditions = {
@@ -3138,30 +3147,39 @@ def get_pressure_analysis(payload: PressurePayload):
         conn.close()
         return {"error": "No matching tournaments found."}
 
-    # ✅ Get match IDs with teamCategory filtering
+    # ✅ Get match IDs with teamCategory and team name filtering
     if payload.allMatchesSelected:
+        team_category_likes = [f"%{payload.teamCategory}%", f"{payload.teamCategory}%"]
+
         cursor.execute(f"""
             SELECT m.match_id
             FROM matches m
             JOIN countries c1 ON m.team_a = c1.country_id
             JOIN countries c2 ON m.team_b = c2.country_id
             WHERE m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})
-              AND (
-                c1.country_name LIKE ?
-                OR c2.country_name LIKE ?
-              )
-              AND (
+            AND (
+                c1.country_name LIKE ? OR c1.country_name LIKE ?
+                OR c2.country_name LIKE ? OR c2.country_name LIKE ?
+            )
+            AND (
                 c1.country_name IN ({','.join(['?'] * len(team_names))})
                 OR c2.country_name IN ({','.join(['?'] * len(team_names))})
-              )
-        """, tournament_ids + [f"%{payload.teamCategory}", f"%{payload.teamCategory}"] + team_names * 2)
+            )
+        """, (
+            tournament_ids +
+            team_category_likes * 2 +  # Applies to both c1 and c2
+            team_names * 2             # Applies to both c1 and c2
+        ))
+
         match_ids = [row[0] for row in cursor.fetchall()]
     else:
         match_ids = payload.selectedMatches
 
     if not match_ids:
+        print("❌ No matching matches found — check tournament/team name/category filters")
         conn.close()
         return {"error": "No matching matches found."}
+
 
     # ✅ Fetch pressure data using country names
     batting_pressure, bowling_pressure = fetch_over_pressure(conn, team_names, match_ids, payload.selectedPhases)
@@ -3366,25 +3384,32 @@ def get_pitch_map_data(payload: PitchMapPayload):
 
     # ✅ Resolve match IDs
     if payload.allMatchesSelected:
+        team_category_likes = [f"%{payload.teamCategory}%", f"{payload.teamCategory}%"]
+
         cursor.execute(f"""
             SELECT m.match_id
             FROM matches m
             JOIN countries c1 ON m.team_a = c1.country_id
             JOIN countries c2 ON m.team_b = c2.country_id
             WHERE m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})
-              AND (
-                c1.country_name LIKE ?
-                OR c2.country_name LIKE ?
-              )
-              AND (m.team_a IN (?, ?) OR m.team_b IN (?, ?))
-        """, tournament_ids + [f"%{payload.teamCategory}", f"%{payload.teamCategory}"] + list(team_map.values()) * 2)
+            AND (
+                c1.country_name LIKE ? OR c1.country_name LIKE ?
+                OR c2.country_name LIKE ? OR c2.country_name LIKE ?
+            )
+            AND (
+                m.team_a IN (?, ?) OR m.team_b IN (?, ?)
+            )
+        """, tournament_ids + team_category_likes * 2 + list(team_map.values()) * 2)
+
         match_ids = [row[0] for row in cursor.fetchall()]
     else:
         match_ids = payload.selectedMatches
 
     if not match_ids:
+        print(f"❌ No matches found for countries: {list(team_map.keys())}, category: {payload.teamCategory}, tournaments: {payload.tournaments}")
         conn.close()
         return {"error": "No matches found."}
+
 
     # ✅ Phase filter
     phase_map = {

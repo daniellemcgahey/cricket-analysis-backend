@@ -2746,7 +2746,8 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
             SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END),
             SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END),
             SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END)
+            SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END),
+            AVE(be.batting_intent_score)
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE {global_batting_conditions}
@@ -2779,6 +2780,9 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
             stats['batting']['Attacking Shot %'] = round(((batting_data[10] / total_intent) * 100), 2)
             stats['batting']['Defensive Shot %'] = round(((batting_data[11] / total_intent) * 100), 2)
             stats['batting']['Rotation Shot %'] = round(((batting_data[12] / total_intent) * 100), 2)
+        # batting_data[13] = AVG(batting_intent_score)
+        if batting_data[13] is not None:
+            stats['batting']['Avg Intent Score'] = round(batting_data[13], 2)
 
 
 

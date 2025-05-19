@@ -1046,7 +1046,6 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         "wagon_wheel": wagon_wheel_data
     }
 
-
 @app.post("/player-bowling-analysis")
 def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3209,8 +3208,13 @@ def get_wagon_wheel_data(payload: WagonWheelPayload):
         conn.close()
         return {"error": "No tournaments found."}
 
-    # ✅ Get match IDs with teamCategory filtering
+    # ✅ Get match IDs with enhanced teamCategory filtering
     if payload.allMatchesSelected:
+        country_like_1 = f"%{payload.teamCategory}%"  # Handles names like "Training 1 Women"
+        country_like_2 = f"{payload.teamCategory}%"   # Handles names like "TrainingWomen" or "Training - Squad A"
+
+        country_filters = [country_like_1, country_like_2, country_like_1, country_like_2]
+
         cursor.execute(f"""
             SELECT m.match_id
             FROM matches m
@@ -3218,18 +3222,21 @@ def get_wagon_wheel_data(payload: WagonWheelPayload):
             JOIN countries c2 ON m.team_b = c2.country_id
             WHERE m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})
             AND (
-                c1.country_name LIKE ?
-                OR c2.country_name LIKE ?
+                c1.country_name LIKE ? OR c1.country_name LIKE ? OR
+                c2.country_name LIKE ? OR c2.country_name LIKE ?
             )
             AND (m.team_a IN (?, ?) OR m.team_b IN (?, ?))
-        """, tournament_ids + [f"% {payload.teamCategory}", f"% {payload.teamCategory}"] + list(team_map.values()) * 2)
+        """, tournament_ids + country_filters + list(team_map.values()) * 2)
+
         match_ids = [row[0] for row in cursor.fetchall()]
     else:
         match_ids = payload.selectedMatches
 
     if not match_ids:
+        print("❌ No matches found — likely teamCategory mismatch or tournament mismatch")
         conn.close()
         return {"error": "No matches found."}
+
 
     # ✅ Phase filter
     phase_map = {

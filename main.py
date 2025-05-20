@@ -105,9 +105,12 @@ class PlayerBattingAnalysisPayload(BaseModel):
     lengths: Optional[List[str]] = None
 
 class PlayerBowlingAnalysisPayload(BaseModel):
-    player_id: int
-    tournaments: Optional[List[str]] = []
+    player_ids: List[int]
     team_category: str
+    tournaments: List[str]
+    bowling_arm: List[str]
+    bowling_style: List[str]
+    lengths: List[str]
 
 class TrendAnalysisPayload(BaseModel):
     player_id: int
@@ -1067,7 +1070,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
             tournament_filter = f" AND m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})"
             tournament_params = tournament_ids
 
-    cursor.execute("SELECT country_id FROM players WHERE player_id = ?", (payload.player_id,))
+    cursor.execute("SELECT country_id FROM players WHERE player_id = ?", (payload.player_ids[0],))
     country_row = cursor.fetchone()
     if not country_row:
         return {"error": "Country not found for player."}
@@ -1099,11 +1102,11 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE be.bowler_id = ?
+        WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
         AND i.bowling_team = ?
         {tournament_filter}
         GROUP BY t.tournament_name
-    """, [payload.player_id, selected_country_name] + tournament_params)
+    """, [payload.player_ids, selected_country_name] + tournament_params)
 
     raw_stats = cursor.fetchall()
     print("📊 Raw Overall Bowling Results:")
@@ -1122,7 +1125,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             JOIN tournaments t ON m.tournament_id = t.tournament_id
-            WHERE be.bowler_id = ?
+            WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
             AND i.bowling_team = ?
             {tournament_filter}
             GROUP BY be.innings_id
@@ -1142,7 +1145,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         )
 
         SELECT * FROM best_bowling
-    """, [payload.player_id, selected_country_name] + tournament_params)
+    """, [payload.player_ids, selected_country_name] + tournament_params)
 
     best_figures_raw = cursor.fetchall()
     print("🎯 Best Bowling Figures Raw:")
@@ -1203,7 +1206,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             JOIN tournaments t ON m.tournament_id = t.tournament_id
-            WHERE be.bowler_id = ?
+            WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
             AND i.bowling_team = ?
             {tournament_filter}
             GROUP BY t.tournament_name, be.innings_id
@@ -1213,7 +1216,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         WHERE rank = 1
         ORDER BY wickets DESC, runs_conceded ASC
         LIMIT 5
-    """, [payload.player_id, selected_country_name] + tournament_params)
+    """, [payload.player_ids, selected_country_name] + tournament_params)
 
 
     best_performances = []
@@ -1247,8 +1250,9 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.bowler_id = ? AND i.bowling_team = ? {tournament_filter}
-    """, [payload.player_id, selected_country_name] + tournament_params)
+        WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
+        AND i.bowling_team = ? {tournament_filter}
+    """, [payload.player_ids, selected_country_name] + tournament_params)
 
     row = cursor.fetchone()
     phase_stats = {
@@ -1262,10 +1266,10 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
     cursor.execute(f"""
         SELECT innings_id, over_number, bowler_id
         FROM ball_events
-        WHERE bowler_id = ?
+        WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
         GROUP BY innings_id, over_number, bowler_id
         ORDER BY innings_id, over_number
-    """, (payload.player_id,))
+    """, (payload.player_ids,))
     overs = cursor.fetchall()
 
     spells = []
@@ -1338,7 +1342,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         "best": best_performances,
         "phase": phase_stats,
         "by_spell_position": by_spell_position,
-        "pitch_map": get_individual_pitch_map_data(payload.player_id, selected_country_name, tournament_ids)
+
     }
 
 @app.post("/player-trend-analysis")

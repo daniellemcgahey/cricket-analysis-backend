@@ -389,6 +389,8 @@ def initialize_database():
                 bowling_order INTEGER DEFAULT 0,
                 batter_blind_turn INTEGER DEFAULT 0,
                 non_striker_blind_turn INTEGER DEFAULT 0,
+                over_the_wicket INTEGER DEFAULT 0,
+                around_the_wicket INTEGER DEFAULT 0,
                 is_powerplay INTEGER DEFAULT 0,
                 is_middle_overs INTEGER DEFAULT 0,
                 is_death_overs INTEGER DEFAULT 0,
@@ -1422,6 +1424,7 @@ class MatchData:
         self.super_over_scores = []   # list of tuples: [(TeamA_runs, TeamB_runs), ...]
         self.was_rain_delayed = False
         self.adjusted_target = match_data.get('adjusted_target')
+        self.over_var = tk.IntVar(value=1)
         
 
         self.batting_bpi = 0.0
@@ -1873,6 +1876,30 @@ class BallByBallInterface:
         ], state='readonly')
         self.delivery_combo.pack(fill=tk.X, pady=2)
 
+        # Over/Around the Wicket toggles
+        angle_frame = ttk.Frame(bowling_frame)
+        angle_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(angle_frame, text="Bowling Angle:").grid(row=0, column=0, sticky=tk.W)
+
+        self.over_var = tk.IntVar(value=1)
+        self.around_var = tk.IntVar(value=0)
+
+        def toggle_over():
+            if self.over_var.get():
+                self.around_var.set(0)
+            else:
+                self.around_var.set(1)
+
+        def toggle_around():
+            if self.around_var.get():
+                self.over_var.set(0)
+            else:
+                self.over_var.set(1)
+
+        ttk.Checkbutton(angle_frame, text="Over the Wicket", variable=self.over_var, command=toggle_over).grid(row=0, column=1, padx=10)
+        ttk.Checkbutton(angle_frame, text="Around the Wicket", variable=self.around_var, command=toggle_around).grid(row=0, column=2, padx=10)
+
 
         # Fielding Section
         fielding_frame = ttk.LabelFrame(self.input_frame, text="Fielding", padding=5)
@@ -2017,7 +2044,7 @@ class BallByBallInterface:
         # Batters Treeview Setup
         self.batters_tree = ttk.Treeview(batters_frame, 
                                     columns=('Name', 'Runs', 'Balls', '4s', '6s', 'SR', 'Status'), 
-                                    show='headings', height=4)
+                                    show='headings', height=3)
         
         # Configure batters columns and headings
         self.batters_tree.heading('Name', text='Name')
@@ -2941,6 +2968,9 @@ class BallByBallInterface:
             self.set_submit_enabled(False)
             popup.destroy()
 
+        # ✅ ADD THIS BUTTON BELOW — OUTSIDE the confirm() definition
+        ttkb.Button(popup, text="Confirm", command=confirm, bootstyle=SUCCESS).pack(pady=10)
+     
     def clear_fielding_inputs(self):
         """Clear all fielding-related inputs"""
         # Clear fielder selection
@@ -2992,7 +3022,9 @@ class BallByBallInterface:
                 'delivery_type': self.delivery_combo.get(),
                 'fielding_events': fielding_events,
                 'fielding_style': self.fielding_style_combo.get(),
-                'expected_runs': int(self.expected_runs_var.get() or 0)
+                'expected_runs': int(self.expected_runs_var.get() or 0),
+                'over_the_wicket': self.over_var.get(),
+                'around_the_wicket': self.around_var.get()
             }
             self.process_ball(ball_data)
             self.clear_inputs()
@@ -3023,7 +3055,9 @@ class BallByBallInterface:
             'delivery_type': self.delivery_combo.get(),
             'fielding_events': fielding_events,
             'fielding_style': self.fielding_style_combo.get(),
-            'expected_runs': int(self.expected_runs_var.get() or 0)
+            'expected_runs': int(self.expected_runs_var.get() or 0),
+            'over_the_wicket': self.over_var.get(),
+            'around_the_wicket': self.around_var.get()
         }
 
 
@@ -4967,8 +5001,12 @@ class BallByBallInterface:
         self.expected_manually_changed = False
         self.batter_blind_turn_var.set(False)
         self.non_striker_blind_turn_var.set(False)
-        
 
+        
+        # Reset fielding checkboxes
+        for var in self.fielding_vars.values():
+            var.set(False)
+            
         # Clear extras
         for var in self.extras_vars.values():
             var.set(0)
@@ -5104,6 +5142,8 @@ class BallByBallInterface:
                 int(ball_data.get('bowling_order', 0)),
                 batter_blind_turn,
                 non_striker_blind_turn,
+                int(ball_data.get('over_the_wicket', 0)),
+                int(ball_data.get('around_the_wicket', 0)),
                 int(ball_data.get('is_powerplay', 0)),
                 int(ball_data.get('is_middle_overs', 0)),
                 int(ball_data.get('is_death_overs', 0))
@@ -5119,8 +5159,8 @@ class BallByBallInterface:
                 edged, shot_selection, dot_balls, wides,
                 no_balls, free_hit, byes, leg_byes, penalty_runs,
                 ball_missed, clean_hit, expected_runs, expected_wicket, batting_bpi, bowling_bpi, batting_intent_score,
-                batting_position, bowling_order, batter_blind_turn, non_striker_blind_turn, is_powerplay, is_middle_overs, is_death_overs
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', params)
+                batting_position, bowling_order, batter_blind_turn, non_striker_blind_turn, over_the_wicket, around_the_wicket, is_powerplay, is_middle_overs, is_death_overs
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', params)
 
             ball_id = c.lastrowid
 

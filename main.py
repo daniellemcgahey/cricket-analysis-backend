@@ -6,7 +6,6 @@ from typing import List, Dict, Any, Optional
 from collections import defaultdict, Counter
 import os
 import sqlite3
-from fpdf import FPDF
 from datetime import datetime
 
 
@@ -165,10 +164,6 @@ class PlayerDetailedBowlingPayload(BaseModel):
     batting_hand: List[str] = []
     bowling_style: List[str] = []
     lengths: Optional[List[str]] = None
-
-class PlayerReportRequest(BaseModel):
-    player_id: int
-    match_id: int
 
 
 @app.post("/compare")
@@ -2630,142 +2625,6 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
         "wagon_wheel": wagon_wheel,
         "full_balls": full_balls
     }
-
-@app.post("/generate-player-report")
-def generate_player_report(payload: PlayerReportRequest):
-    player_id = payload.player_id
-    match_id = payload.match_id
-
-    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-
-    # === Match & Player Info ===
-    c.execute("""
-        SELECT p.name, c1.country_name AS team, c2.country_name AS opponent, t.tournament_name, m.match_date
-        FROM players p
-        JOIN ball_events be ON be.batter_id = p.player_id OR be.bowler_id = p.player_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        JOIN countries c1 ON i.batting_team = c1.country_id OR i.bowling_team = c1.country_id
-        JOIN countries c2 ON (m.team_a = c2.country_id OR m.team_b = c2.country_id) AND c2.country_id != c1.country_id
-        JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE p.player_id = ? AND m.match_id = ?
-        LIMIT 1
-    """, (player_id, match_id))
-    info = c.fetchone()
-    if not info:
-        return {"error": "No player or match data found."}
-
-    player_name = info["name"]
-    team = info["team"]
-    opponent = info["opponent"]
-    tournament = info["tournament_name"]
-    match_date = info["match_date"]
-
-    # === Create PDF ===
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 14)
-
-    # 🧾 Page 1 Header
-    pdf.cell(0, 10, f"Player Report: {player_name}", ln=True, align="C")
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 10, f"Tournament: {tournament}", ln=True)
-    pdf.cell(0, 10, f"Opponent: {opponent}", ln=True)
-    pdf.cell(0, 10, f"Date: {match_date}", ln=True)
-
-    pdf.ln(10)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 10, "Match Summary", ln=True)
-    pdf.set_font("Arial", "", 11)
-
-    # === Batting Summary ===
-    c.execute("""
-        SELECT 
-            COUNT(*) AS balls, SUM(be.runs) AS runs,
-            SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
-            SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
-            SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
-            SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
-            AVG(be.batting_intent_score) AS avg_intent
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE be.batter_id = ? AND i.match_id = ?
-    """, (player_id, match_id))
-    bat = c.fetchone()
-    if bat and bat["balls"]:
-        sr = (bat["runs"] / bat["balls"]) * 100
-        scoring_pct = ((bat["balls"] - (bat["balls"] - bat["ones"] - bat["twos"] - bat["fours"] - bat["sixes"])) / bat["balls"]) * 100
-        pdf.cell(0, 8, f"Batting: {bat['runs']} runs from {bat['balls']} balls, 1s: {bat['ones']}, 2s: {bat['twos']}, 4s: {bat['fours']}, 6s: {bat['sixes']}", ln=True)
-        pdf.cell(0, 8, f"        SR: {sr:.2f}, Scoring %: {scoring_pct:.1f}%, Avg Intent: {bat['avg_intent']:.2f}", ln=True)
-    else:
-        pdf.cell(0, 8, "Did not bat in this game", ln=True)
-
-    # === Bowling Summary ===
-    c.execute("""
-        SELECT COUNT(*) AS balls, SUM(be.runs) AS runs, 
-               SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
-               SUM(be.dot_balls) AS dots,
-               SUM(be.expected_runs) AS exp_runs,
-               SUM(be.expected_wicket) AS exp_wkts
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE be.bowler_id = ? AND i.match_id = ?
-    """, (player_id, match_id))
-    bowl = c.fetchone()
-    if bowl and bowl["balls"]:
-        overs = f"{bowl['balls'] // 6}.{bowl['balls'] % 6}"
-        econ = bowl["runs"] / (bowl["balls"] / 6)
-        sr = bowl["balls"] / bowl["wickets"] if bowl["wickets"] else 0
-        real_econ = bowl["exp_runs"] / (bowl["balls"] / 6) if bowl["balls"] else 0
-        real_sr = bowl["balls"] / (bowl["wickets"] + bowl["exp_wkts"]) if (bowl["wickets"] + bowl["exp_wkts"]) > 0 else 0
-        pdf.cell(0, 8, f"Bowling: {overs} overs, {bowl['dots']} dots, {bowl['runs']} runs, {bowl['wickets']} wickets", ln=True)
-        pdf.cell(0, 8, f"         Econ: {econ:.2f}, SR: {sr:.2f}, Real Econ: {real_econ:.2f}, Real SR: {real_sr:.2f}", ln=True)
-    else:
-        pdf.cell(0, 8, "Did not bowl in this game", ln=True)
-
-    # === Fielding Summary ===
-    c.execute("""
-        SELECT 
-            COUNT(*) AS total_balls,
-            SUM(CASE WHEN be.field_event = 'Clean Stop/Pick Up' THEN 1 ELSE 0 END) AS clean,
-            SUM(CASE WHEN be.field_event = 'Catch' THEN 1 ELSE 0 END) AS catches,
-            SUM(CASE WHEN be.field_event = 'Run Out' THEN 1 ELSE 0 END) AS runouts,
-            AVG(be.field_pressure) AS pressure
-        FROM ball_events be
-        WHERE be.fielder_id = ? AND be.match_id = ?
-    """, (player_id, match_id))
-    field = c.fetchone()
-    if field and field["total_balls"]:
-        clean_pct = (field["clean"] / field["total_balls"]) * 100
-        conversion = ((field["catches"] + field["runouts"]) / field["total_balls"]) * 100
-        pdf.cell(0, 8, f"Fielding: {field['total_balls']} balls fielded, Clean %: {clean_pct:.1f}%, Catches: {field['catches']}, Run Outs: {field['runouts']}", ln=True)
-        pdf.cell(0, 8, f"          Conversion %: {conversion:.1f}%, Pressure Score: {field['pressure']:.2f}", ln=True)
-    else:
-        pdf.cell(0, 8, "No fielding data available", ln=True)
-
-    # === Pressure Summary ===
-    c.execute("""
-        SELECT 
-            SUM(batting_bpi) AS bat_p,
-            SUM(bowling_bpi) AS bowl_p,
-            SUM(field_pressure) AS field_p
-        FROM ball_events
-        WHERE match_id = ? AND (batter_id = ? OR bowler_id = ? OR fielder_id = ?)
-    """, (match_id, player_id, player_id, player_id))
-    pressure = c.fetchone()
-    if pressure:
-        total = (pressure["bat_p"] or 0) + (pressure["bowl_p"] or 0) + (pressure["field_p"] or 0)
-        pdf.cell(0, 8, f"Pressure Impact: Batting {pressure['bat_p']:.2f}, Bowling {pressure['bowl_p']:.2f}, Fielding {pressure['field_p']:.2f}, Total: {total:.2f}", ln=True)
-
-    # === Save PDF ===
-    output_path = os.path.join(os.path.dirname(__file__), "reports", f"{player_name.replace(' ', '_')}_{match_id}.pdf")
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    pdf.output(output_path)
-
-    return {"status": "success", "report_path": output_path}
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category):

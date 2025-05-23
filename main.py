@@ -2648,25 +2648,32 @@ def match_report(match_id: int, player_id: int):
     return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
 
 
-@app.get("/team-match-report/{match_id}/{team_id}")
-def team_match_report(match_id: int, team_id: int):
+@app.get("/team-match-report/{match_id}/{team_id}/pdf")
+def team_match_report_pdf(match_id: int, team_id: int):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Fetch and prepare data
     match_summary = fetch_team_match_summary(cursor, match_id, team_id)
     innings_stats = fetch_team_innings_stats(cursor, match_id, team_id)
     kpis = calculate_kpis(cursor, match_id, team_id)
 
     conn.close()
 
-    return {
+    data = {
         "match_summary": match_summary,
         "innings_stats": innings_stats,
         "kpis": kpis
     }
+
+    pdf_buffer = generate_team_pdf_report(data)
+
+    headers = {
+        "Content-Disposition": f"attachment; filename=team_match_report_{match_id}_{team_id}.pdf"
+    }
+    return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3709,9 +3716,7 @@ def generate_pdf_report(data: dict):
     buffer.seek(0)
     return buffer
 
-
 def fetch_team_match_summary(cursor, match_id: int, team_id: int):
-    # Basic match info with team names and result
     cursor.execute("""
         SELECT 
             m.match_date,
@@ -3719,7 +3724,9 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
             c2.country_name AS team_b,
             m.toss_winner,
             m.match_result,
-            m.result_margin
+            m.result_margin,
+            m.team_a as team_a_id,
+            m.team_b as team_b_id
         FROM matches m
         JOIN countries c1 ON m.team_a = c1.country_id
         JOIN countries c2 ON m.team_b = c2.country_id
@@ -3729,15 +3736,10 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    # Identify opponent team name
-    team_a_id = row["team_a"]
-    team_b_id = row["team_b"]
-    team_name = None
-    opponent_name = None
-    if team_id == row["team_a"]:
+    if team_id == row["team_a_id"]:
         team_name = row["team_a"]
         opponent_name = row["team_b"]
-    elif team_id == row["team_b"]:
+    elif team_id == row["team_b_id"]:
         team_name = row["team_b"]
         opponent_name = row["team_a"]
     else:
@@ -3753,7 +3755,6 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
     }
 
 def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
-    # Aggregate batting/bowling stats for team innings
     cursor.execute("""
         SELECT 
             i.innings_id,
@@ -3781,11 +3782,9 @@ def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
     return results
 
 def calculate_kpis(cursor, match_id: int, team_id: int):
-    # Example KPI definitions and calculations (customize for your needs)
-
     kpis = []
 
-    # 1. Runs in powerplay target: 40 runs in first 6 overs
+    # Runs in Powerplay (target 40 runs in first 6 overs)
     cursor.execute("""
         SELECT SUM(be.runs) AS runs_powerplay
         FROM ball_events be
@@ -3800,7 +3799,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": runs_powerplay >= 40
     })
 
-    # 2. Wickets in death overs (last 4 overs): target at least 2
+    # Wickets in Death Overs (target at least 2)
     cursor.execute("""
         SELECT COUNT(*) AS wickets_death
         FROM ball_events be
@@ -3816,7 +3815,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": wickets_death >= 2
     })
 
-    # 3. Extras conceded (target max 10 extras)
+    # Extras conceded (target max 10)
     cursor.execute("""
         SELECT SUM(be.extras) AS extras_conceded
         FROM ball_events be
@@ -3831,7 +3830,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": extras <= 10
     })
 
-    # 4. Dot ball % in middle overs (target >= 60%)
+    # Dot ball % in middle overs (target >= 60%)
     cursor.execute("""
         SELECT 
             COUNT(*) AS middle_balls,
@@ -3851,7 +3850,53 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
 
     return kpis
 
+def generate_team_pdf_report(data: dict):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
 
+    # Title
+    elements.append(Paragraph(f"Team Match Report: {data['match_summary']['team_name']}", styles['Title']))
+    elements.append(Spacer(1, 12))
+
+    # Match Summary
+    ms = data['match_summary']
+    elements.append(Paragraph(f"Match Date: {ms['match_date']}", styles['Normal']))
+    elements.append(Paragraph(f"Opponent: {ms['opponent_name']}", styles['Normal']))
+    elements.append(Paragraph(f"Toss Winner: {ms['toss_winner']}", styles['Normal']))
+    elements.append(Paragraph(f"Result: {ms['result']} ({ms['result_margin']})", styles['Normal']))
+    elements.append(Spacer(1, 20))
+
+    # Innings Stats
+    elements.append(Paragraph("Innings Statistics", styles['Heading2']))
+    innings_data = [["Innings ID", "Runs", "Wickets", "Balls", "Overs"]]
+    for inn in data['innings_stats']:
+        innings_data.append([
+            str(inn["innings_id"]),
+            str(inn["runs"]),
+            str(inn["wickets"]),
+            str(inn["balls"]),
+            str(inn["overs"])
+        ])
+    elements.append(Table(innings_data))
+    elements.append(Spacer(1, 20))
+
+    # KPIs
+    elements.append(Paragraph("Key Performance Indicators (KPIs)", styles['Heading2']))
+    kpi_data = [["KPI", "Target", "Actual", "Met"]]
+    for kpi in data['kpis']:
+        kpi_data.append([
+            kpi["name"],
+            str(kpi["target"]),
+            str(kpi["actual"]),
+            "Yes" if kpi["met"] else "No"
+        ])
+    elements.append(Table(kpi_data))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
 
 
 if __name__ == "__main__":

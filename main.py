@@ -3766,6 +3766,13 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
     }
 
 def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
+    # Resolve country name
+    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (team_id,))
+    row = cursor.fetchone()
+    if not row:
+        return []
+    team_name = row["country_name"]
+
     cursor.execute("""
         SELECT 
             i.innings_id,
@@ -3778,7 +3785,8 @@ def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
         WHERE i.match_id = ? AND i.batting_team = ?
         GROUP BY i.innings_id
         ORDER BY i.innings_id ASC
-    """, (match_id, team_id))
+    """, (match_id, team_name))
+    
     innings = cursor.fetchall()
     results = []
     for inn in innings:
@@ -3792,16 +3800,24 @@ def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
         })
     return results
 
+
 def calculate_kpis(cursor, match_id: int, team_id: int):
+    # Resolve country name
+    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (team_id,))
+    row = cursor.fetchone()
+    if not row:
+        return []
+    team_name = row["country_name"]
+
     kpis = []
 
-    # Runs in Powerplay (target 40 runs in first 6 overs)
+    # 1. Runs in Powerplay (target 40 runs in first 6 overs)
     cursor.execute("""
         SELECT SUM(be.runs) AS runs_powerplay
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
-    """, (match_id, team_id))
+    """, (match_id, team_name))
     runs_powerplay = cursor.fetchone()["runs_powerplay"] or 0
     kpis.append({
         "name": "Runs in Powerplay",
@@ -3810,14 +3826,14 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": runs_powerplay >= 40
     })
 
-    # Wickets in Death Overs (target at least 2)
+    # 2. Wickets in Death Overs (target at least 2)
     cursor.execute("""
         SELECT COUNT(*) AS wickets_death
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_death_overs = 1
           AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
-    """, (match_id, team_id))
+    """, (match_id, team_name))
     wickets_death = cursor.fetchone()["wickets_death"] or 0
     kpis.append({
         "name": "Wickets in Death Overs",
@@ -3826,13 +3842,13 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": wickets_death >= 2
     })
 
-    # Extras conceded (target max 10)
+    # 3. Extras Conceded
     cursor.execute("""
         SELECT SUM(be.extras) AS extras_conceded
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ?
-    """, (match_id, team_id))
+    """, (match_id, team_name))
     extras = cursor.fetchone()["extras_conceded"] or 0
     kpis.append({
         "name": "Extras Conceded",
@@ -3841,7 +3857,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         "met": extras <= 10
     })
 
-    # Dot ball % in middle overs (target >= 60%)
+    # 4. Dot Ball % in Middle Overs
     cursor.execute("""
         SELECT 
             COUNT(*) AS middle_balls,
@@ -3849,7 +3865,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_middle_overs = 1
-    """, (match_id, team_id))
+    """, (match_id, team_name))
     row = cursor.fetchone()
     dot_percentage = (row["dot_balls_middle"] / row["middle_balls"] * 100) if row["middle_balls"] > 0 else 0
     kpis.append({
@@ -3860,6 +3876,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
     })
 
     return kpis
+
 
 def generate_team_pdf_report(data: dict):
     buffer = io.BytesIO()
@@ -3876,7 +3893,7 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph(f"Match Date: {ms['match_date']}", styles['Normal']))
     elements.append(Paragraph(f"Opponent: {ms['opponent_name']}", styles['Normal']))
     elements.append(Paragraph(f"Toss Winner: {ms['toss_winner']}", styles['Normal']))
-    elements.append(Paragraph(f"Result: {ms['result']} ({ms['result_margin']})", styles['Normal']))
+    elements.append(Paragraph(f"Result: {ms['result']}", styles['Normal']))
     elements.append(Spacer(1, 20))
 
     # Innings Stats

@@ -1112,7 +1112,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         AND i.bowling_team = ?
         {tournament_filter}
         GROUP BY t.tournament_name
-    """, [payload.player_ids, selected_country_name] + tournament_params)
+    """, payload.player_ids + [selected_country_name] + tournament_params)
 
     raw_stats = cursor.fetchall()
     print("📊 Raw Overall Bowling Results:")
@@ -1151,7 +1151,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         )
 
         SELECT * FROM best_bowling
-    """, [payload.player_ids, selected_country_name] + tournament_params)
+    """, payload.player_ids + [selected_country_name] + tournament_params)
 
     best_figures_raw = cursor.fetchall()
     print("🎯 Best Bowling Figures Raw:")
@@ -1222,7 +1222,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         WHERE rank = 1
         ORDER BY wickets DESC, runs_conceded ASC
         LIMIT 5
-    """, [payload.player_ids, selected_country_name] + tournament_params)
+    """, payload.player_ids + [selected_country_name] + tournament_params)
 
 
     best_performances = []
@@ -1258,7 +1258,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         JOIN matches m ON i.match_id = m.match_id
         WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
         AND i.bowling_team = ? {tournament_filter}
-    """, [payload.player_ids, selected_country_name] + tournament_params)
+    """, payload.player_ids + [selected_country_name] + tournament_params)
 
     row = cursor.fetchone()
     phase_stats = {

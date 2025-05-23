@@ -1275,7 +1275,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
         GROUP BY innings_id, over_number, bowler_id
         ORDER BY innings_id, over_number
-    """, (payload.player_ids,))
+    """, (payload.player_ids))
     overs = cursor.fetchall()
 
     spells = []

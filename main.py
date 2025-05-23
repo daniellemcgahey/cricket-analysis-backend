@@ -3734,8 +3734,8 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
             c1.country_name AS team_a,
             c2.country_name AS team_b,
             m.toss_winner,
-            m.match_result,
-            m.result_margin,
+            m.result,
+            m.margin,
             m.team_a as team_a_id,
             m.team_b as team_b_id
         FROM matches m

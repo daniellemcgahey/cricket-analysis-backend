@@ -1096,7 +1096,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
         SELECT 
             t.tournament_name,
             COUNT(DISTINCT i.innings_id) AS innings,
-            COUNT(*) AS balls,
+            SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 AND json_extract(be.extras, '$.no_balls') = 0 THEN 1 ELSE 0 END) AS balls,
             SUM(be.runs) AS runs,
             SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
             SUM(be.dot_balls) AS dots,
@@ -1196,7 +1196,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
                 be.innings_id,
                 SUM(be.runs) AS runs_conceded,
                 SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
-                COUNT(*) AS balls_bowled,
+                SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 AND json_extract(be.extras, '$.no_balls') = 0 THEN 1 ELSE 0 END) AS balls_bowled,
                 SUM(be.dot_balls) AS dots,
                 SUM(be.wides) AS wides,
                 SUM(be.no_balls) AS no_balls,

@@ -36,6 +36,7 @@ class ComparisonPayload(BaseModel):
     bowler_type: List[str]
     bowling_arm: List[str]
     teamCategory: str
+    selectedMatches: List[int]
 
 class CompareOverTournamentPayload(BaseModel):
     country: str
@@ -45,6 +46,7 @@ class CompareOverTournamentPayload(BaseModel):
     bowler_type: List[str]
     bowling_arm: List[str]
     teamCategory: str
+    selectedMatches: List[int]
 
 class PressurePayload(BaseModel):
     country1: str
@@ -175,7 +177,8 @@ def compare_countries(payload: ComparisonPayload):
         selected_phases=payload.selected_phases,
         bowler_type=payload.bowler_type,
         bowling_arm=payload.bowling_arm,
-        team_category=payload.teamCategory
+        team_category=payload.teamCategory,
+        selected_matches=payload.selectedMatches
     )
 
     country2_stats = get_country_stats(
@@ -185,7 +188,8 @@ def compare_countries(payload: ComparisonPayload):
     selected_phases=payload.selected_phases,
     bowler_type=payload.bowler_type,
     bowling_arm=payload.bowling_arm,
-    team_category=payload.teamCategory
+    team_category=payload.teamCategory,
+    selected_matches=payload.selectedMatches
     )
 
     return {
@@ -211,7 +215,8 @@ def compare_over_tournament(payload: CompareOverTournamentPayload):
             selected_phases=payload.selected_phases,
             bowler_type=payload.bowler_type,
             bowling_arm=payload.bowling_arm,
-            team_category=payload.teamCategory
+            team_category=payload.teamCategory,
+            selected_matches=payload.selectedMatches
         )
         result[tournament] = stats
 
@@ -2627,7 +2632,7 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
     }
 
 
-def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category):
+def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -2667,12 +2672,24 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         print("❌ No matches found for country ID", country_id, "with teamCategory", team_category)
         return defaultdict(lambda: defaultdict(float))
 
+    # Apply frontend match filter here if provided
+    if selected_matches:
+        filtered_match_ids = [m for m in match_ids if m in selected_matches]
+        if not filtered_match_ids:
+            print("❌ No matches after applying selectedMatches filter")
+            return defaultdict(lambda: defaultdict(float))
+        match_ids = filtered_match_ids
+
+    # Build the match filter for SQL using the filtered match_ids
+    match_filter = f"i.match_id IN ({','.join(['?'] * len(match_ids))})"
+
 
     # Bowler filters
     bowler_type_conditions = {
         "Pace": "p.bowling_style = 'Pace'",
         "Medium": "p.bowling_style = 'Medium'",
-        "Spin": "p.bowling_style = 'Spin'"
+        "Leg Spin": "p.bowling_style = 'Leg Spin'",
+        "Off Spin": "p.bowling_style = 'Off Spin'"
     }
     bowling_arm_conditions = {
         "Left": "p.bowling_arm = 'Left'",
@@ -2733,7 +2750,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         SELECT
             COUNT(DISTINCT be.batter_id),
             SUM(be.runs),
-            COUNT(*),
+            SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END),
             SUM(CASE 
                 WHEN be.runs = 0 
                 AND json_extract(be.extras, '$.wides') = 0
@@ -3108,6 +3125,10 @@ def fetch_top_bottom_players(conn, match_ids):
     for name, role, player_id, country_id, country_name, team_role, applied, relieved in players:
 
         net_impact = relieved - applied
+
+            # Flip sign for bowling players only
+        if team_role == "bowling":
+            net_impact = -net_impact
 
         # Role-specific
         impact_by_role[team_role].append({

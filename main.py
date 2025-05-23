@@ -3761,8 +3761,8 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
         "team_name": team_name,
         "opponent_name": opponent_name,
         "toss_winner": row["toss_winner"],
-        "result": row["match_result"],
-        "result_margin": row["result_margin"]
+        "result": row["result"],
+        "result_margin": row["margin"]
     }
 
 def fetch_team_innings_stats(cursor, match_id: int, team_id: int):

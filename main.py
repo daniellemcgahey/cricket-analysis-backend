@@ -3130,6 +3130,10 @@ def fetch_top_bottom_players(conn, match_ids):
         if team_role == "bowling":
             net_impact = -net_impact
 
+        # Flip sign for bowling players only
+        if team_role == "fielding":
+            net_impact = -net_impact
+
         # Role-specific
         impact_by_role[team_role].append({
             "player_name": name,

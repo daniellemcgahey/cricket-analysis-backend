@@ -2648,6 +2648,26 @@ def match_report(match_id: int, player_id: int):
     return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
 
 
+@app.get("/team-match-report/{match_id}/{team_id}")
+def team_match_report(match_id: int, team_id: int):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Fetch and prepare data
+    match_summary = fetch_team_match_summary(cursor, match_id, team_id)
+    innings_stats = fetch_team_innings_stats(cursor, match_id, team_id)
+    kpis = calculate_kpis(cursor, match_id, team_id)
+
+    conn.close()
+
+    return {
+        "match_summary": match_summary,
+        "innings_stats": innings_stats,
+        "kpis": kpis
+    }
+
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
@@ -3688,6 +3708,151 @@ def generate_pdf_report(data: dict):
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
+
+def fetch_team_match_summary(cursor, match_id: int, team_id: int):
+    # Basic match info with team names and result
+    cursor.execute("""
+        SELECT 
+            m.match_date,
+            c1.country_name AS team_a,
+            c2.country_name AS team_b,
+            m.toss_winner,
+            m.match_result,
+            m.result_margin
+        FROM matches m
+        JOIN countries c1 ON m.team_a = c1.country_id
+        JOIN countries c2 ON m.team_b = c2.country_id
+        WHERE m.match_id = ?
+    """, (match_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    # Identify opponent team name
+    team_a_id = row["team_a"]
+    team_b_id = row["team_b"]
+    team_name = None
+    opponent_name = None
+    if team_id == row["team_a"]:
+        team_name = row["team_a"]
+        opponent_name = row["team_b"]
+    elif team_id == row["team_b"]:
+        team_name = row["team_b"]
+        opponent_name = row["team_a"]
+    else:
+        raise HTTPException(status_code=400, detail="Team did not play in this match")
+
+    return {
+        "match_date": row["match_date"],
+        "team_name": team_name,
+        "opponent_name": opponent_name,
+        "toss_winner": row["toss_winner"],
+        "result": row["match_result"],
+        "result_margin": row["result_margin"]
+    }
+
+def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
+    # Aggregate batting/bowling stats for team innings
+    cursor.execute("""
+        SELECT 
+            i.innings_id,
+            i.batting_team,
+            SUM(be.runs) AS total_runs,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+            COUNT(*) AS balls_faced
+        FROM innings i
+        JOIN ball_events be ON i.innings_id = be.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ?
+        GROUP BY i.innings_id
+        ORDER BY i.innings_id ASC
+    """, (match_id, team_id))
+    innings = cursor.fetchall()
+    results = []
+    for inn in innings:
+        overs = inn["balls_faced"] // 6 + (inn["balls_faced"] % 6) / 10
+        results.append({
+            "innings_id": inn["innings_id"],
+            "runs": inn["total_runs"],
+            "wickets": inn["wickets"],
+            "balls": inn["balls_faced"],
+            "overs": round(overs, 1)
+        })
+    return results
+
+def calculate_kpis(cursor, match_id: int, team_id: int):
+    # Example KPI definitions and calculations (customize for your needs)
+
+    kpis = []
+
+    # 1. Runs in powerplay target: 40 runs in first 6 overs
+    cursor.execute("""
+        SELECT SUM(be.runs) AS runs_powerplay
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
+    """, (match_id, team_id))
+    runs_powerplay = cursor.fetchone()["runs_powerplay"] or 0
+    kpis.append({
+        "name": "Runs in Powerplay",
+        "target": 40,
+        "actual": runs_powerplay,
+        "met": runs_powerplay >= 40
+    })
+
+    # 2. Wickets in death overs (last 4 overs): target at least 2
+    cursor.execute("""
+        SELECT COUNT(*) AS wickets_death
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_death_overs = 1
+          AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
+    """, (match_id, team_id))
+    wickets_death = cursor.fetchone()["wickets_death"] or 0
+    kpis.append({
+        "name": "Wickets in Death Overs",
+        "target": 2,
+        "actual": wickets_death,
+        "met": wickets_death >= 2
+    })
+
+    # 3. Extras conceded (target max 10 extras)
+    cursor.execute("""
+        SELECT SUM(be.extras) AS extras_conceded
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, team_id))
+    extras = cursor.fetchone()["extras_conceded"] or 0
+    kpis.append({
+        "name": "Extras Conceded",
+        "target": 10,
+        "actual": extras,
+        "met": extras <= 10
+    })
+
+    # 4. Dot ball % in middle overs (target >= 60%)
+    cursor.execute("""
+        SELECT 
+            COUNT(*) AS middle_balls,
+            SUM(CASE WHEN be.runs = 0 AND be.extras = 0 THEN 1 ELSE 0 END) AS dot_balls_middle
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_middle_overs = 1
+    """, (match_id, team_id))
+    row = cursor.fetchone()
+    dot_percentage = (row["dot_balls_middle"] / row["middle_balls"] * 100) if row["middle_balls"] > 0 else 0
+    kpis.append({
+        "name": "Dot Ball % in Middle Overs",
+        "target": 60,
+        "actual": round(dot_percentage, 2),
+        "met": dot_percentage >= 60
+    })
+
+    return kpis
+
+
+
 
 if __name__ == "__main__":
     import uvicorn

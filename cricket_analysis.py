@@ -4268,7 +4268,7 @@ class BallByBallInterface:
 
         # --- Extras ---
         if no_ball_extra:
-            impacts.append((bowler, "bowling", "pressure_releived", -0.4, "No Ball"))
+            impacts.append((bowler, "bowling", "pressure_relieved", -0.4, "No Ball"))
         if wide_extra:
             impacts.append((bowler, "bowling", "pressure_relieved", -0.15, "Wide"))
         if bye_extra:
@@ -5006,7 +5006,7 @@ class BallByBallInterface:
         # Reset fielding checkboxes
         for var in self.fielding_vars.values():
             var.set(False)
-            
+
         # Clear extras
         for var in self.extras_vars.values():
             var.set(0)

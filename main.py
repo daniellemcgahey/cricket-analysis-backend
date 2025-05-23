@@ -1,6 +1,10 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from collections import defaultdict, Counter
@@ -2631,6 +2635,18 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
         "full_balls": full_balls
     }
 
+@app.get("/match-report/{match_id}/player/{player_id}")
+def match_report(match_id: int, player_id: int):
+    data = fetch_player_match_stats(match_id, player_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Player or match not found")
+
+    pdf_buffer = generate_pdf_report(data)
+    headers = {
+        'Content-Disposition': f'inline; filename="match_report_player_{player_id}_match_{match_id}.pdf"'
+    }
+    return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3571,6 +3587,107 @@ def get_individual_pitch_map_data(player_id, bowling_team, tournament_ids):
     cursor.execute(query, params)
     return [dict(row) for row in cursor.fetchall()]
 
+def fetch_player_match_stats(match_id: int, player_id: int):
+    # Your DB path
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Example queries - replace with your actual queries and logic:
+
+    # Get player name
+    cursor.execute("SELECT player_name FROM players WHERE player_id = ?", (player_id,))
+    player_row = cursor.fetchone()
+    if not player_row:
+        return None
+
+    player_name = player_row["player_name"]
+
+    # Get match info
+    cursor.execute("""
+        SELECT m.match_date, c1.country_name as team_a, c2.country_name as team_b
+        FROM matches m
+        JOIN countries c1 ON m.team_a = c1.country_id
+        JOIN countries c2 ON m.team_b = c2.country_id
+        WHERE m.match_id = ?
+    """, (match_id,))
+    match_row = cursor.fetchone()
+    if not match_row:
+        return None
+
+    # Basic batting stats example - customize your queries as needed
+    cursor.execute("""
+        SELECT
+            SUM(be.runs) AS runs,
+            COUNT(*) AS balls,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissals
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+    """, (match_id, player_id))
+    batting = cursor.fetchone()
+
+    # Basic bowling stats example
+    cursor.execute("""
+        SELECT
+            COUNT(*) AS balls_bowled,
+            SUM(be.runs) AS runs_conceded,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.bowler_id = ?
+    """, (match_id, player_id))
+    bowling = cursor.fetchone()
+
+    conn.close()
+
+    return {
+        "player_name": player_name,
+        "match": {
+            "date": match_row["match_date"],
+            "team_a": match_row["team_a"],
+            "team_b": match_row["team_b"]
+        },
+        "batting": batting,
+        "bowling": bowling,
+    }
+
+def generate_pdf_report(data: dict):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph(f"Match Report: {data['player_name']}", styles['Title']))
+    elements.append(Spacer(1, 12))
+
+    match = data['match']
+    elements.append(Paragraph(f"Match: {match['team_a']} vs {match['team_b']} on {match['date']}", styles['Normal']))
+    elements.append(Spacer(1, 12))
+
+    # Batting table
+    batting = data['batting']
+    batting_data = [
+        ['Runs', 'Balls', 'Dismissals'],
+        [batting['runs'] or 0, batting['balls'] or 0, batting['dismissals'] or 0]
+    ]
+    elements.append(Paragraph("Batting Performance", styles['Heading2']))
+    elements.append(Table(batting_data))
+    elements.append(Spacer(1, 12))
+
+    # Bowling table
+    bowling = data['bowling']
+    bowling_data = [
+        ['Balls Bowled', 'Runs Conceded', 'Wickets'],
+        [bowling['balls_bowled'] or 0, bowling['runs_conceded'] or 0, bowling['wickets'] or 0]
+    ]
+    elements.append(Paragraph("Bowling Performance", styles['Heading2']))
+    elements.append(Table(bowling_data))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
 
 if __name__ == "__main__":
     import uvicorn

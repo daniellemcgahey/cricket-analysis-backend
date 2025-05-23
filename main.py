@@ -1086,7 +1086,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
 
     # === Overall Bowling Stats ===
     print("📌 Starting Overall Bowling Stats Calculation")
-    print("👤 Bowler ID:", payload.player_id)
+    print("👤 Bowler ID:", payload.player_ids)
     print("🌎 Bowling for Team:", selected_country_name)
     print("🏆 Tournament Filter Applied:", tournament_filter)
     print("🧮 Tournament Params:", tournament_params)

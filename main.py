@@ -240,17 +240,21 @@ def pressure_analysis(payload: PressurePayload):
     print("✅ pressure_analysis route hit with payload:", payload.dict())  # Add this line
     return get_pressure_analysis(payload)
 
+
 @app.get("/matches")
 def get_matches(teamCategory: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    query = """
+    # include m.team_a and m.team_b as IDs alongside the country names
+    base_query = """
         SELECT 
             m.match_id,
             t.tournament_name,
+            m.team_a      AS team_a_id,
             c1.country_name AS team_a,
+            m.team_b      AS team_b_id,
             c2.country_name AS team_b,
             m.match_date
         FROM matches m
@@ -259,31 +263,38 @@ def get_matches(teamCategory: Optional[str] = None):
         JOIN tournaments t ON m.tournament_id = t.tournament_id
     """
 
+    params = []
     if teamCategory:
-        if teamCategory.lower() == "training":
-            query += " WHERE LOWER(c1.country_name) LIKE ? OR LOWER(c2.country_name) LIKE ?"
-            cursor.execute(query + " ORDER BY m.match_date DESC", ("%training%", "%training%"))
+        lc = teamCategory.lower()
+        if lc == "training":
+            base_query += " WHERE LOWER(c1.country_name) LIKE ? OR LOWER(c2.country_name) LIKE ?"
+            params = ["%training%", "%training%"]
         else:
-            query += """
+            base_query += """
                 WHERE 
-                    (c1.country_name LIKE ? AND LOWER(c1.country_name) NOT LIKE ?) OR 
-                    (c2.country_name LIKE ? AND LOWER(c2.country_name) NOT LIKE ?)
+                  (c1.country_name LIKE ? AND LOWER(c1.country_name) NOT LIKE ?) OR
+                  (c2.country_name LIKE ? AND LOWER(c2.country_name) NOT LIKE ?)
             """
-            cursor.execute(query + " ORDER BY m.match_date DESC", 
-                (f"%{teamCategory}", "%training%", f"%{teamCategory}", "%training%"))
-    else:
-        cursor.execute(query + " ORDER BY m.match_date DESC")
+            params = [f"%{teamCategory}", "%training%", f"%{teamCategory}", "%training%"]
 
+    # add ORDER BY
+    query = base_query + " ORDER BY m.match_date DESC"
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
 
-    matches = [{
-        "match_id": row[0],
-        "tournament": row[1],
-        "team_a": row[2],
-        "team_b": row[3],
-        "match_date": row[4]
-    } for row in rows]
+    # map to JSON-friendly dicts, including the two new ID fields
+    matches = []
+    for row in rows:
+        matches.append({
+            "match_id":   row[0],
+            "tournament": row[1],
+            "team_a_id":  row[2],
+            "team_a":     row[3],
+            "team_b_id":  row[4],
+            "team_b":     row[5],
+            "match_date": row[6],
+        })
 
     return matches
 

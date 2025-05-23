@@ -1271,7 +1271,7 @@ def player_bowling_analysis(payload: PlayerBowlingAnalysisPayload):
     # === Spell-Over Stats ===
     cursor.execute(f"""
         SELECT innings_id, over_number, bowler_id
-        FROM ball_events
+        FROM ball_events be
         WHERE be.bowler_id IN ({','.join(['?'] * len(payload.player_ids))})
         GROUP BY innings_id, over_number, bowler_id
         ORDER BY innings_id, over_number

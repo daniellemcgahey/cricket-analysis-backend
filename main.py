@@ -3910,7 +3910,7 @@ def generate_team_pdf_report(data: dict):
         bowler_data = [["Bowler", "Wickets", "Runs", "Overs"]]
         for b in inn['bowling_card']:
             bowler_data.append([
-                b['name'], str(b['wickets']), str(b['runs_conceded']), str(b['overs'])
+                b['name'], str(b['overs']), str(b['runs_conceded']), str(b['wickets'])
             ])
         bowler_table = Table(bowler_data, colWidths=[150, 60, 60, 60])
         bowler_table.setStyle(TableStyle([
@@ -3928,7 +3928,7 @@ def generate_team_pdf_report(data: dict):
     elements.append(summary_table)
 
     elements.append(Spacer(1, 20))
-    elements.append(Paragraph(f"<b>Result: {ms['result']}</b>", bold))
+    elements.append(Paragraph(f"<b>Result: {ms['result']}</b>", header))
     elements.append(PageBreak())
 
     # KPI Page

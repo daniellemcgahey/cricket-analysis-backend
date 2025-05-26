@@ -3754,8 +3754,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
 
         # Complete Batting Scorecard
         cursor.execute("""
-            SELECT p.player_name, SUM(be.runs) AS runs, 
-                       SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END)
+            SELECT p.player_name, SUM(be.runs) AS runs, COUNT(*) AS balls
             FROM ball_events be
             JOIN players p ON be.batter_id = p.player_id
             WHERE be.innings_id = ?
@@ -3771,7 +3770,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs_conceded,
                    SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
-                   SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END),
+                   COUNT(*) AS balls_bowled
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?

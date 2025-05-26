@@ -3841,7 +3841,6 @@ def assign_medal(actual: float, thresholds: dict):
     else:
         return "None"
 
-
 def generate_team_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
@@ -3859,7 +3858,7 @@ def generate_team_pdf_report(data: dict):
     elements.append(Spacer(1, 12))
 
     # Innings Summaries
-    for inn in data['innings']:
+    for inn in data['match_summary']['innings']:
         elements.append(Paragraph(
             f"{inn['team_name']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)", 
             ParagraphStyle('InningsTitle', parent=styles['Normal'], fontSize=14, spaceAfter=8, alignment=1)

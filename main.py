@@ -3742,7 +3742,17 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
 
     innings_data = []
     for inn in innings:
-        # Top 3 batters
+        # Convert overs from decimal to cricket notation (e.g., 13.8333 -> 13.5)
+        def convert_overs_decimal(overs_decimal: float) -> float:
+            overs_int = int(overs_decimal)
+            balls_fraction = overs_decimal - overs_int
+            balls = int(round(balls_fraction * 6))
+            return overs_int + (balls / 10)
+
+        overs_decimal = inn["overs_bowled"] or 0
+        overs_cricket = convert_overs_decimal(overs_decimal)
+
+        # Complete Batting Scorecard
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs, COUNT(*) AS balls
             FROM ball_events be
@@ -3750,33 +3760,32 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
             WHERE be.innings_id = ?
             GROUP BY be.batter_id
             ORDER BY runs DESC, balls ASC
-            LIMIT 3
         """, (inn["innings_id"],))
-        top_batters = cursor.fetchall()
+        batting_card = [
+            {"name": b["player_name"], "runs": b["runs"], "balls": b["balls"]}
+            for b in cursor.fetchall()
+        ]
 
-        # Top 3 bowlers
+        # Complete Bowling Scorecard
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs_conceded,
-                   SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+                   SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+                   COUNT(*) AS balls_bowled
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?
             GROUP BY be.bowler_id
             ORDER BY wickets DESC, runs_conceded ASC
-            LIMIT 3
         """, (inn["innings_id"],))
-        top_bowlers = cursor.fetchall()
-
-        def convert_overs_decimal(overs_decimal: float) -> float:
-            overs_int = int(overs_decimal)  # whole overs
-            balls_fraction = overs_decimal - overs_int
-            # Convert fraction to balls (each ball is 1/6 = 0.16666667)
-            balls = int(round(balls_fraction * 6))
-            # final overs in cricket format (e.g., 13.2 means 13 overs and 2 balls)
-            return overs_int + (balls / 10)
-        
-        overs_decimal = inn["overs_bowled"] or 0
-        overs_cricket = convert_overs_decimal(overs_decimal)    
+        bowling_card = []
+        for b in cursor.fetchall():
+            overs_bowled = convert_overs_decimal(b["balls_bowled"] / 6)  # legal deliveries
+            bowling_card.append({
+                "name": b["player_name"],
+                "runs_conceded": b["runs_conceded"],
+                "wickets": b["wickets"],
+                "overs": overs_bowled
+            })
 
         innings_data.append({
             "innings_id": inn["innings_id"],
@@ -3784,8 +3793,8 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
             "total_runs": inn["total_runs"],
             "wickets": inn["wickets"],
             "overs": overs_cricket,
-            "top_batters": [{"name": b["player_name"], "runs": b["runs"], "balls": b["balls"]} for b in top_batters],
-            "top_bowlers": [{"name": b["player_name"], "runs_conceded": b["runs_conceded"], "wickets": b["wickets"]} for b in top_bowlers]
+            "batting_card": batting_card,
+            "bowling_card": bowling_card
         })
 
     # Basic match info
@@ -3809,6 +3818,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         "result": row["result"],
         "innings": innings_data
     }
+
 
 
 def calculate_kpis(cursor, match_id: int, team_id: int):
@@ -3860,47 +3870,58 @@ def generate_team_pdf_report(data: dict):
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
     normal = styles['Normal']
-    bold = ParagraphStyle(name='Bold', parent=normal, fontName='Helvetica-Bold', fontSize=12)
-    header = ParagraphStyle(name='Header', parent=normal, fontName='Helvetica-Bold', fontSize=14, textColor=colors.white, backColor=colors.darkblue, alignment=1)
+    bold = ParagraphStyle(name='Bold', parent=normal, fontName='Helvetica-Bold', fontSize=12, leading=16)  # Increased leading
+    header = ParagraphStyle(
+        name='Header', parent=normal, fontName='Helvetica-Bold', fontSize=14,
+        textColor=colors.white, backColor=colors.darkblue, alignment=1, leading=18, spaceAfter=4
+    )
     
     elements = []
 
-    # Match Summary
+    # Match Summary Header
     ms = data['match_summary']
     elements.append(Paragraph(f"<b>{ms['team_a']} vs {ms['team_b']}</b>", header))
     elements.append(Paragraph(f"Date: {ms['match_date']} &nbsp;&nbsp;|&nbsp;&nbsp; Toss Winner: {ms['toss_winner']}", normal))
     elements.append(Spacer(1, 10))
 
-    # Build innings columns
+    # Build innings columns with full scorecards
     innings_data = ms['innings']
     col_data = []
 
     for inn in innings_data:
-        # Innings Header
+        # Innings header
         header_text = f"<b>{inn['batting_team']}</b> - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)"
         p_header = Paragraph(header_text, bold)
 
-        # Top Batters
-        batter_data = [[Paragraph(f"<b>{b['name']}</b>", normal), f"{b['runs']} ({b['balls']})"] for b in inn['top_batters']]
-        batter_table = Table(batter_data, colWidths=[150, 50])
+        # Batting Scorecard
+        batter_data = [["Batter", "Runs", "Balls"]]
+        for b in inn['batting_card']:
+            batter_data.append([b['name'], str(b['runs']), str(b['balls'])])
+        batter_table = Table(batter_data, colWidths=[150, 40, 40])
         batter_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.whitesmoke),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
         ]))
 
-        # Top Bowlers
-        bowler_data = [[Paragraph(f"<b>{b['name']}</b>", normal), f"{b['wickets']} / {b['runs_conceded']}"] for b in inn['top_bowlers']]
-        bowler_table = Table(bowler_data, colWidths=[150, 50])
+        # Bowling Scorecard
+        bowler_data = [["Bowler", "Wickets", "Runs Conceded", "Overs"]]
+        for b in inn['bowling_card']:
+            bowler_data.append([
+                b['name'], str(b['wickets']), str(b['runs_conceded']), str(b['overs'])
+            ])
+        bowler_table = Table(bowler_data, colWidths=[150, 40, 60, 40])
         bowler_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.whitesmoke),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
         ]))
 
         col_data.append([p_header, Spacer(1, 6), batter_table, Spacer(1, 6), bowler_table])
 
-    # Create side by side layout
+    # Side-by-side layout
     summary_table = Table([col_data], colWidths=[doc.width / 2, doc.width / 2])
     summary_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
     elements.append(summary_table)
@@ -3913,7 +3934,6 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph("KEY PERFORMANCE INDICATORS (KPIs)", header))
     elements.append(Spacer(1, 10))
 
-    # KPI Table
     kpi_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
         kpi_data.append([

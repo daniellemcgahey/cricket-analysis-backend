@@ -3766,12 +3766,23 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         """, (inn["innings_id"],))
         top_bowlers = cursor.fetchall()
 
+        def convert_overs_decimal(overs_decimal: float) -> float:
+            overs_int = int(overs_decimal)  # whole overs
+            balls_fraction = overs_decimal - overs_int
+            # Convert fraction to balls (each ball is 1/6 = 0.16666667)
+            balls = int(round(balls_fraction * 6))
+            # final overs in cricket format (e.g., 13.2 means 13 overs and 2 balls)
+            return overs_int + (balls / 10)
+        
+        overs_decimal = inn["overs_bowled"] or 0
+        overs_cricket = convert_overs_decimal(overs_decimal)    
+
         innings_data.append({
             "innings_id": inn["innings_id"],
             "batting_team": inn["batting_team"],
             "total_runs": inn["total_runs"],
             "wickets": inn["wickets"],
-            "overs": inn["overs_bowled"],
+            "overs": overs_cricket,
             "top_batters": [{"name": b["player_name"], "runs": b["runs"], "balls": b["balls"]} for b in top_batters],
             "top_bowlers": [{"name": b["player_name"], "runs_conceded": b["runs_conceded"], "wickets": b["wickets"]} for b in top_bowlers]
         })

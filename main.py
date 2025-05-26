@@ -3884,8 +3884,10 @@ def generate_team_pdf_report(data: dict):
     # Match Summary Header
     ms = data['match_summary']
     elements.append(Paragraph(f"<b>{ms['team_a']} vs {ms['team_b']}</b>", header))
-    elements.append(Paragraph(f"Match Date: {data['match_date']}", centered_style))
-    elements.append(Paragraph(f"Toss Winner: {data['toss_winner']}", centered_style))
+
+    # Fix by pulling match_date and toss_winner from ms dict instead of data directly
+    elements.append(Paragraph(f"Match Date: {ms.get('match_date', 'N/A')}", centered_style))
+    elements.append(Paragraph(f"Toss Winner: {ms.get('toss_winner', 'N/A')}", centered_style))
     elements.append(Spacer(1, 10))
 
     # Build innings columns with full scorecards

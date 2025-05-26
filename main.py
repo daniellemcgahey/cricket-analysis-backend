@@ -3860,7 +3860,7 @@ def generate_team_pdf_report(data: dict):
     # Innings Summaries
     for inn in data['match_summary']['innings']:
         elements.append(Paragraph(
-            f"{inn['team_name']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)", 
+            f"{inn['batting_team']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)", 
             ParagraphStyle('InningsTitle', parent=styles['Normal'], fontSize=14, spaceAfter=8, alignment=1)
         ))
 

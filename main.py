@@ -3754,7 +3754,8 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
 
         # Complete Batting Scorecard
         cursor.execute("""
-            SELECT p.player_name, SUM(be.runs) AS runs, COUNT(*) AS balls
+            SELECT p.player_name, SUM(be.runs) AS runs, 
+                       SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END)
             FROM ball_events be
             JOIN players p ON be.batter_id = p.player_id
             WHERE be.innings_id = ?
@@ -3770,7 +3771,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs_conceded,
                    SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
-                   COUNT(*) AS balls_bowled
+                   SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END),
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?
@@ -3907,7 +3908,7 @@ def generate_team_pdf_report(data: dict):
         ]))
 
         # Bowling Scorecard
-        bowler_data = [["Bowler", "Wickets", "Runs", "Overs"]]
+        bowler_data = [["Bowler", "Overs", "Runs", "Wickets"]]
         for b in inn['bowling_card']:
             bowler_data.append([
                 b['name'], str(b['overs']), str(b['runs_conceded']), str(b['wickets'])

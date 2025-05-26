@@ -3742,6 +3742,16 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
 
     innings_data = []
     for inn in innings:
+        # Calculate legal deliveries only (no extras)
+        cursor.execute("""
+            SELECT COUNT(*) AS legal_balls
+            FROM ball_events
+            WHERE innings_id = ? AND extras = 0
+        """, (inn["innings_id"],))
+        balls = cursor.fetchone()["legal_balls"]
+        overs = balls // 6 + (balls % 6) / 10
+        overs = round(overs, 1)
+
         # Top 3 batters
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs, COUNT(*) AS balls
@@ -3757,7 +3767,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         # Top 3 bowlers
         cursor.execute("""
             SELECT p.player_name, SUM(be.runs) AS runs_conceded,
-                   SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+                SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?
@@ -3772,9 +3782,11 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
             "batting_team": inn["batting_team"],
             "total_runs": inn["total_runs"],
             "wickets": inn["wickets"],
+            "overs": overs,  # 🟢 Updated to legal balls only
             "top_batters": [{"name": b["player_name"], "runs": b["runs"], "balls": b["balls"]} for b in top_batters],
             "top_bowlers": [{"name": b["player_name"], "runs_conceded": b["runs_conceded"], "wickets": b["wickets"]} for b in top_bowlers]
         })
+
 
     # Basic match info
     cursor.execute("""

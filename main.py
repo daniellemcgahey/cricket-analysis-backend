@@ -3837,7 +3837,12 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
 
     # Example KPI calculation
     cursor.execute("""
-        SELECT SUM(be.runs) AS runs_pp
+        SELECT 
+            COALESCE(SUM(be.runs), 0) +
+            COALESCE(SUM(be.wides), 0) +
+            COALESCE(SUM(be.no_balls), 0) +
+            COALESCE(SUM(be.byes), 0) +
+            COALESCE(SUM(be.leg_byes), 0) AS runs_pp
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1

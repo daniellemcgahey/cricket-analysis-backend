@@ -7,6 +7,7 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from collections import defaultdict, Counter
@@ -3876,13 +3877,15 @@ def generate_team_pdf_report(data: dict):
         name='Header', parent=normal, fontName='Helvetica-Bold', fontSize=14,
         textColor=colors.white, backColor=colors.darkblue, alignment=1, leading=18, spaceAfter=4
     )
+    centered_style = ParagraphStyle(name='Center', alignment=TA_CENTER, parent=styles['Normal'])
     
     elements = []
 
     # Match Summary Header
     ms = data['match_summary']
     elements.append(Paragraph(f"<b>{ms['team_a']} vs {ms['team_b']}</b>", header))
-    elements.append(Paragraph(f"Date: {ms['match_date']} &nbsp;&nbsp;|&nbsp;&nbsp; Toss Winner: {ms['toss_winner']}", normal))
+    elements.append(Paragraph(f"Match Date: {data['match_date']}", centered_style))
+    elements.append(Paragraph(f"Toss Winner: {data['toss_winner']}", centered_style))
     elements.append(Spacer(1, 10))
 
     # Build innings columns with full scorecards
@@ -3954,6 +3957,24 @@ def generate_team_pdf_report(data: dict):
         ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
     ]))
     elements.append(kpi_table)
+
+    # Medal Tally
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("KPI Medal Tally", normal))
+
+    medal_data = [["Medal", "Count"]]
+    for medal, count in data['medal_tally'].items():
+        medal_data.append([medal, str(count)])
+
+    medal_table = Table(medal_data, hAlign='LEFT')
+    medal_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+
+    elements.append(medal_table)
 
     doc.build(elements)
     buffer.seek(0)

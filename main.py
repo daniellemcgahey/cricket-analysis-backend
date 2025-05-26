@@ -3909,7 +3909,7 @@ def generate_team_pdf_report(data: dict):
     # Match Result
     result = data['match_summary']
     elements.append(Paragraph(
-        f"Result: {result['result']} by {result['result_margin']}", 
+        f"Result: {result['result']}", 
         ParagraphStyle('ResultStyle', parent=styles['Normal'], fontSize=14, alignment=1, spaceBefore=20)
     ))
 

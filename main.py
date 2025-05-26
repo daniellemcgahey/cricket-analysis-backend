@@ -2,9 +2,10 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import io
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from collections import defaultdict, Counter
@@ -2677,7 +2678,7 @@ def team_match_report_pdf(match_id: int, team_id: int):
         "kpis": kpis,
         "medal_tally": medal_tally
     }
-    pdf = generate_full_team_report(pdf_data)
+    pdf = generate_team_pdf_report(pdf_data)
 
     return StreamingResponse(pdf, media_type="application/pdf")
 
@@ -3828,7 +3829,6 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
 
     return kpis, medal_tally
 
-
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:
         return "Platinum"
@@ -3842,63 +3842,106 @@ def assign_medal(actual: float, thresholds: dict):
         return "None"
 
 
-def generate_full_team_report(data: dict):
+def generate_team_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
+
+    # Custom styles
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Title'], fontSize=22, alignment=1, spaceAfter=20)
+    heading_style = ParagraphStyle('HeadingStyle', parent=styles['Heading2'], fontSize=16, spaceAfter=10)
+    normal_style = ParagraphStyle('NormalStyle', parent=styles['Normal'], fontSize=12, spaceAfter=5)
+
     elements = []
 
-    # Title & Match Summary
-    elements.append(Paragraph(f"Team Match Report: {data['match_summary']['team_a']} vs {data['match_summary']['team_b']}", styles['Title']))
-    elements.append(Paragraph(f"Date: {data['match_summary']['match_date']}", styles['Normal']))
-    elements.append(Paragraph(f"Result: {data['match_summary']['result']}", styles['Normal']))
-    elements.append(Paragraph(f"Toss Winner: {data['match_summary']['toss_winner']}", styles['Normal']))
+    # Page 1: Match Summary
+    elements.append(Paragraph("MATCH SUMMARY", title_style))
     elements.append(Spacer(1, 12))
 
-    # Innings summaries
-    for inn in data["match_summary"]["innings"]:
-        elements.append(Paragraph(f"Innings {inn['innings_id']} - {inn['batting_team']}", styles['Heading2']))
-        elements.append(Paragraph(f"Total Runs: {inn['total_runs']}, Wickets Lost: {inn['wickets']}", styles['Normal']))
+    # Innings Summaries
+    for inn in data['innings']:
+        elements.append(Paragraph(
+            f"{inn['team_name']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)", 
+            ParagraphStyle('InningsTitle', parent=styles['Normal'], fontSize=14, spaceAfter=8, alignment=1)
+        ))
 
-        # Top batters
-        elements.append(Paragraph("Top 3 Batters:", styles['Heading3']))
-        batters_data = [["Name", "Runs", "Balls"]] + [
-            [b["name"], str(b["runs"]), str(b["balls"])] for b in inn["top_batters"]
-        ]
-        elements.append(Table(batters_data))
-        elements.append(Spacer(1, 6))
+        # Top 3 batters
+        elements.append(Paragraph("Top 3 Batters", heading_style))
+        bat_table_data = [["Name", "Runs", "Balls"]]
+        for batter in inn['top_batters']:
+            bat_table_data.append([batter['name'], str(batter['runs']), str(batter['balls'])])
+        bat_table = Table(bat_table_data, colWidths=[200, 50, 50])
+        bat_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER')
+        ]))
+        elements.append(bat_table)
+        elements.append(Spacer(1, 10))
 
-        # Top bowlers
-        elements.append(Paragraph("Top 3 Bowlers:", styles['Heading3']))
-        bowlers_data = [["Name", "Wickets", "Runs Conceded"]] + [
-            [b["name"], str(b["wickets"]), str(b["runs_conceded"])] for b in inn["top_bowlers"]
-        ]
-        elements.append(Table(bowlers_data))
-        elements.append(Spacer(1, 12))
+        # Top 3 bowlers
+        elements.append(Paragraph("Top 3 Bowlers", heading_style))
+        bowl_table_data = [["Name", "Runs Conceded", "Wickets"]]
+        for bowler in inn['top_bowlers']:
+            bowl_table_data.append([bowler['name'], str(bowler['runs_conceded']), str(bowler['wickets'])])
+        bowl_table = Table(bowl_table_data, colWidths=[200, 70, 50])
+        bowl_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER')
+        ]))
+        elements.append(bowl_table)
+        elements.append(Spacer(1, 20))
 
-    # KPI Section
-    elements.append(Paragraph("Key Performance Indicators (KPIs)", styles['Heading2']))
-    kpi_data = [["KPI", "Actual", "Platinum", "Gold", "Silver", "Bronze", "Medal"]]
-    for kpi in data["kpis"]:
-        kpi_data.append([
-            kpi["name"],
-            str(kpi["actual"]),
-            str(kpi["targets"]["Platinum"]),
-            str(kpi["targets"]["Gold"]),
-            str(kpi["targets"]["Silver"]),
-            str(kpi["targets"]["Bronze"]),
-            kpi["medal"]
+    # Match Result
+    result = data['match_summary']
+    elements.append(Paragraph(
+        f"Result: {result['result']} by {result['result_margin']}", 
+        ParagraphStyle('ResultStyle', parent=styles['Normal'], fontSize=14, alignment=1, spaceBefore=20)
+    ))
+
+    elements.append(PageBreak())
+
+    # Page 2: KPIs
+    elements.append(Paragraph("KEY PERFORMANCE INDICATORS (KPIs)", title_style))
+
+    kpi_table_data = [["KPI", "Target", "Actual", "Medal"]]
+    for kpi in data['kpis']:
+        kpi_table_data.append([
+            kpi['name'], 
+            str(kpi['target']),
+            str(kpi['actual']),
+            kpi['medal']
         ])
-    elements.append(Table(kpi_data))
-    elements.append(Spacer(1, 12))
+    kpi_table = Table(kpi_table_data, colWidths=[220, 70, 70, 80])
+    kpi_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+        ('TEXTCOLOR', (-1, 1), (-1, -1), colors.blue)  # medal text in blue for visual impact
+    ]))
+    elements.append(kpi_table)
 
-    # Medal Tally
-    elements.append(Paragraph("Medal Tally", styles['Heading2']))
-    medals_data = [["Platinum", "Gold", "Silver", "Bronze"]]
-    medals_data.append([str(data["medal_tally"]["Platinum"]), str(data["medal_tally"]["Gold"]),
-                         str(data["medal_tally"]["Silver"]), str(data["medal_tally"]["Bronze"])])
-    elements.append(Table(medals_data))
+    # Medal tally
+    medal_tally = data['medal_tally']
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("Medal Tally", heading_style))
+    tally_data = [["Medal", "Count"]]
+    for medal, count in medal_tally.items():
+        tally_data.append([medal, str(count)])
+    tally_table = Table(tally_data, colWidths=[100, 100])
+    tally_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+    elements.append(tally_table)
 
+    # Final build
     doc.build(elements)
     buffer.seek(0)
     return buffer

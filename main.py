@@ -3823,19 +3823,22 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         "innings": innings_data
     }
 
-def calculate_kpis(cursor, match_id: int, team_id: int):
+def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
+    # Only calculate KPIs if team_name includes "Brasil"
+    if "brasil" not in team_name.lower():
+        return [], {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
+
     kpis = []
     medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
 
-    # Example KPI: Powerplay runs
+    # Example KPI calculation
     cursor.execute("""
         SELECT SUM(be.runs) AS runs_pp
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
     """, (match_id, team_id))
-    row = cursor.fetchone()
-    actual = row["runs_pp"] if row and row["runs_pp"] is not None else 0
+    actual = cursor.fetchone()["runs_pp"] or 0
 
     thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}
     medal = assign_medal(actual, thresholds)
@@ -3846,13 +3849,14 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
     kpis.append({
         "name": "Powerplay Runs",
         "actual": actual,
-        "target": thresholds,   # or "targets" - just be consistent!
+        "targets": thresholds,
         "medal": medal
     })
 
     # Add other KPIs similarly...
 
     return kpis, medal_tally
+
 
 
 def assign_medal(actual: float, thresholds: dict):
@@ -3900,7 +3904,7 @@ def generate_team_pdf_report(data: dict):
         p_header = Paragraph(header_text, bold)
 
         # Batting Scorecard
-        batter_data = [["Batter", "Runs", "Balls", "SR"]]
+        batter_data = [["Batter", "Runs", "Balls", "Strike Rate"]]
         for b in inn['batting_card']:
             runs = b["runs"]
             balls = b["balls"]
@@ -3962,7 +3966,7 @@ def generate_team_pdf_report(data: dict):
 
     # Medal Tally
     elements.append(Spacer(1, 20))
-    elements.append(Paragraph("KPI Medal Tally", normal))
+    elements.append(Paragraph("KPI Medal Tally", header))
 
     medal_data = [["Medal", "Count"]]
     for medal, count in data['medal_tally'].items():

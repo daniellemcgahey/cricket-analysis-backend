@@ -3821,25 +3821,26 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
     """, (match_id, team_id))
-    actual = cursor.fetchone()["runs_pp"] or 0
+    row = cursor.fetchone()
+    actual = row["runs_pp"] if row and row["runs_pp"] is not None else 0
 
     thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}
     medal = assign_medal(actual, thresholds)
 
-    # Only increment if it's an actual medal
     if medal in medal_tally:
         medal_tally[medal] += 1
 
     kpis.append({
         "name": "Powerplay Runs",
         "actual": actual,
-        "targets": thresholds,
+        "target": thresholds,   # or "targets" - just be consistent!
         "medal": medal
     })
 
     # Add other KPIs similarly...
 
     return kpis, medal_tally
+
 
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:
@@ -3921,10 +3922,10 @@ def generate_team_pdf_report(data: dict):
     kpi_table_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
         kpi_table_data.append([
-            kpi['name'], 
-            str(kpi['target']),
-            str(kpi['actual']),
-            kpi['medal']
+            kpi.get("name", "N/A"),
+            str(kpi.get("target", "N/A")),
+            str(kpi.get("actual", "N/A")),
+            kpi.get("medal", "N/A")
         ])
     kpi_table = Table(kpi_table_data, colWidths=[220, 70, 70, 80])
     kpi_table.setStyle(TableStyle([
@@ -3935,6 +3936,7 @@ def generate_team_pdf_report(data: dict):
         ('TEXTCOLOR', (-1, 1), (-1, -1), colors.blue)  # medal text in blue for visual impact
     ]))
     elements.append(kpi_table)
+
 
     # Medal tally
     medal_tally = data['medal_tally']

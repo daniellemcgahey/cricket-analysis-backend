@@ -2666,24 +2666,21 @@ def team_match_report_pdf(match_id: int, team_id: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    match_summary = fetch_team_match_summary(cursor, match_id, team_id)
-    innings_stats = fetch_team_innings_stats(cursor, match_id, team_id)
-    kpis = calculate_kpis(cursor, match_id, team_id)
+    # Match Summary & Top 3s
+    match_summary = fetch_match_summary(cursor, match_id, team_id)
 
-    conn.close()
+    # KPIs & Medal Tally
+    kpis, medal_tally = calculate_kpis(cursor, match_id, team_id)
 
-    data = {
+    # Generate PDF
+    pdf_data = {
         "match_summary": match_summary,
-        "innings_stats": innings_stats,
-        "kpis": kpis
+        "kpis": kpis,
+        "medal_tally": medal_tally
     }
+    pdf = generate_full_team_report(pdf_data)
 
-    pdf_buffer = generate_team_pdf_report(data)
-
-    headers = {
-        "Content-Disposition": f"attachment; filename=team_match_report_{match_id}_{team_id}.pdf"
-    }
-    return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
+    return StreamingResponse(pdf, media_type="application/pdf")
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
@@ -3727,17 +3724,62 @@ def generate_pdf_report(data: dict):
     buffer.seek(0)
     return buffer
 
-def fetch_team_match_summary(cursor, match_id: int, team_id: int):
+def fetch_match_summary(cursor, match_id: int, team_id: int):
+    # Get innings summaries (team totals)
     cursor.execute("""
         SELECT 
-            m.match_date,
-            c1.country_name AS team_a,
-            c2.country_name AS team_b,
-            m.toss_winner,
-            m.result,
-            m.margin,
-            m.team_a as team_a_id,
-            m.team_b as team_b_id
+            i.innings_id,
+            i.batting_team,
+            SUM(be.runs) AS total_runs,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+        FROM innings i
+        JOIN ball_events be ON i.innings_id = be.innings_id
+        WHERE i.match_id = ?
+        GROUP BY i.innings_id
+        ORDER BY i.innings_id ASC
+    """, (match_id,))
+    innings = cursor.fetchall()
+
+    innings_data = []
+    for inn in innings:
+        # Top 3 batters
+        cursor.execute("""
+            SELECT p.player_name, SUM(be.runs) AS runs, COUNT(*) AS balls
+            FROM ball_events be
+            JOIN players p ON be.batter_id = p.player_id
+            WHERE be.innings_id = ?
+            GROUP BY be.batter_id
+            ORDER BY runs DESC, balls ASC
+            LIMIT 3
+        """, (inn["innings_id"],))
+        top_batters = cursor.fetchall()
+
+        # Top 3 bowlers
+        cursor.execute("""
+            SELECT p.player_name, SUM(be.runs) AS runs_conceded,
+                   SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+            FROM ball_events be
+            JOIN players p ON be.bowler_id = p.player_id
+            WHERE be.innings_id = ?
+            GROUP BY be.bowler_id
+            ORDER BY wickets DESC, runs_conceded ASC
+            LIMIT 3
+        """, (inn["innings_id"],))
+        top_bowlers = cursor.fetchall()
+
+        innings_data.append({
+            "innings_id": inn["innings_id"],
+            "batting_team": inn["batting_team"],
+            "total_runs": inn["total_runs"],
+            "wickets": inn["wickets"],
+            "top_batters": [{"name": b["player_name"], "runs": b["runs"], "balls": b["balls"]} for b in top_batters],
+            "top_bowlers": [{"name": b["player_name"], "runs_conceded": b["runs_conceded"], "wickets": b["wickets"]} for b in top_bowlers]
+        })
+
+    # Basic match info
+    cursor.execute("""
+        SELECT m.match_date, c1.country_name AS team_a, c2.country_name AS team_b, m.toss_winner,
+               m.match_result, m.result_margin
         FROM matches m
         JOIN countries c1 ON m.team_a = c1.country_id
         JOIN countries c2 ON m.team_b = c2.country_id
@@ -3747,180 +3789,114 @@ def fetch_team_match_summary(cursor, match_id: int, team_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Match not found")
 
-    if team_id == row["team_a_id"]:
-        team_name = row["team_a"]
-        opponent_name = row["team_b"]
-    elif team_id == row["team_b_id"]:
-        team_name = row["team_b"]
-        opponent_name = row["team_a"]
-    else:
-        raise HTTPException(status_code=400, detail="Team did not play in this match")
-
     return {
         "match_date": row["match_date"],
-        "team_name": team_name,
-        "opponent_name": opponent_name,
+        "team_a": row["team_a"],
+        "team_b": row["team_b"],
         "toss_winner": row["toss_winner"],
-        "result": row["result"],
-        "result_margin": row["margin"]
+        "result": row["match_result"],
+        "result_margin": row["result_margin"],
+        "innings": innings_data
     }
 
-def fetch_team_innings_stats(cursor, match_id: int, team_id: int):
-    # Resolve country name
-    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (team_id,))
-    row = cursor.fetchone()
-    if not row:
-        return []
-    team_name = row["country_name"]
-
-    cursor.execute("""
-        SELECT 
-            i.innings_id,
-            i.batting_team,
-            SUM(be.runs) AS total_runs,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
-            COUNT(*) AS balls_faced
-        FROM innings i
-        JOIN ball_events be ON i.innings_id = be.innings_id
-        WHERE i.match_id = ? AND i.batting_team = ?
-        GROUP BY i.innings_id
-        ORDER BY i.innings_id ASC
-    """, (match_id, team_name))
-    
-    innings = cursor.fetchall()
-    results = []
-    for inn in innings:
-        overs = inn["balls_faced"] // 6 + (inn["balls_faced"] % 6) / 10
-        results.append({
-            "innings_id": inn["innings_id"],
-            "runs": inn["total_runs"],
-            "wickets": inn["wickets"],
-            "balls": inn["balls_faced"],
-            "overs": round(overs, 1)
-        })
-    return results
-
-
 def calculate_kpis(cursor, match_id: int, team_id: int):
-    # Resolve country name
-    cursor.execute("SELECT country_name FROM countries WHERE country_id = ?", (team_id,))
-    row = cursor.fetchone()
-    if not row:
-        return []
-    team_name = row["country_name"]
-
+    # Example: placeholder logic for KPIs and medal targets
     kpis = []
+    medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
 
-    # 1. Runs in Powerplay (target 40 runs in first 6 overs)
+    # Example KPI: Powerplay runs
     cursor.execute("""
-        SELECT SUM(be.runs) AS runs_powerplay
+        SELECT SUM(be.runs) AS runs_pp
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
-    """, (match_id, team_name))
-    runs_powerplay = cursor.fetchone()["runs_powerplay"] or 0
+    """, (match_id, team_id))
+    actual = cursor.fetchone()["runs_pp"] or 0
+
+    thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}
+    medal = assign_medal(actual, thresholds)
+    medal_tally[medal] += 1
     kpis.append({
-        "name": "Runs in Powerplay",
-        "target": 40,
-        "actual": runs_powerplay,
-        "met": runs_powerplay >= 40
+        "name": "Powerplay Runs",
+        "actual": actual,
+        "targets": thresholds,
+        "medal": medal
     })
 
-    # 2. Wickets in Death Overs (target at least 2)
-    cursor.execute("""
-        SELECT COUNT(*) AS wickets_death
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_death_overs = 1
-          AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
-    """, (match_id, team_name))
-    wickets_death = cursor.fetchone()["wickets_death"] or 0
-    kpis.append({
-        "name": "Wickets in Death Overs",
-        "target": 2,
-        "actual": wickets_death,
-        "met": wickets_death >= 2
-    })
+    # Add other KPIs similarly...
 
-    # 3. Extras Conceded
-    cursor.execute("""
-        SELECT SUM(be.extras) AS extras_conceded
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ?
-    """, (match_id, team_name))
-    extras = cursor.fetchone()["extras_conceded"] or 0
-    kpis.append({
-        "name": "Extras Conceded",
-        "target": 10,
-        "actual": extras,
-        "met": extras <= 10
-    })
-
-    # 4. Dot Ball % in Middle Overs
-    cursor.execute("""
-        SELECT 
-            COUNT(*) AS middle_balls,
-            SUM(CASE WHEN be.runs = 0 AND be.extras = 0 THEN 1 ELSE 0 END) AS dot_balls_middle
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_middle_overs = 1
-    """, (match_id, team_name))
-    row = cursor.fetchone()
-    dot_percentage = (row["dot_balls_middle"] / row["middle_balls"] * 100) if row["middle_balls"] > 0 else 0
-    kpis.append({
-        "name": "Dot Ball % in Middle Overs",
-        "target": 60,
-        "actual": round(dot_percentage, 2),
-        "met": dot_percentage >= 60
-    })
-
-    return kpis
+    return kpis, medal_tally
 
 
-def generate_team_pdf_report(data: dict):
+def assign_medal(actual: float, thresholds: dict):
+    if actual >= thresholds["Platinum"]:
+        return "Platinum"
+    elif actual >= thresholds["Gold"]:
+        return "Gold"
+    elif actual >= thresholds["Silver"]:
+        return "Silver"
+    elif actual >= thresholds["Bronze"]:
+        return "Bronze"
+    else:
+        return "None"
+
+
+def generate_full_team_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     elements = []
 
-    # Title
-    elements.append(Paragraph(f"Team Match Report: {data['match_summary']['team_name']}", styles['Title']))
+    # Title & Match Summary
+    elements.append(Paragraph(f"Team Match Report: {data['match_summary']['team_a']} vs {data['match_summary']['team_b']}", styles['Title']))
+    elements.append(Paragraph(f"Date: {data['match_summary']['match_date']}", styles['Normal']))
+    elements.append(Paragraph(f"Result: {data['match_summary']['result']} ({data['match_summary']['result_margin']})", styles['Normal']))
+    elements.append(Paragraph(f"Toss Winner: {data['match_summary']['toss_winner']}", styles['Normal']))
     elements.append(Spacer(1, 12))
 
-    # Match Summary
-    ms = data['match_summary']
-    elements.append(Paragraph(f"Match Date: {ms['match_date']}", styles['Normal']))
-    elements.append(Paragraph(f"Opponent: {ms['opponent_name']}", styles['Normal']))
-    elements.append(Paragraph(f"Toss Winner: {ms['toss_winner']}", styles['Normal']))
-    elements.append(Paragraph(f"Result: {ms['result']}", styles['Normal']))
-    elements.append(Spacer(1, 20))
+    # Innings summaries
+    for inn in data["match_summary"]["innings"]:
+        elements.append(Paragraph(f"Innings {inn['innings_id']} - {inn['batting_team']}", styles['Heading2']))
+        elements.append(Paragraph(f"Total Runs: {inn['total_runs']}, Wickets Lost: {inn['wickets']}", styles['Normal']))
 
-    # Innings Stats
-    elements.append(Paragraph("Innings Statistics", styles['Heading2']))
-    innings_data = [["Innings ID", "Runs", "Wickets", "Balls", "Overs"]]
-    for inn in data['innings_stats']:
-        innings_data.append([
-            str(inn["innings_id"]),
-            str(inn["runs"]),
-            str(inn["wickets"]),
-            str(inn["balls"]),
-            str(inn["overs"])
-        ])
-    elements.append(Table(innings_data))
-    elements.append(Spacer(1, 20))
+        # Top batters
+        elements.append(Paragraph("Top 3 Batters:", styles['Heading3']))
+        batters_data = [["Name", "Runs", "Balls"]] + [
+            [b["name"], str(b["runs"]), str(b["balls"])] for b in inn["top_batters"]
+        ]
+        elements.append(Table(batters_data))
+        elements.append(Spacer(1, 6))
 
-    # KPIs
+        # Top bowlers
+        elements.append(Paragraph("Top 3 Bowlers:", styles['Heading3']))
+        bowlers_data = [["Name", "Wickets", "Runs Conceded"]] + [
+            [b["name"], str(b["wickets"]), str(b["runs_conceded"])] for b in inn["top_bowlers"]
+        ]
+        elements.append(Table(bowlers_data))
+        elements.append(Spacer(1, 12))
+
+    # KPI Section
     elements.append(Paragraph("Key Performance Indicators (KPIs)", styles['Heading2']))
-    kpi_data = [["KPI", "Target", "Actual", "Met"]]
-    for kpi in data['kpis']:
+    kpi_data = [["KPI", "Actual", "Platinum", "Gold", "Silver", "Bronze", "Medal"]]
+    for kpi in data["kpis"]:
         kpi_data.append([
             kpi["name"],
-            str(kpi["target"]),
             str(kpi["actual"]),
-            "Yes" if kpi["met"] else "No"
+            str(kpi["targets"]["Platinum"]),
+            str(kpi["targets"]["Gold"]),
+            str(kpi["targets"]["Silver"]),
+            str(kpi["targets"]["Bronze"]),
+            kpi["medal"]
         ])
     elements.append(Table(kpi_data))
+    elements.append(Spacer(1, 12))
+
+    # Medal Tally
+    elements.append(Paragraph("Medal Tally", styles['Heading2']))
+    medals_data = [["Platinum", "Gold", "Silver", "Bronze"]]
+    medals_data.append([str(data["medal_tally"]["Platinum"]), str(data["medal_tally"]["Gold"]),
+                         str(data["medal_tally"]["Silver"]), str(data["medal_tally"]["Bronze"])])
+    elements.append(Table(medals_data))
 
     doc.build(elements)
     buffer.seek(0)

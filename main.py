@@ -3873,9 +3873,12 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph(f"Toss Winner: {ms['toss_winner']}", normal_style))
     elements.append(Spacer(1, 12))
 
+    # Create innings data container for easier use
+    innings_data = data.get('match_summary', {}).get('innings', [])
+
     # Create tables for each innings
     innings_tables = []
-    for inn in data['innings']:
+    for inn in innings_data:
         innings_header = Paragraph(
             f"{inn['batting_team']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)",
             heading_style
@@ -3909,16 +3912,15 @@ def generate_team_pdf_report(data: dict):
             bowlers_table
         ])
 
-    # Side-by-side innings tables
-    side_by_side_table = Table([
-        [innings_tables[0], innings_tables[1]]
-    ], colWidths=[260, 260])
-    side_by_side_table.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP')
-    ]))
-
-    elements.append(side_by_side_table)
-    elements.append(Spacer(1, 20))
+    if innings_tables:
+        side_by_side_table = Table([
+            [innings_tables[0], innings_tables[1]]
+        ], colWidths=[260, 260])
+        side_by_side_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP')
+        ]))
+        elements.append(side_by_side_table)
+        elements.append(Spacer(1, 20))
 
     # Match result at the bottom
     elements.append(Paragraph(f"Result: {ms['result']}", heading_style))
@@ -3938,7 +3940,7 @@ def generate_team_pdf_report(data: dict):
             kpi["medal"]
         ])
 
-    # Determine column widths dynamically
+    # Auto-size columns based on content
     from reportlab.pdfbase.pdfmetrics import stringWidth
     def calc_col_widths(data, fontname="Helvetica", fontsize=10, padding=12):
         num_cols = len(data[0])
@@ -3958,13 +3960,14 @@ def generate_team_pdf_report(data: dict):
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-        ('TEXTCOLOR', (-1, 1), (-1, -1), colors.blue)  # Medal column in blue
+        ('TEXTCOLOR', (-1, 1), (-1, -1), colors.blue)
     ]))
     elements.append(kpi_table)
 
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 
 if __name__ == "__main__":

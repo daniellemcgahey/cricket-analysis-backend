@@ -240,7 +240,6 @@ def pressure_analysis(payload: PressurePayload):
     print("✅ pressure_analysis route hit with payload:", payload.dict())  # Add this line
     return get_pressure_analysis(payload)
 
-
 @app.get("/matches")
 def get_matches(teamCategory: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3799,7 +3798,6 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
     }
 
 def calculate_kpis(cursor, match_id: int, team_id: int):
-    # Example: placeholder logic for KPIs and medal targets
     kpis = []
     medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
 
@@ -3814,7 +3812,11 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
 
     thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}
     medal = assign_medal(actual, thresholds)
-    medal_tally[medal] += 1
+
+    # Only increment if it's an actual medal
+    if medal in medal_tally:
+        medal_tally[medal] += 1
+
     kpis.append({
         "name": "Powerplay Runs",
         "actual": actual,

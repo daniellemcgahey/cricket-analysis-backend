@@ -2671,8 +2671,11 @@ def team_match_report_pdf(match_id: int, team_id: int):
     # Match Summary & Top 3s
     match_summary = fetch_match_summary(cursor, match_id, team_id)
 
+    # Extract the batting team's name
+    team_name = match_summary["team_a"] if "Brasil" in match_summary["team_a"] else match_summary["team_b"]
+
     # KPIs & Medal Tally
-    kpis, medal_tally = calculate_kpis(cursor, match_id, team_id)
+    kpis, medal_tally = calculate_kpis(cursor, match_id, team_id, team_name)
 
     # Generate PDF
     pdf_data = {
@@ -2683,6 +2686,7 @@ def team_match_report_pdf(match_id: int, team_id: int):
     pdf = generate_team_pdf_report(pdf_data)
 
     return StreamingResponse(pdf, media_type="application/pdf")
+
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):

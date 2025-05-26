@@ -3955,7 +3955,7 @@ def generate_team_pdf_report(data: dict):
     for kpi in data['kpis']:
         kpi_data.append([
             Paragraph(kpi['name'], normal),
-            str(kpi['target']),
+            str(kpi['targets']),
             str(kpi['actual']),
             Paragraph(f"<b>{kpi['medal']}</b>", normal)
         ])

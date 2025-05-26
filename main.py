@@ -3841,7 +3841,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
-    """, (match_id, team_id))
+    """, (match_id, team_name))
     actual = cursor.fetchone()["runs_pp"] or 0
 
     thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}

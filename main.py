@@ -7,6 +7,7 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 from collections import defaultdict, Counter
@@ -3819,8 +3820,6 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         "innings": innings_data
     }
 
-
-
 def calculate_kpis(cursor, match_id: int, team_id: int):
     kpis = []
     medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
@@ -3852,7 +3851,6 @@ def calculate_kpis(cursor, match_id: int, team_id: int):
 
     return kpis, medal_tally
 
-
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:
         return "Platinum"
@@ -3869,85 +3867,97 @@ def generate_team_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
-    normal = styles['Normal']
-    bold = ParagraphStyle(name='Bold', parent=normal, fontName='Helvetica-Bold', fontSize=12, leading=16)  # Increased leading
-    header = ParagraphStyle(
-        name='Header', parent=normal, fontName='Helvetica-Bold', fontSize=14,
-        textColor=colors.white, backColor=colors.darkblue, alignment=1, leading=18, spaceAfter=4
-    )
-    
+    title_style = styles['Heading1']
+    normal_style = styles['Normal']
+    bold_style = ParagraphStyle(name='Bold', parent=normal_style, fontName='Helvetica-Bold')
+
     elements = []
 
-    # Match Summary Header
-    ms = data['match_summary']
-    elements.append(Paragraph(f"<b>{ms['team_a']} vs {ms['team_b']}</b>", header))
-    elements.append(Paragraph(f"Date: {ms['match_date']} &nbsp;&nbsp;|&nbsp;&nbsp; Toss Winner: {ms['toss_winner']}", normal))
-    elements.append(Spacer(1, 10))
-
-    # Build innings columns with full scorecards
-    innings_data = ms['innings']
-    col_data = []
-
-    for inn in innings_data:
-        # Innings header
-        header_text = f"<b>{inn['batting_team']}</b> - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)"
-        p_header = Paragraph(header_text, bold)
-
-        # Batting Scorecard
-        batter_data = [["Batter", "Runs", "Balls"]]
-        for b in inn['batting_card']:
-            batter_data.append([b['name'], str(b['runs']), str(b['balls'])])
-        batter_table = Table(batter_data, colWidths=[150, 40, 40])
-        batter_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-        ]))
-
-        # Bowling Scorecard
-        bowler_data = [["Bowler", "Wickets", "Runs Conceded", "Overs"]]
-        for b in inn['bowling_card']:
-            bowler_data.append([
-                b['name'], str(b['wickets']), str(b['runs_conceded']), str(b['overs'])
-            ])
-        bowler_table = Table(bowler_data, colWidths=[150, 40, 60, 40])
-        bowler_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-        ]))
-
-        col_data.append([p_header, Spacer(1, 6), batter_table, Spacer(1, 6), bowler_table])
-
-    # Side-by-side layout
-    summary_table = Table([col_data], colWidths=[doc.width / 2, doc.width / 2])
-    summary_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
-    elements.append(summary_table)
-
+    # Title and Match Summary
+    elements.append(Paragraph("MATCH SUMMARY", title_style))
+    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(f"Match Date: {data['match_date']}", normal_style))
+    elements.append(Paragraph(f"Toss Winner: {data['toss_winner']}", normal_style))
+    elements.append(Paragraph(f"Result: {data['result']}", normal_style))
     elements.append(Spacer(1, 20))
-    elements.append(Paragraph(f"<b>Result: {ms['result']}</b>", bold))
+
+    for idx, inn in enumerate(data['innings']):
+        # Batting table
+        batting_data = [["Batter", "Runs", "Balls", "SR"]]
+        for batter in inn['batting_card']:
+            runs = batter["runs"]
+            balls = batter["balls"]
+            sr = round((runs / balls) * 100, 2) if balls > 0 else 0
+            batting_data.append([
+                batter["name"],
+                str(runs),
+                str(balls),
+                f"{sr:.2f}"
+            ])
+
+        # Calculate batting table column widths
+        batting_col_widths = [max(stringWidth(str(row[col]), 'Helvetica', 10) + 10 for row in batting_data) for col in range(len(batting_data[0]))]
+
+        # Bowling table
+        bowling_data = [["Bowler", "Overs", "Runs Conceded", "Wickets"]]
+        for bowler in inn['bowling_card']:
+            bowling_data.append([
+                bowler["name"],
+                f"{bowler['overs']:.1f}",
+                str(bowler["runs_conceded"]),
+                str(bowler["wickets"])
+            ])
+
+        # Calculate bowling table column widths
+        bowling_col_widths = [max(stringWidth(str(row[col]), 'Helvetica', 10) + 10 for row in bowling_data) for col in range(len(bowling_data[0]))]
+
+        innings_header = Paragraph(
+            f"<b>{inn['batting_team']} - {inn['total_runs']}/{inn['wickets']} ({inn['overs']:.1f} overs)</b>",
+            bold_style
+        )
+
+        # Two-column layout for innings summary
+        data_table = Table([
+            [innings_header, ""],
+            [Table(batting_data, colWidths=batting_col_widths), Table(bowling_data, colWidths=bowling_col_widths)]
+        ], colWidths=[doc.width/2 - 10, doc.width/2 - 10])
+        data_table.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ]))
+        elements.append(data_table)
+        elements.append(Spacer(1, 12))
+
+    # Final Match Result
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph(f"Final Result: {data['result']}", bold_style))
+
+    # Second Page: KPIs
     elements.append(PageBreak())
+    elements.append(Paragraph("KEY PERFORMANCE INDICATORS (KPIs)", title_style))
+    elements.append(Spacer(1, 12))
 
-    # KPI Page
-    elements.append(Paragraph("KEY PERFORMANCE INDICATORS (KPIs)", header))
-    elements.append(Spacer(1, 10))
-
-    kpi_data = [["KPI", "Target", "Actual", "Medal"]]
+    # KPI table
+    kpi_table_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
-        kpi_data.append([
-            Paragraph(kpi['name'], normal),
-            str(kpi['target']),
+        kpi_table_data.append([
+            kpi['name'],
+            str(kpi.get('target', '')),
             str(kpi['actual']),
-            Paragraph(f"<b>{kpi['medal']}</b>", normal)
+            kpi['medal']
         ])
-    kpi_table = Table(kpi_data)
+
+    # Auto column widths for KPI table
+    kpi_col_widths = [max(stringWidth(str(row[col]), 'Helvetica', 10) + 10 for row in kpi_table_data) for col in range(len(kpi_table_data[0]))]
+
+    kpi_table = Table(kpi_table_data, colWidths=kpi_col_widths)
     kpi_table.setStyle(TableStyle([
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+        ('TEXTCOLOR', (-1, 1), (-1, -1), colors.blue)
     ]))
     elements.append(kpi_table)
 

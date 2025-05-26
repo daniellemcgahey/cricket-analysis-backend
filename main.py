@@ -3779,7 +3779,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Basic match info
     cursor.execute("""
         SELECT m.match_date, c1.country_name AS team_a, c2.country_name AS team_b, m.toss_winner,
-               m.match_result, m.result_margin
+               m.result
         FROM matches m
         JOIN countries c1 ON m.team_a = c1.country_id
         JOIN countries c2 ON m.team_b = c2.country_id
@@ -3794,8 +3794,7 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
         "team_a": row["team_a"],
         "team_b": row["team_b"],
         "toss_winner": row["toss_winner"],
-        "result": row["match_result"],
-        "result_margin": row["result_margin"],
+        "result": row["result"],
         "innings": innings_data
     }
 
@@ -3850,7 +3849,7 @@ def generate_full_team_report(data: dict):
     # Title & Match Summary
     elements.append(Paragraph(f"Team Match Report: {data['match_summary']['team_a']} vs {data['match_summary']['team_b']}", styles['Title']))
     elements.append(Paragraph(f"Date: {data['match_summary']['match_date']}", styles['Normal']))
-    elements.append(Paragraph(f"Result: {data['match_summary']['result']} ({data['match_summary']['result_margin']})", styles['Normal']))
+    elements.append(Paragraph(f"Result: {data['match_summary']['result']}", styles['Normal']))
     elements.append(Paragraph(f"Toss Winner: {data['match_summary']['toss_winner']}", styles['Normal']))
     elements.append(Spacer(1, 12))
 

@@ -1631,9 +1631,9 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
         "dismissal_breakdown": dict(dismissals)
     })
 
-    # === Zone Effectiveness Stats ===
+    # Updated SQL query
     cursor.execute(f"""
-        SELECT be.pitch_y, bw.bowling_style, be.runs, be.dot_balls,
+        SELECT be.pitch_y, bw.bowling_style, be.runs, be.wides, be.no_balls, be.dot_balls,
             be.edged, be.ball_missed, be.shot_type, be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
@@ -1648,7 +1648,6 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
     zone_data = cursor.fetchall()
 
     zone_labels = ["Full Toss", "Yorker", "Full", "Good", "Short"]
-
     zone_maps = {
         "spin": {
             "Full Toss": (-0.0909, 0.03636),
@@ -1666,7 +1665,6 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
         }
     }
 
-    # Initialize stats for all zones to guarantee output order
     zone_stats = {label: {"balls": 0, "runs": 0, "wickets": 0, "dots": 0, "false_shots": 0} for label in zone_labels}
 
     for row in zone_data:
@@ -1674,10 +1672,12 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
         style = (row["bowling_style"] or "").lower()
         zone_map = zone_maps["spin"] if "spin" in style else zone_maps["pace"]
 
+        total_runs = (row["runs"] or 0) + (row["wides"] or 0) + (row["no_balls"] or 0)
+
         for zone, (start, end) in zone_map.items():
             if start <= pitch_y < end:
                 zone_stats[zone]["balls"] += 1
-                zone_stats[zone]["runs"] += row["runs"]
+                zone_stats[zone]["runs"] += total_runs
                 zone_stats[zone]["dots"] += row["dot_balls"] or 0
                 if row["dismissal_type"] and row["dismissal_type"].lower() != "not out":
                     zone_stats[zone]["wickets"] += 1
@@ -1685,7 +1685,7 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
                     zone_stats[zone]["false_shots"] += 1
                 break
 
-    # Build final output, maintaining the zone order
+    # Build final output
     zone_effectiveness = []
     for zone in zone_labels:
         z = zone_stats[zone]
@@ -1699,6 +1699,7 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
             "dot_pct": round((z["dots"] / balls) * 100, 2),
             "false_shot_pct": round((z["false_shots"] / balls) * 100, 2)
         })
+
 
 
     return {
@@ -3865,8 +3866,6 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     # Add other KPIs similarly...
 
     return kpis, medal_tally
-
-
 
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:

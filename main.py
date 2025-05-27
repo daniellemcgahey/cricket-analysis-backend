@@ -174,6 +174,11 @@ class PlayerDetailedBowlingPayload(BaseModel):
     bowling_style: List[str] = []
     lengths: Optional[List[str]] = None
 
+class MatchBallByBallPayload(BaseModel):
+    team_category: Optional[str] = None
+    tournament: Optional[str] = None
+    match_id: int
+
 
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
@@ -2783,7 +2788,6 @@ def match_report(match_id: int, player_id: int):
     }
     return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
 
-
 @app.get("/team-match-report/{match_id}/{team_id}/pdf")
 def team_match_report_pdf(match_id: int, team_id: int):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -2810,7 +2814,74 @@ def team_match_report_pdf(match_id: int, team_id: int):
 
     return StreamingResponse(pdf, media_type="application/pdf")
 
+@app.post("/match-ball-by-ball")
+def get_match_ball_by_ball(payload: MatchBallByBallPayload):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
+    # Validate match ID
+    cursor.execute("""
+        SELECT match_id FROM matches WHERE match_id = ?
+    """, (payload.match_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return {"error": "Match not found."}
+
+    cursor.execute("""
+        SELECT 
+            be.innings_id,
+            be.over_number,
+            be.ball_number,
+            be.batter_id,
+            be.bowler_id,
+            be.non_striker_id,
+            be.runs,
+            be.wides,
+            be.no_balls,
+            be.byes,
+            be.leg_byes,
+            be.dismissal_type,
+            p1.player_name AS bowler_name
+        FROM ball_events be
+        JOIN players p1 ON be.bowler_id = p1.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+        ORDER BY be.innings_id, CAST(be.over_number AS REAL), be.ball_number
+    """, (payload.match_id,))
+
+    balls = []
+    for row in cursor.fetchall():
+        # Format ball outcome
+        outcome = ""
+        if row["wides"]:
+            outcome = f"[Wd{row['wides'] if row['wides'] > 1 else ''}]"
+        elif row["no_balls"]:
+            outcome = f"[NB{row['runs'] if row['runs'] else ''}]"
+            if row["byes"]:
+                outcome += f"+{row['byes']}B"
+            elif row["leg_byes"]:
+                outcome += f"+{row['leg_byes']}LB"
+        elif row["byes"]:
+            outcome = f"[{row['byes']}B]"
+        elif row["leg_byes"]:
+            outcome = f"[{row['leg_byes']}LB]"
+        elif row["dismissal_type"] and row["dismissal_type"] != "not out":
+            outcome = "W"
+        else:
+            outcome = str(row["runs"])
+
+        balls.append({
+            "innings_id": row["innings_id"],
+            "over_number": row["over_number"],
+            "ball_number": row["ball_number"],
+            "bowler_name": row["bowler_name"],
+            "outcome": outcome
+        })
+
+    conn.close()
+    return {"balls": balls}
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

@@ -2099,98 +2099,77 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Get innings IDs for the selected match
+    # Get partnerships for the innings in the match
     cursor.execute("""
-        SELECT innings_id FROM innings
-        WHERE match_id = ?
+        SELECT p.partnership_id, p.innings_id, p.start_wicket, p.batter1_id, p.batter2_id,
+               p.start_over, p.end_over, p1.player_name AS batter1_name, p2.player_name AS batter2_name
+        FROM partnerships p
+        LEFT JOIN players p1 ON p.batter1_id = p1.player_id
+        LEFT JOIN players p2 ON p.batter2_id = p2.player_id
+        WHERE p.innings_id IN (SELECT innings_id FROM innings WHERE match_id = ?)
+        ORDER BY p.start_wicket ASC
     """, (payload.match_id,))
-    innings_rows = cursor.fetchall()
-    innings_ids = [row["innings_id"] for row in innings_rows]
-
-    if not innings_ids:
-        conn.close()
-        return {"partnerships": []}
+    partnership_rows = cursor.fetchall()
 
     partnerships = []
 
-    for innings_id in innings_ids:
-        # Fetch partnerships for this innings
+    for p in partnership_rows:
+        # Use the tested SQL directly
         cursor.execute("""
-            SELECT 
-                partnership_id, start_wicket, batter1_id, batter2_id,
-                start_over, end_over,
-                p1.player_name AS batter1_name,
-                p2.player_name AS batter2_name
-            FROM partnerships
-            LEFT JOIN players p1 ON batter1_id = p1.player_id
-            LEFT JOIN players p2 ON batter2_id = p2.player_id
-            WHERE innings_id = ?
-            ORDER BY start_wicket ASC
-        """, (innings_id,))
-        partnership_rows = cursor.fetchall()
+            WITH balls_in_partnership AS (
+                SELECT 
+                    over_number,
+                    ball_number,
+                    batter_id,
+                    non_striker_id,
+                    runs,
+                    wides,
+                    no_balls,
+                    byes,
+                    leg_byes
+                FROM ball_events
+                WHERE innings_id = ?
+                  AND (
+                    (batter_id = ? AND non_striker_id = ?)
+                    OR (batter_id = ? AND non_striker_id = ?)
+                  )
+            )
+            SELECT
+                (SELECT MIN(over_number || '.' || ball_number) FROM balls_in_partnership) AS start_ball,
+                (SELECT MAX(over_number || '.' || ball_number) FROM balls_in_partnership) AS end_ball,
+                (SELECT SUM(runs + wides + no_balls + byes + leg_byes) FROM balls_in_partnership) AS partnership_runs,
+                (SELECT COUNT(*) FROM balls_in_partnership WHERE wides = 0) AS partnership_legal_balls,
+                (SELECT SUM(runs) FROM balls_in_partnership WHERE batter_id = ?) AS batter1_runs,
+                (SELECT COUNT(*) FROM balls_in_partnership WHERE batter_id = ? AND wides = 0) AS batter1_legal_balls,
+                (SELECT SUM(runs) FROM balls_in_partnership WHERE batter_id = ?) AS batter2_runs,
+                (SELECT COUNT(*) FROM balls_in_partnership WHERE batter_id = ? AND wides = 0) AS batter2_legal_balls
+        """, (
+            p["innings_id"],
+            p["batter1_id"], p["batter2_id"],
+            p["batter2_id"], p["batter1_id"],
+            p["batter1_id"],
+            p["batter1_id"],
+            p["batter2_id"],
+            p["batter2_id"]
+        ))
 
-        for p in partnership_rows:
-            # Determine total partnership runs and legal balls
-            cursor.execute("""
-                WITH balls_in_partnership AS (
-                    SELECT 
-                        over_number,
-                        ball_number,
-                        batter_id,
-                        non_striker_id,
-                        runs,
-                        wides,
-                        no_balls,
-                        byes,
-                        leg_byes
-                    FROM ball_events
-                    WHERE innings_id = ?
-                      AND (
-                        (batter_id = ? AND non_striker_id = ?)
-                        OR (batter_id = ? AND non_striker_id = ?)
-                      )
-                      AND (
-                        CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10.0)
-                        BETWEEN ? AND ?
-                      )
-                )
-                SELECT
-                    (SELECT SUM(runs + wides + no_balls + byes + leg_byes) FROM balls_in_partnership) AS partnership_runs,
-                    (SELECT COUNT(*) FROM balls_in_partnership WHERE wides = 0) AS partnership_legal_balls,
-                    (SELECT SUM(runs) FROM balls_in_partnership WHERE batter_id = ?) AS batter1_runs,
-                    (SELECT COUNT(*) FROM balls_in_partnership WHERE batter_id = ? AND wides = 0) AS batter1_legal_balls,
-                    (SELECT SUM(runs) FROM balls_in_partnership WHERE batter_id = ?) AS batter2_runs,
-                    (SELECT COUNT(*) FROM balls_in_partnership WHERE batter_id = ? AND wides = 0) AS batter2_legal_balls,
-                    (SELECT MIN(over_number || '.' || ball_number) FROM balls_in_partnership) AS start_ball,
-                    (SELECT MAX(over_number || '.' || ball_number) FROM balls_in_partnership) AS end_ball
-            """, (
-                innings_id,
-                p["batter1_id"], p["batter2_id"],
-                p["batter2_id"], p["batter1_id"],
-                p["start_over"], p["end_over"],
-                p["batter1_id"],
-                p["batter1_id"],
-                p["batter2_id"],
-                p["batter2_id"]
-            ))
+        stats = cursor.fetchone()
 
-            stats = cursor.fetchone()
-
-            partnerships.append({
-                "partnership_id": p["partnership_id"],
-                "innings_id": innings_id,
-                "start_wicket": p["start_wicket"],
-                "batter1_name": p["batter1_name"],
-                "batter2_name": p["batter2_name"],
-                "start_ball": stats["start_ball"],
-                "end_ball": stats["end_ball"],
-                "partnership_runs": stats["partnership_runs"] or 0,
-                "partnership_legal_balls": stats["partnership_legal_balls"] or 0,
-                "batter1_runs": stats["batter1_runs"] or 0,
-                "batter1_legal_balls": stats["batter1_legal_balls"] or 0,
-                "batter2_runs": stats["batter2_runs"] or 0,
-                "batter2_legal_balls": stats["batter2_legal_balls"] or 0,
-            })
+        partnerships.append({
+            "partnership_id": p["partnership_id"],
+            "innings_id": p["innings_id"],
+            "start_wicket": p["start_wicket"],
+            "batter1_name": p["batter1_name"],
+            "batter2_name": p["batter2_name"],
+            "start_ball": stats["start_ball"],
+            "end_ball": stats["end_ball"],
+            "partnership_runs": stats["partnership_runs"] or 0,
+            "partnership_legal_balls": stats["partnership_legal_balls"] or 0,
+            "batter1_runs": stats["batter1_runs"] or 0,
+            "batter1_legal_balls": stats["batter1_legal_balls"] or 0,
+            "batter2_runs": stats["batter2_runs"] or 0,
+            "batter2_legal_balls": stats["batter2_legal_balls"] or 0,
+        })
 
     conn.close()
     return {"partnerships": partnerships}

@@ -2098,9 +2098,10 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Get innings for the match
+    # Get innings and batting teams for the match
     cursor.execute("""
-        SELECT innings_id, batting_team FROM innings
+        SELECT innings_id, batting_team
+        FROM innings
         WHERE match_id = ?
     """, (payload.match_id,))
     innings_data = cursor.fetchall()
@@ -2127,15 +2128,16 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
 
         # Fetch ball-by-ball data for this innings
         cursor.execute("""
-            SELECT ball_id, batter_id, over_number, ball_number, runs
+            SELECT 
+                ball_id, batter_id, non_striker_id, over_number, ball_number, runs
             FROM ball_events
             WHERE innings_id = ?
             ORDER BY CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10)
         """, (innings_id,))
         balls = cursor.fetchall()
 
-        # For each partnership, calculate actual batter contributions
         partnership_stats = []
+
         for p in partnerships:
             start_over = p["start_over"]
             end_over = p["end_over"]
@@ -2150,12 +2152,17 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
             for ball in balls:
                 over_float = float(ball["over_number"]) + float(ball["ball_number"]) / 10
                 if start_over <= over_float <= end_over:
-                    if ball["batter_id"] == batter1_id:
-                        batter1_runs += ball["runs"]
-                        batter1_balls += 1
-                    elif ball["batter_id"] == batter2_id:
-                        batter2_runs += ball["runs"]
-                        batter2_balls += 1
+                    # Check if ball's batter and non-striker are the current partnership pair
+                    ball_pair = {ball["batter_id"], ball["non_striker_id"]}
+                    partnership_pair = {batter1_id, batter2_id}
+                    if ball_pair == partnership_pair:
+                        # Increment for the batter_id (the one who faced the ball)
+                        if ball["batter_id"] == batter1_id:
+                            batter1_runs += ball["runs"]
+                            batter1_balls += 1
+                        elif ball["batter_id"] == batter2_id:
+                            batter2_runs += ball["runs"]
+                            batter2_balls += 1
 
             partnership_stats.append({
                 "partnership_id": p["partnership_id"],

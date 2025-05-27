@@ -2184,12 +2184,10 @@ def get_partnership_details(partnership_id: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Get partnership details and innings info
+    # Get partnership details
     cursor.execute("""
         SELECT 
             p.innings_id,
-            p.start_over,
-            p.end_over,
             p.batter1_id,
             p.batter2_id
         FROM partnerships p
@@ -2202,12 +2200,10 @@ def get_partnership_details(partnership_id: int):
         return {}
 
     innings_id = p_row["innings_id"]
-    start_over = p_row["start_over"]
-    end_over = p_row["end_over"]
     batter1_id = p_row["batter1_id"]
     batter2_id = p_row["batter2_id"]
 
-    # Get all balls in this partnership
+    # Use the same logic as partnership summary: no over-based filtering
     cursor.execute("""
         SELECT 
             runs,
@@ -2221,16 +2217,15 @@ def get_partnership_details(partnership_id: int):
             batting_intent_score
         FROM ball_events
         WHERE innings_id = ?
-          AND (CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10)) BETWEEN ? AND ?
           AND (
               (batter_id = ? AND non_striker_id = ?)
            OR (batter_id = ? AND non_striker_id = ?)
           )
-    """, (innings_id, start_over, end_over, batter1_id, batter2_id, batter2_id, batter1_id))
+    """, (innings_id, batter1_id, batter2_id, batter2_id, batter1_id))
 
     balls = cursor.fetchall()
 
-    # Calculate metrics
+    # Calculate stats
     total_runs = 0
     total_balls = 0
     total_intent = 0
@@ -2261,7 +2256,6 @@ def get_partnership_details(partnership_id: int):
             total_intent += b["batting_intent_score"]
             intent_count += 1
 
-        # Count scoring shots
         if runs == 1:
             ones += 1
         elif runs == 2:
@@ -2273,7 +2267,6 @@ def get_partnership_details(partnership_id: int):
         elif runs == 6:
             sixes += 1
 
-        # Wagon wheel data
         if b["shot_x"] is not None and b["shot_y"] is not None:
             wagon_wheel_data.append({
                 "x": b["shot_x"],
@@ -2299,6 +2292,7 @@ def get_partnership_details(partnership_id: int):
         },
         "wagon_wheel": wagon_wheel_data
     }
+
 
 @app.post("/player-detailed-batting")
 def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):

@@ -2218,7 +2218,7 @@ def get_partnership_details(partnership_id: int):
             batter_id,
             shot_x,
             shot_y,
-            intent
+            batting_intent_score
         FROM ball_events
         WHERE innings_id = ?
           AND (CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10)) BETWEEN ? AND ?
@@ -2257,8 +2257,8 @@ def get_partnership_details(partnership_id: int):
         if wides == 0:
             total_balls += 1
 
-        if b["intent"] is not None:
-            total_intent += b["intent"]
+        if b["batting_intent_score"] is not None:
+            total_intent += b["batting_intent_score"]
             intent_count += 1
 
         # Count scoring shots

@@ -2816,6 +2816,9 @@ def team_match_report_pdf(match_id: int, team_id: int):
 
 @app.post("/match-ball-by-ball")
 def get_match_ball_by_ball(payload: MatchBallByBallPayload):
+    import os
+    import sqlite3
+
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -2829,6 +2832,7 @@ def get_match_ball_by_ball(payload: MatchBallByBallPayload):
         conn.close()
         return {"error": "Match not found."}
 
+    # Main data query with batting team name
     cursor.execute("""
         SELECT 
             be.innings_id,
@@ -2843,7 +2847,8 @@ def get_match_ball_by_ball(payload: MatchBallByBallPayload):
             be.byes,
             be.leg_byes,
             be.dismissal_type,
-            p1.player_name AS bowler_name
+            p1.player_name AS bowler_name,
+            i.batting_team AS batting_team
         FROM ball_events be
         JOIN players p1 ON be.bowler_id = p1.player_id
         JOIN innings i ON be.innings_id = i.innings_id
@@ -2853,7 +2858,6 @@ def get_match_ball_by_ball(payload: MatchBallByBallPayload):
 
     balls = []
     for row in cursor.fetchall():
-        # Format ball outcome
         outcome = ""
         if row["wides"]:
             outcome = f"[Wd{row['wides'] if row['wides'] > 1 else ''}]"
@@ -2877,11 +2881,19 @@ def get_match_ball_by_ball(payload: MatchBallByBallPayload):
             "over_number": row["over_number"],
             "ball_number": row["ball_number"],
             "bowler_name": row["bowler_name"],
+            "batting_team": row["batting_team"],  # ✅ Include batting team
+            "runs": row["runs"] or 0,
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
+            "byes": row["byes"] or 0,
+            "leg_byes": row["leg_byes"] or 0,
+            "dismissal_type": row["dismissal_type"],
             "outcome": outcome
         })
 
     conn.close()
     return {"balls": balls}
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

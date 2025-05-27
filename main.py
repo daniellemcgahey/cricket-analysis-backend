@@ -2102,10 +2102,12 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
     # Get partnerships for the innings in the match
     cursor.execute("""
         SELECT p.partnership_id, p.innings_id, p.start_wicket, p.batter1_id, p.batter2_id,
-               p.start_over, p.end_over, p1.player_name AS batter1_name, p2.player_name AS batter2_name
+               p.start_over, p.end_over, p1.player_name AS batter1_name, p2.player_name AS batter2_name,
+               i.batting_team AS batting_team_name
         FROM partnerships p
         LEFT JOIN players p1 ON p.batter1_id = p1.player_id
         LEFT JOIN players p2 ON p.batter2_id = p2.player_id
+        JOIN innings i ON p.innings_id = i.innings_id
         WHERE p.innings_id IN (SELECT innings_id FROM innings WHERE match_id = ?)
         ORDER BY p.start_wicket ASC
     """, (payload.match_id,))
@@ -2158,6 +2160,7 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
         partnerships.append({
             "partnership_id": p["partnership_id"],
             "innings_id": p["innings_id"],
+            "batting_team": p["batting_team_name"],
             "start_wicket": p["start_wicket"],
             "batter1_name": p["batter1_name"],
             "batter2_name": p["batter2_name"],

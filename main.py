@@ -2098,87 +2098,86 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Get innings IDs for the selected match
+    # Get innings for the match
     cursor.execute("""
-        SELECT innings_id FROM innings
+        SELECT innings_id, batting_team FROM innings
         WHERE match_id = ?
     """, (payload.match_id,))
-    innings_rows = cursor.fetchall()
-    innings_ids = [row["innings_id"] for row in innings_rows]
+    innings_data = cursor.fetchall()
 
-    if not innings_ids:
-        conn.close()
-        return {"partnerships": []}
+    partnerships_by_innings = {}
 
-    # Fetch partnerships
-    cursor.execute(f"""
-        SELECT 
-            p.partnership_id,
-            p.innings_id,
-            p.start_wicket,
-            p.batter1_id,
-            p.batter2_id,
-            p.runs,
-            p.balls,
-            p.dots,
-            p.ones,
-            p.twos,
-            p.threes,
-            p.fours,
-            p.sixes,
-            p.start_over,
-            p.end_over,
-            p.unbeaten,
-            p1.player_name AS batter1_name,
-            p2.player_name AS batter2_name
-        FROM partnerships p
-        LEFT JOIN players p1 ON p.batter1_id = p1.player_id
-        LEFT JOIN players p2 ON p.batter2_id = p2.player_id
-        WHERE p.innings_id IN ({','.join(['?'] * len(innings_ids))})
-        ORDER BY p.start_wicket ASC
-    """, innings_ids)
+    for innings in innings_data:
+        innings_id = innings["innings_id"]
+        batting_team = innings["batting_team"]
 
-    partnership_rows = cursor.fetchall()
-
-    partnerships = []
-
-    for p in partnership_rows:
-        partnership_id = p["partnership_id"]
-
-        # Fetch ball-by-ball contribution for each batter within this partnership
+        # Fetch partnerships for this innings
         cursor.execute("""
-            SELECT batter_id, SUM(runs) AS batter_runs, COUNT(*) AS balls_faced
+            SELECT 
+                p.*, 
+                p1.player_name AS batter1_name,
+                p2.player_name AS batter2_name
+            FROM partnerships p
+            LEFT JOIN players p1 ON p.batter1_id = p1.player_id
+            LEFT JOIN players p2 ON p.batter2_id = p2.player_id
+            WHERE p.innings_id = ?
+            ORDER BY p.start_wicket, p.start_over
+        """, (innings_id,))
+        partnerships = cursor.fetchall()
+
+        # Fetch ball-by-ball data for this innings
+        cursor.execute("""
+            SELECT ball_id, batter_id, over_number, ball_number, runs
             FROM ball_events
             WHERE innings_id = ?
-            AND CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10) BETWEEN ? AND ?
-            GROUP BY batter_id
-        """, (p["innings_id"], p["start_over"], p["end_over"]))
+            ORDER BY CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10)
+        """, (innings_id,))
+        balls = cursor.fetchall()
 
+        # For each partnership, calculate actual batter contributions
+        partnership_stats = []
+        for p in partnerships:
+            start_over = p["start_over"]
+            end_over = p["end_over"]
+            batter1_id = p["batter1_id"]
+            batter2_id = p["batter2_id"]
 
-        batter_stats = {row["batter_id"]: row for row in cursor.fetchall()}
+            batter1_runs = 0
+            batter1_balls = 0
+            batter2_runs = 0
+            batter2_balls = 0
 
-        batter1_runs = batter_stats.get(p["batter1_id"], {"batter_runs": 0, "balls_faced": 0})
-        batter2_runs = batter_stats.get(p["batter2_id"], {"batter_runs": 0, "balls_faced": 0})
+            for ball in balls:
+                over_float = float(ball["over_number"]) + float(ball["ball_number"]) / 10
+                if start_over <= over_float <= end_over:
+                    if ball["batter_id"] == batter1_id:
+                        batter1_runs += ball["runs"]
+                        batter1_balls += 1
+                    elif ball["batter_id"] == batter2_id:
+                        batter2_runs += ball["runs"]
+                        batter2_balls += 1
 
-        partnerships.append({
-            "partnership_id": partnership_id,
-            "innings_id": p["innings_id"],
-            "start_wicket": p["start_wicket"],
-            "batter1_name": p["batter1_name"],
-            "batter2_name": p["batter2_name"],
-            "partnership_runs": p["runs"],
-            "partnership_balls": p["balls"],
-            "start_over": p["start_over"],
-            "end_over": p["end_over"],
-            "unbeaten": p["unbeaten"],
-            "batter1_runs": batter1_runs["batter_runs"],
-            "batter1_balls": batter1_runs["balls_faced"],
-            "batter2_runs": batter2_runs["batter_runs"],
-            "batter2_balls": batter2_runs["balls_faced"],
-        })
+            partnership_stats.append({
+                "partnership_id": p["partnership_id"],
+                "start_wicket": p["start_wicket"],
+                "start_over": p["start_over"],
+                "end_over": p["end_over"],
+                "unbeaten": p["unbeaten"],
+                "batter1_name": p["batter1_name"],
+                "batter2_name": p["batter2_name"],
+                "partnership_runs": p["runs"],
+                "partnership_balls": p["balls"],
+                "batter1_runs": batter1_runs,
+                "batter1_balls": batter1_balls,
+                "batter2_runs": batter2_runs,
+                "batter2_balls": batter2_balls
+            })
+
+        partnerships_by_innings[batting_team] = partnership_stats
 
     conn.close()
-    return {"partnerships": partnerships}
+    return {"partnerships_by_innings": partnerships_by_innings}
+
 
 @app.post("/player-detailed-batting")
 def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):

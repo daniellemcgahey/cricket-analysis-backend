@@ -2177,7 +2177,128 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
     conn.close()
     return {"partnerships": partnerships}
 
+@app.get("/partnership-details/{partnership_id}")
+def get_partnership_details(partnership_id: int):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
+    # Get partnership details and innings info
+    cursor.execute("""
+        SELECT 
+            p.innings_id,
+            p.start_over,
+            p.end_over,
+            p.batter1_id,
+            p.batter2_id
+        FROM partnerships p
+        WHERE p.partnership_id = ?
+    """, (partnership_id,))
+    p_row = cursor.fetchone()
+
+    if not p_row:
+        conn.close()
+        return {}
+
+    innings_id = p_row["innings_id"]
+    start_over = p_row["start_over"]
+    end_over = p_row["end_over"]
+    batter1_id = p_row["batter1_id"]
+    batter2_id = p_row["batter2_id"]
+
+    # Get all balls in this partnership
+    cursor.execute("""
+        SELECT 
+            runs,
+            wides,
+            no_balls,
+            byes,
+            leg_byes,
+            batter_id,
+            shot_x,
+            shot_y,
+            intent
+        FROM ball_events
+        WHERE innings_id = ?
+          AND (CAST(over_number AS REAL) + (CAST(ball_number AS REAL)/10)) BETWEEN ? AND ?
+          AND (
+              (batter_id = ? AND non_striker_id = ?)
+           OR (batter_id = ? AND non_striker_id = ?)
+          )
+    """, (innings_id, start_over, end_over, batter1_id, batter2_id, batter2_id, batter1_id))
+
+    balls = cursor.fetchall()
+
+    # Calculate metrics
+    total_runs = 0
+    total_balls = 0
+    total_intent = 0
+    intent_count = 0
+    ones = 0
+    twos = 0
+    threes = 0
+    fours = 0
+    sixes = 0
+    extras = 0
+
+    wagon_wheel_data = []
+
+    for b in balls:
+        runs = b["runs"] or 0
+        wides = b["wides"] or 0
+        no_balls = b["no_balls"] or 0
+        byes = b["byes"] or 0
+        leg_byes = b["leg_byes"] or 0
+
+        extras += wides + no_balls + byes + leg_byes
+        total_runs += runs + wides + no_balls + byes + leg_byes
+
+        if wides == 0:
+            total_balls += 1
+
+        if b["intent"] is not None:
+            total_intent += b["intent"]
+            intent_count += 1
+
+        # Count scoring shots
+        if runs == 1:
+            ones += 1
+        elif runs == 2:
+            twos += 1
+        elif runs == 3:
+            threes += 1
+        elif runs == 4:
+            fours += 1
+        elif runs == 6:
+            sixes += 1
+
+        # Wagon wheel data
+        if b["shot_x"] is not None and b["shot_y"] is not None:
+            wagon_wheel_data.append({
+                "x": b["shot_x"],
+                "y": b["shot_y"],
+                "runs": runs
+            })
+
+    average_intent = round(total_intent / intent_count, 2) if intent_count > 0 else 0
+
+    conn.close()
+
+    return {
+        "summary": {
+            "total_runs": total_runs,
+            "total_balls": total_balls,
+            "average_intent": average_intent,
+            "ones": ones,
+            "twos": twos,
+            "threes": threes,
+            "fours": fours,
+            "sixes": sixes,
+            "extras": extras
+        },
+        "wagon_wheel": wagon_wheel_data
+    }
 
 @app.post("/player-detailed-batting")
 def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):

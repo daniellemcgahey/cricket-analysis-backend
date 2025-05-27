@@ -2179,6 +2179,7 @@ def get_match_partnerships(payload: MatchPartnershipsPayload):
 
 @app.get("/partnership-details/{partnership_id}")
 def get_partnership_details(partnership_id: int):
+    import sqlite3
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -2203,7 +2204,7 @@ def get_partnership_details(partnership_id: int):
     batter1_id = p_row["batter1_id"]
     batter2_id = p_row["batter2_id"]
 
-    # Use the same logic as partnership summary: no over-based filtering
+    # Get all balls in this partnership
     cursor.execute("""
         SELECT 
             runs,
@@ -2214,7 +2215,8 @@ def get_partnership_details(partnership_id: int):
             batter_id,
             shot_x,
             shot_y,
-            batting_intent_score
+            batting_intent_score,
+            dismissal_type
         FROM ball_events
         WHERE innings_id = ?
           AND (
@@ -2225,7 +2227,7 @@ def get_partnership_details(partnership_id: int):
 
     balls = cursor.fetchall()
 
-    # Calculate stats
+    # Calculate metrics
     total_runs = 0
     total_balls = 0
     total_intent = 0
@@ -2236,6 +2238,7 @@ def get_partnership_details(partnership_id: int):
     fours = 0
     sixes = 0
     extras = 0
+    scoring_shots = 0
 
     wagon_wheel_data = []
 
@@ -2251,6 +2254,8 @@ def get_partnership_details(partnership_id: int):
 
         if wides == 0:
             total_balls += 1
+            if runs > 0:
+                scoring_shots += 1
 
         if b["batting_intent_score"] is not None:
             total_intent += b["batting_intent_score"]
@@ -2267,14 +2272,17 @@ def get_partnership_details(partnership_id: int):
         elif runs == 6:
             sixes += 1
 
+        # Wagon wheel data with dismissal_type included for frontend filter logic
         if b["shot_x"] is not None and b["shot_y"] is not None:
             wagon_wheel_data.append({
                 "x": b["shot_x"],
                 "y": b["shot_y"],
-                "runs": runs
+                "runs": runs,
+                "dismissal_type": b["dismissal_type"]  # Add this field for frontend compatibility
             })
 
     average_intent = round(total_intent / intent_count, 2) if intent_count > 0 else 0
+    scoring_shot_pct = round((scoring_shots / total_balls) * 100, 2) if total_balls > 0 else 0
 
     conn.close()
 
@@ -2288,11 +2296,11 @@ def get_partnership_details(partnership_id: int):
             "threes": threes,
             "fours": fours,
             "sixes": sixes,
-            "extras": extras
+            "extras": extras,
+            "scoring_shot_pct": scoring_shot_pct
         },
         "wagon_wheel": wagon_wheel_data
     }
-
 
 @app.post("/player-detailed-batting")
 def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):

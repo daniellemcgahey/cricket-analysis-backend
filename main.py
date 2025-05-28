@@ -4034,43 +4034,389 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
     }
 
 def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
-    # Only calculate KPIs if team_name includes "Brasil"
-    if "brasil" not in team_name.lower():
-        return [], {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
+    # 🎯 Medal thresholds for all KPIs
+    thresholds_config = {
+        "Total Runs": {"Platinum": 180, "Gold": 160, "Silver": 140, "Bronze": 120},
+        "Scoring Shot %": {"Platinum": 70, "Gold": 60, "Silver": 55, "Bronze": 50},
+        "PP Wickets": {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 1},
+        "PP Runs": {"Platinum": 60, "Gold": 50, "Silver": 40, "Bronze": 30},
+        "PP Boundaries": {"Platinum": 8, "Gold": 6, "Silver": 5, "Bronze": 4},
+        "Death Scoring Shot %": {"Platinum": 85, "Gold": 75, "Silver": 70, "Bronze": 65},
+        "Dot Ball %": {"Platinum": 70, "Gold": 60, "Silver": 55, "Bronze": 50},
+        "PP Dot Ball %": {"Platinum": 75, "Gold": 70, "Silver": 65, "Bronze": 60},
+        "PP Boundaries (Bowling)": {"Platinum": 0, "Gold": 2, "Silver": 3, "Bronze": 4},
+        "PP Wickets (Bowling)": {"Platinum": 4, "Gold": 3, "Silver": 2, "Bronze": 1},
+        "PP Score (Bowling)": {"Platinum": 15, "Gold": 20, "Silver": 25, "Bronze": 30},
+        "Extras": {"Platinum": 2, "Gold": 5, "Silver": 7, "Bronze": 10},
+        "Death Boundaries": {"Platinum": 0, "Gold": 2, "Silver": 3, "Bronze": 4},
+        "Chances Taken %": {"Platinum": 100, "Gold": 90, "Silver": 80, "Bronze": 70},
+        "Run Outs Taken %": {"Platinum": 100, "Gold": 90, "Silver": 85, "Bronze": 70},
+    }
 
     kpis = []
     medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
 
-    # Example KPI calculation
+    def assign_medal(value, thresholds, lower_is_better=False):
+        thresholds = thresholds.copy()
+        if lower_is_better:
+            thresholds = {k: -v for k, v in thresholds.items()}
+            value = -value
+        if value >= thresholds["Platinum"]:
+            return "Platinum"
+        elif value >= thresholds["Gold"]:
+            return "Gold"
+        elif value >= thresholds["Silver"]:
+            return "Silver"
+        elif value >= thresholds["Bronze"]:
+            return "Bronze"
+        return "None"
+
+
+    # Total Runs
     cursor.execute("""
-        SELECT 
-            COALESCE(SUM(be.runs), 0) +
-            COALESCE(SUM(be.wides), 0) +
-            COALESCE(SUM(be.no_balls), 0) +
-            COALESCE(SUM(be.byes), 0) +
-            COALESCE(SUM(be.leg_byes), 0) AS runs_pp
+        SELECT COALESCE(SUM(be.runs), 0) + COALESCE(SUM(be.wides), 0) +
+            COALESCE(SUM(be.no_balls), 0) + COALESCE(SUM(be.byes), 0) +
+            COALESCE(SUM(be.leg_byes), 0) AS total_runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ?
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["total_runs"] or 0
+    thresholds = thresholds_config["Total Runs"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Total Runs", "actual": actual, "targets": thresholds, "medal": medal})
+
+
+    # Scoring Shot Pecentage
+    cursor.execute("""
+        SELECT COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ?
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    scoring_shots = row["scoring_shots"] or 0
+    total_balls = row["total_balls"] or 1  # prevent division by zero
+    actual = (scoring_shots / total_balls) * 100
+    thresholds = thresholds_config["Scoring Shot %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Scoring Shot %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+    # Powerplay Wickets
+    cursor.execute("""
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1 AND be.wicket = 1
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["wickets"] or 0
+    thresholds = thresholds_config["PP Wickets"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # Lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Wickets", "actual": actual, "targets": thresholds, "medal": medal})
+
+
+    # Powerplay Runs
+    cursor.execute("""
+        SELECT COALESCE(SUM(be.runs), 0) + COALESCE(SUM(be.wides), 0) +
+            COALESCE(SUM(be.no_balls), 0) + COALESCE(SUM(be.byes), 0) + 
+            COALESCE(SUM(be.leg_byes), 0) AS pp_runs
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1
     """, (match_id, team_name))
-    actual = cursor.fetchone()["runs_pp"] or 0
-
-    thresholds = {"Platinum": 50, "Gold": 45, "Silver": 40, "Bronze": 35}
+    actual = cursor.fetchone()["pp_runs"] or 0
+    thresholds = thresholds_config["PP Runs"]
     medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Runs", "actual": actual, "targets": thresholds, "medal": medal})
 
-    if medal in medal_tally:
-        medal_tally[medal] += 1
 
-    kpis.append({
-        "name": "Powerplay Runs",
-        "actual": actual,
-        "targets": thresholds,
-        "medal": medal
-    })
+    # Powerplay Boundaries
+    cursor.execute("""
+        SELECT COUNT(*) AS boundaries
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1 AND be.runs >= 4
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["boundaries"] or 0
+    thresholds = thresholds_config["PP Boundaries"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Boundaries", "actual": actual, "targets": thresholds, "medal": medal})
 
-    # Add other KPIs similarly...
 
-    return kpis, medal_tally
+    # Partnerships >25
+    cursor.execute("""
+        SELECT COUNT(*) AS partnerships
+        FROM partnerships p
+        JOIN innings i ON p.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND p.runs >= 25
+    """, (match_id, team_name))
+    actual = "Yes" if cursor.fetchone()["partnerships"] >= 3 else "No"
+    medal = "Gold" if actual == "Yes" else "None"
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "3x25+ Partnerships", "actual": actual, "targets": "Yes", "medal": medal})
+
+    # Partnerships >15
+    cursor.execute("""
+        SELECT COUNT(*) AS partnerships
+        FROM partnerships p
+        JOIN innings i ON p.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND p.runs >= 15
+    """, (match_id, team_name))
+    actual = "Yes" if cursor.fetchone()["partnerships"] >= 2 else "No"
+    medal = "Gold" if actual == "Yes" else "None"
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "2x15+ Partnerships", "actual": actual, "targets": "Yes", "medal": medal})
+
+
+
+    # Death Scoring Shot Percentage
+    cursor.execute("""
+        SELECT COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ? AND be.over_number >= 16
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    scoring_shots = row["scoring_shots"] or 0
+    total_balls = row["total_balls"] or 1
+    actual = (scoring_shots / total_balls) * 100
+    thresholds = thresholds_config["Death Scoring Shot %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Death Scoring Shot %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+    # Runs Per Over (Batting)
+    cursor.execute("""
+        SELECT over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ?
+        GROUP BY over_number
+        ORDER BY over_number
+    """, (match_id, team_name))
+    over_runs_batting = cursor.fetchall()
+    batting_over_runs = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs_batting]
+
+
+
+    # Total Runs Conceded
+    cursor.execute("""
+        SELECT COALESCE(SUM(be.runs), 0) + COALESCE(SUM(be.wides), 0) +
+            COALESCE(SUM(be.no_balls), 0) + COALESCE(SUM(be.byes), 0) +
+            COALESCE(SUM(be.leg_byes), 0) AS total_runs_conceded
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["total_runs_conceded"] or 0
+    thresholds = thresholds_config["Total Runs"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Total Runs Conceded", "actual": actual, "targets": thresholds, "medal": medal})
+
+    # Dot Ball Percentage
+    cursor.execute("""
+        SELECT COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs=0 AND be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS dot_balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    dot_balls = row["dot_balls"] or 0
+    total_balls = row["total_balls"] or 1
+    actual = (dot_balls / total_balls) * 100
+    thresholds = thresholds_config["Dot Ball %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Dot Ball %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+
+    # Powerplay Dot Ball Percentage
+    cursor.execute("""
+        SELECT COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs=0 AND be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS dot_balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    dot_balls = row["dot_balls"] or 0
+    total_balls = row["total_balls"] or 1
+    actual = (dot_balls / total_balls) * 100
+    thresholds = thresholds_config["PP Dot Ball %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Dot Ball %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+    # Powerplay Boundaries
+    cursor.execute("""
+        SELECT COUNT(*) AS boundaries
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1 AND be.runs >= 4
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["boundaries"] or 0
+    thresholds = thresholds_config["PP Boundaries (Bowling)"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Boundaries (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
+
+    # Powerplay Wickets
+    cursor.execute("""
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1 AND be.wicket = 1
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["wickets"] or 0
+    thresholds = thresholds_config["PP Wickets (Bowling)"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Wickets (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
+
+
+    # Powerplay Runs
+    cursor.execute("""
+        SELECT COALESCE(SUM(be.runs), 0) + COALESCE(SUM(be.wides), 0) +
+            COALESCE(SUM(be.no_balls), 0) + COALESCE(SUM(be.byes), 0) +
+            COALESCE(SUM(be.leg_byes), 0) AS pp_score
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["pp_score"] or 0
+    thresholds = thresholds_config["PP Score (Bowling)"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "PP Score (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
+
+    # 0s and 1s Streak
+    cursor.execute("""
+        SELECT be.runs, be.wicket, be.byes, be.leg_byes
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+        ORDER BY be.innings_id, be.over_number, be.ball_number
+    """, (match_id, team_name))
+    balls = cursor.fetchall()
+
+    max_streak = 0
+    current_streak = 0
+
+    for ball in balls:
+        outcome = ball["runs"]
+        if ball["wicket"] == 1 or outcome == 0 or outcome == 1 or ball["leg_byes"] == 1:
+            current_streak += 1
+            max_streak = max(max_streak, current_streak)
+        else:
+            current_streak = 0
+
+    kpis.append({"name": "Max Dots/1s Streak", "actual": max_streak, "targets": "-", "medal": "-"})
+
+    # Extras
+    cursor.execute("""
+        SELECT COALESCE(SUM(be.wides), 0) + COALESCE(SUM(be.no_balls), 0) +
+            COALESCE(SUM(be.byes), 0) + COALESCE(SUM(be.leg_byes), 0) AS extras
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["extras"] or 0
+    thresholds = thresholds_config["Extras"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Extras", "actual": actual, "targets": thresholds, "medal": medal})
+
+    # Death Boundaries 
+    cursor.execute("""
+        SELECT COUNT(*) AS boundaries
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.over_number >= 16 AND be.runs >= 4
+    """, (match_id, team_name))
+    actual = cursor.fetchone()["boundaries"] or 0
+    thresholds = thresholds_config["Death Boundaries"]
+    medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Death Boundaries", "actual": actual, "targets": thresholds, "medal": medal})
+
+
+    # Runs per Over
+    cursor.execute("""
+        SELECT be.over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+        GROUP BY be.over_number
+        ORDER BY be.over_number
+    """, (match_id, team_name))
+    over_runs = cursor.fetchall()
+    runs_per_over_bowling = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs]
+
+
+    # Fielding Chances Taken
+    cursor.execute("""
+        SELECT COALESCE(SUM(chances), 0) AS chances, COALESCE(SUM(taken), 0) AS taken
+        FROM fielding_events
+        WHERE match_id = ? AND team = ?
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    chances = row["chances"] or 0
+    taken = row["taken"] or 0
+    actual = (taken / chances) * 100 if chances > 0 else 0
+    thresholds = thresholds_config["Chances Taken %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Chances Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+    # Fielding Run Outs Taken
+    cursor.execute("""
+        SELECT COALESCE(SUM(run_out_chances), 0) AS chances, COALESCE(SUM(run_outs), 0) AS taken
+        FROM fielding_events
+        WHERE match_id = ? AND team = ?
+    """, (match_id, team_name))
+    row = cursor.fetchone()
+    chances = row["chances"] or 0
+    taken = row["taken"] or 0
+    actual = (taken / chances) * 100 if chances > 0 else 0
+    thresholds = thresholds_config["Run Outs Taken %"]
+    medal = assign_medal(actual, thresholds)
+    if medal in medal_tally: medal_tally[medal] += 1
+    kpis.append({"name": "Run Outs Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+
+
+
+    # Continue similarly for each KPI below
+    # For example:
+    # - Powerplay Runs
+    # - Powerplay Wickets
+    # - Powerplay Boundaries
+    # - Scoring Shot %...
+    # - Fielding metrics...
+    # - etc.
+
+    # Note: for phase-wise KPIs (like Powerplay), include WHERE conditions like "be.is_powerplay=1"
+    # For death overs, you might use "be.over_number >= 16"
+
+    # Also add custom logic for Yes/No KPIs (like "Top 5 Bat through 15") with appropriate thresholds & medals
+    # Example:
+    # actual = "Yes" or "No"
+    # medal = "Gold" if actual == "Yes" else "None"
+    # Update medal_tally and kpis as above
+    
+    return kpis, medal_tally, {
+        "batting_rpo": batting_over_runs,
+        "bowling_rpo": runs_per_over_bowling
+    }
+
 
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:

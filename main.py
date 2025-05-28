@@ -4110,7 +4110,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
         SELECT COUNT(*) AS wickets
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1 AND be.wicket = 1
+        WHERE i.match_id = ? AND i.batting_team = ? AND be.is_powerplay = 1 AND be.dismissal_type IS NOT NULL
     """, (match_id, team_name))
     actual = cursor.fetchone()["wickets"] or 0
     thresholds = thresholds_config["PP Wickets"]
@@ -4274,7 +4274,8 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
         SELECT COUNT(*) AS wickets
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1 AND be.wicket = 1
+        WHERE i.match_id = ? AND i.bowling_team = ? AND be.is_powerplay = 1 AND be.dismissal_type IS NOT NULL
+
     """, (match_id, team_name))
     actual = cursor.fetchone()["wickets"] or 0
     thresholds = thresholds_config["PP Wickets (Bowling)"]
@@ -4300,7 +4301,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
 
     # 0s and 1s Streak
     cursor.execute("""
-        SELECT be.runs, be.wicket, be.byes, be.leg_byes
+        SELECT be.runs, be.byes, be.leg_byes
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ?
@@ -4411,7 +4412,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     # actual = "Yes" or "No"
     # medal = "Gold" if actual == "Yes" else "None"
     # Update medal_tally and kpis as above
-    
+
     return kpis, medal_tally, {
         "batting_rpo": batting_over_runs,
         "bowling_rpo": runs_per_over_bowling

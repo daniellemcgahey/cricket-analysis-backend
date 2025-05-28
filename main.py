@@ -4314,7 +4314,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
 
     for ball in balls:
         outcome = ball["runs"]
-        if ball["wicket"] == 1 or outcome == 0 or outcome == 1 or ball["leg_byes"] == 1:
+        if outcome == 0 or outcome == 1 or ball["leg_byes"] == 1:
             current_streak += 1
             max_streak = max(max_streak, current_streak)
         else:

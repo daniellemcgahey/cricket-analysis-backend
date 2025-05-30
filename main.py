@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import io
+import base64
 from reportlab.lib import colors
 import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import letter, landscape
@@ -2898,6 +2899,23 @@ def get_match_ball_by_ball(payload: MatchBallByBallPayload):
     conn.close()
     return {"balls": balls}
 
+@app.post("/api/upload-wagon-wheel")
+async def upload_wagon_wheel(request: Request):
+    data = await request.json()
+    base64_image = data["image"]
+    image_type = data.get("type", "wagon_wheel")  # e.g., "wagon_wheel" or "pitch_map"
+
+    # Remove the data URL header
+    header, encoded = base64_image.split(",", 1)
+    image_data = base64.b64decode(encoded)
+
+    # Save to a temp location
+    filename = f"/tmp/{image_type}_chart.png"
+    with open(filename, "wb") as f:
+        f.write(image_data)
+
+    return {"message": f"{image_type} image saved successfully"}
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -4024,19 +4042,9 @@ def generate_pdf_report(data: dict):
     elements.append(table)
     elements.append(PageBreak())
 
-    # Generate wagon wheel
-    if data['wagon_wheel_data']:
-        fig, ax = plt.subplots(figsize=(4, 4))
-        for shot in data['wagon_wheel_data']:
-            ax.plot([0, shot["shot_x"]], [0, shot["shot_y"]], color='blue')
-        ax.set_aspect('equal')
-        ax.set_xlim(-100, 100)
-        ax.set_ylim(-100, 100)
-        ax.axis('off')
-        plt.savefig("/tmp/wagon_wheel.png")
-        plt.close(fig)
+    if os.path.exists("/tmp/wagon_wheel_chart.png"):
         elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
-        elements.append(Image("/tmp/wagon_wheel.png", width=300, height=300))
+        elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
         elements.append(PageBreak())
 
     # Bowling Summary

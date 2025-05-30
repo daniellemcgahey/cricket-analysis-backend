@@ -4362,41 +4362,37 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     over_runs = cursor.fetchall()
     runs_per_over_bowling = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs]
 
-    # Total drop chances
+    # Total drop chances (6, 7)
     cursor.execute("""
         SELECT COUNT(*) AS total_chances
-        FROM ball_fielding_events
-        WHERE match_id = ? AND team = ? AND event_type IN (6, 7)
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id IN (6, 7)
     """, (match_id, team_name))
     total_chances = cursor.fetchone()["total_chances"] or 0
 
-    # Drops (same as total chances)
-    drops = total_chances
-
-    # Taken catches
-    taken_catches = total_chances - drops
-    actual = (taken_catches / total_chances) * 100 if total_chances > 0 else 0
-
+    # Taken = 0 because these are only misses; so actual is always 0
+    # Or if you want to calculate % of non-drops (inverse), you’d need a way to log successful catches
+    actual = 0  # because these are all dropped chances
     thresholds = thresholds_config["Chances Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1
     kpis.append({"name": "Catches Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
     
-    # Total missed runout chances
+        
+    # Total missed runout chances (8)
     cursor.execute("""
         SELECT COUNT(*) AS total_chances
-        FROM ball_fielding_events
-        WHERE match_id = ? AND team = ? AND event_type = 8
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 8
     """, (match_id, team_name))
     total_chances = cursor.fetchone()["total_chances"] or 0
 
-    # Missed runouts (same as total chances)
-    missed_runouts = total_chances
-
-    # Taken run outs
-    taken_runouts = total_chances - missed_runouts
-    actual = (taken_runouts / total_chances) * 100 if total_chances > 0 else 0
-
+    # Same note — actual % is 0 because these are missed runouts
+    actual = 0
     thresholds = thresholds_config["Run Outs Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1

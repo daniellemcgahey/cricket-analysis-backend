@@ -35,6 +35,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.staticfiles import StaticFiles
+
+app.mount("/static", StaticFiles(directory="/tmp"), name="static")
+
 
 class ComparisonPayload(BaseModel):
     country1: str
@@ -4046,6 +4050,8 @@ def generate_pdf_report(data: dict):
         elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
         elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
         elements.append(PageBreak())
+    else:
+        print("❌ /tmp/wagon_wheel_chart.png not found - skipping wagon wheel in PDF")
 
     # Bowling Summary
     bowling = data['bowling']

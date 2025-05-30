@@ -4650,6 +4650,10 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph("OVER MEDALS REPORT", header))
     elements.append(Spacer(1, 10))
 
+    # Label above the batting and bowling over tables
+    elements.append(Paragraph("<b>Batting & Bowling Overs Breakdown</b>", bold))
+    elements.append(Spacer(1, 6))
+
     def build_over_table(over_medals, title, reverse=False):
         tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
         data = [["Over", "Runs", "Medal"]]
@@ -4659,13 +4663,17 @@ def generate_team_pdf_report(data: dict):
                 # Reverse logic for bowling (lower runs = better)
                 if over["runs"] <= 0:
                     medal = "Platinum"
-                elif over["runs"] <= 3:
+                elif over["runs"] <= 4:
                     medal = "Gold"
                 elif over["runs"] <= 5:
                     medal = "Silver"
-                else:
+                elif over["runs"] <= 6:
                     medal = "Bronze"
-            data.append([str(over["over"]), str(over["runs"]), Paragraph(f"<b>{medal}</b>", normal)])
+                else:
+                    medal = "None"
+            # Show over number as integer
+            over_number = str(int(over["over"]))
+            data.append([over_number, str(over["runs"]), Paragraph(f"<b>{medal}</b>", normal)])
             if medal in tally:
                 tally[medal] += 1
         table = Table(data, colWidths=[60, 60, 100])
@@ -4685,17 +4693,35 @@ def generate_team_pdf_report(data: dict):
     innings_tables.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
     elements.append(innings_tables)
 
-    # Medal tallies under each
+    # Medal tallies under each with header rows
     elements.append(Spacer(1, 10))
     elements.append(Paragraph("<b>Batting Over Medal Tally</b>", bold))
-    elements.append(Table([[m, str(c)] for m, c in batting_tally.items()], hAlign='LEFT'))
+    batting_tally_data = [["Medal", "Count"]] + [[m, str(c)] for m, c in batting_tally.items()]
+    batting_tally_table = Table(batting_tally_data, colWidths=[60, 40])
+    batting_tally_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+    ]))
+    elements.append(batting_tally_table)
+
     elements.append(Spacer(1, 10))
     elements.append(Paragraph("<b>Bowling Over Medal Tally</b>", bold))
-    elements.append(Table([[m, str(c)] for m, c in bowling_tally.items()], hAlign='LEFT'))
+    bowling_tally_data = [["Medal", "Count"]] + [[m, str(c)] for m, c in bowling_tally.items()]
+    bowling_tally_table = Table(bowling_tally_data, colWidths=[60, 40])
+    bowling_tally_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+    ]))
+    elements.append(bowling_tally_table)
 
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 
 

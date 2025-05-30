@@ -2804,11 +2804,14 @@ def team_match_report_pdf(match_id: int, team_id: int):
     # KPIs & Medal Tally
     kpis, medal_tally = calculate_kpis(cursor, match_id, team_id, team_name)
 
+    over_medals = calculate_over_medals(cursor, match_id, team_name)
+
     # Generate PDF
     pdf_data = {
         "match_summary": match_summary,
         "kpis": kpis,
-        "medal_tally": medal_tally
+        "medal_tally": medal_tally,
+        "over_medals": over_medals
     }
     pdf = generate_team_pdf_report(pdf_data)
 

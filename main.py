@@ -4210,7 +4210,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
         WHERE i.match_id = ? AND i.bowling_team = ?
     """, (match_id, team_name))
     actual = cursor.fetchone()["total_runs_conceded"] or 0
-    thresholds = thresholds_config["Total Runs"]
+    thresholds = thresholds_config["Total Runs Conceded"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
     if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "Total Runs Conceded", "actual": actual, "targets": thresholds, "medal": medal})

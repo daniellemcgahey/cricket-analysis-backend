@@ -2921,6 +2921,25 @@ async def upload_wagon_wheel(request: Request):
     return {"message": f"{image_type} image saved successfully"}
 
 
+@app.get("/player-wagon-wheel-data")
+def player_wagon_wheel_data(matchId: int, playerId: int):
+    conn = sqlite3.connect("cricket_analysis.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT be.shot_x, be.shot_y, be.runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ? AND be.shot_x IS NOT NULL AND be.shot_y IS NOT NULL
+    """, (matchId, playerId))
+
+    shots = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return shots
+
+
+
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)

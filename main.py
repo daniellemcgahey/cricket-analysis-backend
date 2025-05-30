@@ -3887,9 +3887,9 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     cursor.execute("""
         SELECT COUNT(*) AS catches
         FROM ball_fielding_events bfe
-        JOIN ball_events be ON bfe.ball_id = be.ball_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND bfe.fielder_id = ? AND bfe.event_id = 2
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN innings i ON bfe.innings_id = i.innings_id
+        WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2
     """, (match_id, player_id))
     fielding = cursor.fetchone()
 

@@ -4045,6 +4045,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
         "PP Runs": {"Platinum": 60, "Gold": 50, "Silver": 40, "Bronze": 30},
         "PP Boundaries": {"Platinum": 8, "Gold": 6, "Silver": 5, "Bronze": 4},
         "Death Scoring Shot %": {"Platinum": 85, "Gold": 75, "Silver": 70, "Bronze": 65},
+        "Total Runs Conceded": {"Platinum": 80, "Gold": 100, "Silver": 110, "Bronze": 120},
         "Dot Ball %": {"Platinum": 70, "Gold": 60, "Silver": 55, "Bronze": 50},
         "PP Dot Ball %": {"Platinum": 75, "Gold": 70, "Silver": 65, "Bronze": 60},
         "PP Boundaries (Bowling)": {"Platinum": 0, "Gold": 2, "Silver": 3, "Bronze": 4},

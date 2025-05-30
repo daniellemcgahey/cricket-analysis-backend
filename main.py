@@ -4514,39 +4514,44 @@ def generate_team_pdf_report(data: dict):
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
     normal = styles['Normal']
-    bold = ParagraphStyle(name='Bold', parent=normal, fontName='Helvetica-Bold', fontSize=12, leading=16)  # Increased leading
+    bold = ParagraphStyle(name='Bold', parent=normal, fontName='Helvetica-Bold', fontSize=12, leading=16)
     header = ParagraphStyle(
         name='Header', parent=normal, fontName='Helvetica-Bold', fontSize=14,
         textColor=colors.white, backColor=colors.darkblue, alignment=1, leading=18, spaceAfter=4
     )
     centered_style = ParagraphStyle(name='Center', alignment=TA_CENTER, parent=styles['Normal'])
-    
+
+    batting_kpi_names = [
+        "Total Runs", "Scoring Shot %", "PP Wickets", "PP Runs", "PP Boundaries",
+        "Top 5 Bat through 15", "3x25+ Partnerships", "2x15+ Partnerships",
+        "Death Scoring Shot %", "Runs Per Over Setting", "Runs Per Over Chasing"
+    ]
+    bowling_kpi_names = [
+        "Total Runs Conceded", "Dot Ball %", "PP Dot Ball %", "PP Boundaries (Bowling)",
+        "PP Wickets (Bowling)", "PP Score (Bowling)", "Max Dots/1s Streak",
+        "Extras", "Death Boundaries", "Runs Per Over Restricting", "Runs Per Over Defending"
+    ]
+    fielding_kpi_names = ["Chances Taken %", "Run Outs Taken %"]
+
     elements = []
 
-    # Match Summary Header
+    # Match Summary
     ms = data['match_summary']
     elements.append(Paragraph(f"<b>{ms['team_a']} vs {ms['team_b']}</b>", header))
-
-    # Fix by pulling match_date and toss_winner from ms dict instead of data directly
     elements.append(Paragraph(f"Match Date: {ms.get('match_date', 'N/A')}", centered_style))
     elements.append(Paragraph(f"Toss Winner: {ms.get('toss_winner', 'N/A')}", centered_style))
     elements.append(Spacer(1, 10))
 
-    # Build innings columns with full scorecards
+    # Scorecards
     innings_data = ms['innings']
     col_data = []
-
     for inn in innings_data:
-        # Innings header
         header_text = f"<b>{inn['batting_team']}</b> - {inn['total_runs']}/{inn['wickets']} ({inn['overs']} overs)"
         p_header = Paragraph(header_text, bold)
 
-        # Batting Scorecard
         batter_data = [["Batter", "Runs", "Balls", "Strike Rate"]]
         for b in inn['batting_card']:
-            runs = b["runs"]
-            balls = b["balls"]
-            sr = round((runs / balls) * 100, 2) if balls > 0 else 0
+            sr = round((b["runs"] / b["balls"]) * 100, 2) if b["balls"] > 0 else 0
             batter_data.append([b['name'], str(b['runs']), str(b['balls']), f"{sr:.2f}"])
         batter_table = Table(batter_data, colWidths=[150, 40, 40, 100])
         batter_table.setStyle(TableStyle([
@@ -4556,12 +4561,9 @@ def generate_team_pdf_report(data: dict):
             ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
         ]))
 
-        # Bowling Scorecard
         bowler_data = [["Bowler", "Overs", "Runs", "Wickets"]]
         for b in inn['bowling_card']:
-            bowler_data.append([
-                b['name'], str(b['overs']), str(b['runs_conceded']), str(b['wickets'])
-            ])
+            bowler_data.append([b['name'], str(b['overs']), str(b['runs_conceded']), str(b['wickets'])])
         bowler_table = Table(bowler_data, colWidths=[150, 60, 60, 60])
         bowler_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.whitesmoke),
@@ -4572,93 +4574,66 @@ def generate_team_pdf_report(data: dict):
 
         col_data.append([p_header, Spacer(1, 6), batter_table, Spacer(1, 6), bowler_table])
 
-    # Side-by-side layout
     summary_table = Table([col_data], colWidths=[doc.width / 2, doc.width / 2])
     summary_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
     elements.append(summary_table)
-
     elements.append(Spacer(1, 20))
     elements.append(Paragraph(f"<b>Result: {ms['result']}</b>", header))
     elements.append(PageBreak())
 
     # KPI Page
-    elements.append(PageBreak())
     elements.append(Paragraph("KEY PERFORMANCE INDICATORS (KPIs)", header))
     elements.append(Spacer(1, 10))
 
-    # Section: Batting KPIs
+    def build_kpi_table(kpis):
+        table = Table(kpis)
+        table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+        ]))
+        return table
+
+    def horizontal_line():
+        line = Table([['']], colWidths=[doc.width])
+        line.setStyle(TableStyle([('LINEBELOW', (0, 0), (-1, -1), 0.25, colors.grey)]))
+        return line
+
+    # Batting KPIs
     elements.append(Paragraph("<b>Batting KPIs</b>", bold))
     batting_kpi_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
-        if "batting" in kpi["name"].lower():
-            batting_kpi_data.append([
-                Paragraph(kpi['name'], normal),
-                str(kpi['targets']),
-                str(kpi['actual']),
-                Paragraph(f"<b>{kpi['medal']}</b>", normal)
-            ])
-    batting_kpi_table = Table(batting_kpi_data)
-    batting_kpi_table.setStyle(TableStyle([
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-    ]))
-    elements.append(batting_kpi_table)
-    elements.append(Spacer(1, 15))
-    elements.append(Paragraph("<hr/>", normal))  # horizontal divider
+        if kpi["name"] in batting_kpi_names:
+            batting_kpi_data.append([Paragraph(kpi['name'], normal), str(kpi['targets']), str(kpi['actual']), Paragraph(f"<b>{kpi['medal']}</b>", normal)])
+    elements.append(build_kpi_table(batting_kpi_data))
+    elements.append(Spacer(1, 10))
+    elements.append(horizontal_line())
 
-    # Section: Bowling KPIs
+    # Bowling KPIs
     elements.append(Paragraph("<b>Bowling KPIs</b>", bold))
     bowling_kpi_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
-        if "bowling" in kpi["name"].lower():
-            bowling_kpi_data.append([
-                Paragraph(kpi['name'], normal),
-                str(kpi['targets']),
-                str(kpi['actual']),
-                Paragraph(f"<b>{kpi['medal']}</b>", normal)
-            ])
-    bowling_kpi_table = Table(bowling_kpi_data)
-    bowling_kpi_table.setStyle(TableStyle([
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-    ]))
-    elements.append(bowling_kpi_table)
-    elements.append(Spacer(1, 15))
-    elements.append(Paragraph("<hr/>", normal))  # horizontal divider
+        if kpi["name"] in bowling_kpi_names:
+            bowling_kpi_data.append([Paragraph(kpi['name'], normal), str(kpi['targets']), str(kpi['actual']), Paragraph(f"<b>{kpi['medal']}</b>", normal)])
+    elements.append(build_kpi_table(bowling_kpi_data))
+    elements.append(Spacer(1, 10))
+    elements.append(horizontal_line())
 
-    # Section: Fielding KPIs
+    # Fielding KPIs
     elements.append(Paragraph("<b>Fielding KPIs</b>", bold))
     fielding_kpi_data = [["KPI", "Target", "Actual", "Medal"]]
     for kpi in data['kpis']:
-        if "fielding" in kpi["name"].lower() or "catch" in kpi["name"].lower() or "run out" in kpi["name"].lower():
-            fielding_kpi_data.append([
-                Paragraph(kpi['name'], normal),
-                str(kpi['targets']),
-                str(kpi['actual']),
-                Paragraph(f"<b>{kpi['medal']}</b>", normal)
-            ])
-    fielding_kpi_table = Table(fielding_kpi_data)
-    fielding_kpi_table.setStyle(TableStyle([
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
-    ]))
-    elements.append(fielding_kpi_table)
-
-
-        # Medal Tally
+        if kpi["name"] in fielding_kpi_names:
+            fielding_kpi_data.append([Paragraph(kpi['name'], normal), str(kpi['targets']), str(kpi['actual']), Paragraph(f"<b>{kpi['medal']}</b>", normal)])
+    elements.append(build_kpi_table(fielding_kpi_data))
     elements.append(Spacer(1, 20))
-    elements.append(Paragraph("KPI Medal Tally", header))
 
+    # Medal Tally
+    elements.append(Paragraph("KPI Medal Tally", header))
     medal_data = [["Medal", "Count"]]
     for medal, count in data['medal_tally'].items():
         medal_data.append([medal, str(count)])
-
     medal_table = Table(medal_data, hAlign='LEFT')
     medal_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
@@ -4666,23 +4641,16 @@ def generate_team_pdf_report(data: dict):
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
     ]))
-
     elements.append(medal_table)
-
-    # NEW PAGE: Over Medals
     elements.append(PageBreak())
+
+    # OVER MEDALS: Side-by-side layout
     elements.append(Paragraph("OVER MEDALS REPORT", header))
     elements.append(Spacer(1, 10))
 
-    # Batting Overs
-    elements.append(Paragraph("<b>Batting Innings Over Medals</b>", bold))
     batting_data = [["Over", "Runs", "Medal"]]
     for over in data["over_medals"]["batting_over_medals"]:
-        batting_data.append([
-            str(over["over"]),
-            str(over["runs"]),
-            Paragraph(f"<b>{over['medal']}</b>", normal)
-        ])
+        batting_data.append([str(over["over"]), str(over["runs"]), Paragraph(f"<b>{over['medal']}</b>", normal)])
     batting_table = Table(batting_data, colWidths=[60, 60, 100])
     batting_table.setStyle(TableStyle([
         ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
@@ -4690,18 +4658,10 @@ def generate_team_pdf_report(data: dict):
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
     ]))
-    elements.append(batting_table)
-    elements.append(Spacer(1, 20))
 
-    # Bowling Overs
-    elements.append(Paragraph("<b>Bowling Innings Over Medals</b>", bold))
     bowling_data = [["Over", "Runs Conceded", "Medal"]]
     for over in data["over_medals"]["bowling_over_medals"]:
-        bowling_data.append([
-            str(over["over"]),
-            str(over["runs"]),
-            Paragraph(f"<b>{over['medal']}</b>", normal)
-        ])
+        bowling_data.append([str(over["over"]), str(over["runs"]), Paragraph(f"<b>{over['medal']}</b>", normal)])
     bowling_table = Table(bowling_data, colWidths=[60, 100, 100])
     bowling_table.setStyle(TableStyle([
         ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
@@ -4709,12 +4669,16 @@ def generate_team_pdf_report(data: dict):
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
     ]))
-    elements.append(bowling_table)
 
-    # Build document
+    # Put them side by side
+    over_medals_table = Table([[batting_table, bowling_table]], colWidths=[doc.width/2, doc.width/2])
+    over_medals_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+    elements.append(over_medals_table)
+
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 
 

@@ -3897,7 +3897,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     # Ball by ball batting breakdown
     cursor.execute("""
         SELECT be.over_number, be.ball_number, be.runs, be.footwork, be.shot_selection, be.shot_type,
-               be.aerial, be.edged, be.missed
+               be.aerial, be.edged, be.ball_missed
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?
@@ -3994,7 +3994,7 @@ def generate_pdf_report(data: dict):
                 ball['shot_type'],
                 "Yes" if ball['aerial'] else "No",
                 "Yes" if ball['edged'] else "No",
-                "Yes" if ball['missed'] else "No"
+                "Yes" if ball['ball_missed'] else "No"
             ])
         table = Table(bb_data, colWidths=[40, 30, 30, 60, 60, 60, 30, 30, 30])
         table.setStyle(TableStyle([

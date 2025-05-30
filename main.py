@@ -3,9 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import io
 from reportlab.lib import colors
+import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 from pydantic import BaseModel
@@ -3838,23 +3839,17 @@ def get_individual_pitch_map_data(player_id, bowling_team, tournament_ids):
     return [dict(row) for row in cursor.fetchall()]
 
 def fetch_player_match_stats(match_id: int, player_id: int):
-    # Your DB path
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Example queries - replace with your actual queries and logic:
-
-    # Get player name
     cursor.execute("SELECT player_name FROM players WHERE player_id = ?", (player_id,))
     player_row = cursor.fetchone()
     if not player_row:
         return None
-
     player_name = player_row["player_name"]
 
-    # Get match info
     cursor.execute("""
         SELECT m.match_date, c1.country_name as team_a, c2.country_name as team_b
         FROM matches m
@@ -3863,10 +3858,8 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         WHERE m.match_id = ?
     """, (match_id,))
     match_row = cursor.fetchone()
-    if not match_row:
-        return None
 
-    # Basic batting stats example - customize your queries as needed
+    # Batting summary
     cursor.execute("""
         SELECT
             SUM(be.runs) AS runs,
@@ -3878,7 +3871,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     """, (match_id, player_id))
     batting = cursor.fetchone()
 
-    # Basic bowling stats example
+    # Bowling summary
     cursor.execute("""
         SELECT
             COUNT(*) AS balls_bowled,
@@ -3890,17 +3883,78 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     """, (match_id, player_id))
     bowling = cursor.fetchone()
 
+    # Fielding summary (example: catches taken)
+    cursor.execute("""
+        SELECT COUNT(*) AS catches
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND bfe.fielder_id = ? AND bfe.event_id = 2
+    """, (match_id, player_id))
+    fielding = cursor.fetchone()
+
+    # Ball by ball batting breakdown
+    cursor.execute("""
+        SELECT be.over_number, be.ball_number, be.runs, be.footwork, be.shot_selection, be.shot_type,
+               be.aerial, be.edged, be.missed
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+        ORDER BY be.over_number, be.ball_number
+    """, (match_id, player_id))
+    ball_by_ball_batting = [dict(row) for row in cursor.fetchall()]
+
+    # Scoring shot breakdown
+    cursor.execute("""
+        SELECT runs, COUNT(*) AS count
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+        GROUP BY runs
+    """, (match_id, player_id))
+    scoring_shots_breakdown = {str(row["runs"]): row["count"] for row in cursor.fetchall()}
+
+    # Ball by ball bowling breakdown
+    cursor.execute("""
+        SELECT be.over_number, be.ball_number, be.runs, be.delivery_type, be.around_or_over, be.dismissal_type
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.bowler_id = ?
+        ORDER BY be.over_number, be.ball_number
+    """, (match_id, player_id))
+    ball_by_ball_bowling = [dict(row) for row in cursor.fetchall()]
+
+    # Example: wagon wheel data
+    cursor.execute("""
+        SELECT be.shot_x, be.shot_y
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ? AND be.shot_x IS NOT NULL AND be.shot_y IS NOT NULL
+    """, (match_id, player_id))
+    wagon_wheel_data = [dict(row) for row in cursor.fetchall()]
+
+    # Example: pitch map data
+    cursor.execute("""
+        SELECT be.pitch_x, be.pitch_y
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.bowler_id = ? AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+    """, (match_id, player_id))
+    pitch_map_data = [dict(row) for row in cursor.fetchall()]
+
     conn.close()
 
     return {
         "player_name": player_name,
-        "match": {
-            "date": match_row["match_date"],
-            "team_a": match_row["team_a"],
-            "team_b": match_row["team_b"]
-        },
-        "batting": batting,
-        "bowling": bowling,
+        "match": dict(match_row),
+        "batting": dict(batting),
+        "bowling": dict(bowling),
+        "fielding": dict(fielding),
+        "ball_by_ball_batting": ball_by_ball_batting,
+        "scoring_shots_breakdown": scoring_shots_breakdown,
+        "wagon_wheel_data": wagon_wheel_data,
+        "ball_by_ball_bowling": ball_by_ball_bowling,
+        "pitch_map_data": pitch_map_data
     }
 
 def generate_pdf_report(data: dict):
@@ -3909,31 +3963,127 @@ def generate_pdf_report(data: dict):
     styles = getSampleStyleSheet()
     elements = []
 
-    elements.append(Paragraph(f"Match Report: {data['player_name']}", styles['Title']))
-    elements.append(Spacer(1, 12))
+    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
 
+    # Match summary
+    elements.append(Paragraph(f"<b>Player: {data['player_name']}</b>", styles['Title']))
     match = data['match']
-    elements.append(Paragraph(f"Match: {match['team_a']} vs {match['team_b']} on {match['date']}", styles['Normal']))
-    elements.append(Spacer(1, 12))
+    elements.append(Paragraph(f"Match: {match['team_a']} vs {match['team_b']} on {match['match_date']}", styles['Normal']))
+    elements.append(Spacer(1, 10))
 
-    # Batting table
+    # Batting Summary
     batting = data['batting']
-    batting_data = [
-        ['Runs', 'Balls', 'Dismissals'],
-        [batting['runs'] or 0, batting['balls'] or 0, batting['dismissals'] or 0]
-    ]
-    elements.append(Paragraph("Batting Performance", styles['Heading2']))
+    elements.append(Paragraph("<b>Batting Summary</b>", bold))
+    batting_data = [["Runs", "Balls", "Dismissals"],
+                    [batting['runs'] or 0, batting['balls'] or 0, batting['dismissals'] or 0]]
     elements.append(Table(batting_data))
-    elements.append(Spacer(1, 12))
+    elements.append(Spacer(1, 10))
 
-    # Bowling table
+    # Ball by ball batting breakdown
+    if data['ball_by_ball_batting']:
+        elements.append(Paragraph("<b>Ball-by-Ball Batting Breakdown</b>", bold))
+        bb_data = [["Over", "Ball", "Runs", "Footwork", "Shot", "Type", "Aerial", "Edged", "Missed"]]
+        for ball in data['ball_by_ball_batting']:
+            bb_data.append([
+                f"{ball['over_number']}.{ball['ball_number']}",
+                ball['ball_number'],
+                ball['runs'],
+                ball['footwork'],
+                ball['shot_selection'],
+                ball['shot_type'],
+                "Yes" if ball['aerial'] else "No",
+                "Yes" if ball['edged'] else "No",
+                "Yes" if ball['missed'] else "No"
+            ])
+        table = Table(bb_data, colWidths=[40, 30, 30, 60, 60, 60, 30, 30, 30])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 10))
+
+    # Scoring shot breakdown
+    elements.append(Paragraph("<b>Scoring Shot Breakdown</b>", bold))
+    score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
+    table = Table(score_data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+    ]))
+    elements.append(table)
+    elements.append(PageBreak())
+
+    # Generate wagon wheel
+    if data['wagon_wheel_data']:
+        fig, ax = plt.subplots(figsize=(4, 4))
+        for shot in data['wagon_wheel_data']:
+            ax.plot([0, shot["shot_x"]], [0, shot["shot_y"]], color='blue')
+        ax.set_aspect('equal')
+        ax.set_xlim(-100, 100)
+        ax.set_ylim(-100, 100)
+        ax.axis('off')
+        plt.savefig("/tmp/wagon_wheel.png")
+        plt.close(fig)
+        elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
+        elements.append(Image("/tmp/wagon_wheel.png", width=300, height=300))
+        elements.append(PageBreak())
+
+    # Bowling Summary
     bowling = data['bowling']
-    bowling_data = [
-        ['Balls Bowled', 'Runs Conceded', 'Wickets'],
-        [bowling['balls_bowled'] or 0, bowling['runs_conceded'] or 0, bowling['wickets'] or 0]
-    ]
-    elements.append(Paragraph("Bowling Performance", styles['Heading2']))
+    elements.append(Paragraph("<b>Bowling Summary</b>", bold))
+    bowling_data = [["Balls Bowled", "Runs Conceded", "Wickets"],
+                    [bowling['balls_bowled'] or 0, bowling['runs_conceded'] or 0, bowling['wickets'] or 0]]
     elements.append(Table(bowling_data))
+    elements.append(Spacer(1, 10))
+
+    # Ball by ball bowling breakdown
+    if data['ball_by_ball_bowling']:
+        elements.append(Paragraph("<b>Ball-by-Ball Bowling Breakdown</b>", bold))
+        bb_data = [["Over", "Ball", "Runs", "Delivery", "Around/Over", "Dismissal"]]
+        for ball in data['ball_by_ball_bowling']:
+            bb_data.append([
+                f"{ball['over_number']}.{ball['ball_number']}",
+                ball['ball_number'],
+                ball['runs'],
+                ball['delivery_type'],
+                ball['around_or_over'],
+                ball['dismissal_type'] or "-"
+            ])
+        table = Table(bb_data, colWidths=[40, 30, 30, 60, 60, 60])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+        ]))
+        elements.append(table)
+        elements.append(PageBreak())
+
+    # Generate pitch map
+    if data['pitch_map_data']:
+        fig, ax = plt.subplots(figsize=(4, 6))
+        for ball in data['pitch_map_data']:
+            ax.scatter(ball['pitch_x'], ball['pitch_y'], color='red', s=10)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(0, 2)
+        ax.axis('off')
+        plt.savefig("/tmp/pitch_map.png")
+        plt.close(fig)
+        elements.append(Paragraph("<b>Pitch Map</b>", bold))
+        elements.append(Image("/tmp/pitch_map.png", width=300, height=400))
+
+    # Fielding summary
+    if data['fielding'] and data['fielding'].get('catches', 0) > 0:
+        elements.append(PageBreak())
+        elements.append(Paragraph("<b>Fielding Summary</b>", bold))
+        fielding_data = [["Catches"], [data['fielding']['catches']]]
+        table = Table(fielding_data)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+        ]))
+        elements.append(table)
 
     doc.build(elements)
     buffer.seek(0)

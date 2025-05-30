@@ -2802,7 +2802,7 @@ def team_match_report_pdf(match_id: int, team_id: int):
     team_name = match_summary["team_a"] if "Brasil" in match_summary["team_a"] else match_summary["team_b"]
 
     # KPIs & Medal Tally
-    kpis, medal_tally = calculate_kpis(cursor, match_id, team_id, team_name)
+    kpis, medal_tally, _ = calculate_kpis(cursor, match_id, team_id, team_name)
 
     # Generate PDF
     pdf_data = {

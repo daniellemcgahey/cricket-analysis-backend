@@ -4651,12 +4651,15 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph("OVER MEDALS REPORT", header))
     elements.append(Spacer(1, 10))
 
-    # Small label for team breakdown headers (like innings header!)
-    batting_header = Paragraph(f"<b>{ms['team_a']}</b> - {ms['innings'][0]['total_runs']}/{ms['innings'][0]['wickets']} ({ms['innings'][0]['overs']} overs)", bold)
-    bowling_header = Paragraph(f"<b>{ms['team_b']}</b> - {ms['innings'][1]['total_runs']}/{ms['innings'][1]['wickets']} ({ms['innings'][1]['overs']} overs)", bold)
+    # Define the innings-style headers for each table
+    batting_innings = ms['innings'][0]
+    bowling_innings = ms['innings'][1]
 
-    elements.append(batting_header)
-    elements.append(Spacer(1, 4))
+    batting_header_text = f"<b>{batting_innings['batting_team']}</b> - {batting_innings['total_runs']}/{batting_innings['wickets']} ({batting_innings['overs']} overs)"
+    bowling_header_text = f"<b>{bowling_innings['batting_team']}</b> - {bowling_innings['total_runs']}/{bowling_innings['wickets']} ({bowling_innings['overs']} overs)"
+
+    batting_header = Paragraph(batting_header_text, bold)
+    bowling_header = Paragraph(bowling_header_text, bold)
 
     def build_over_table(over_medals, reverse=False):
         tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
@@ -4676,28 +4679,29 @@ def generate_team_pdf_report(data: dict):
             data.append([over_number, str(over["runs"]), Paragraph(f"<b>{medal}</b>", normal)])
             if medal in tally:
                 tally[medal] += 1
-        table = Table(data, colWidths=[50, 50, 80])  # slightly narrower columns
+        table = Table(data, colWidths=[50, 50, 80])
         table.setStyle(TableStyle([
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 8),  # smaller font
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ]))
         return table, tally
 
     batting_table, batting_tally = build_over_table(data["over_medals"]["batting_over_medals"])
-    elements.append(batting_table)
-
-    # Small gap
-    elements.append(Spacer(1, 4))
-    elements.append(bowling_header)
-    elements.append(Spacer(1, 4))
-
     bowling_table, bowling_tally = build_over_table(data["over_medals"]["bowling_over_medals"], reverse=True)
-    elements.append(bowling_table)
 
-    # Medal tallies
+    # Create a two-column layout: each column has the header and table stacked vertically
+    batting_column = [batting_header, Spacer(1, 2), batting_table]
+    bowling_column = [bowling_header, Spacer(1, 2), bowling_table]
+
+    # Put them side by side
+    innings_tables = Table([[batting_column, bowling_column]], colWidths=[doc.width / 2, doc.width / 2])
+    innings_tables.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP')]))
+    elements.append(innings_tables)
+
+    # Medal tallies under each
     elements.append(Spacer(1, 6))
     elements.append(Paragraph("<b>Batting Over Medal Tally</b>", bold))
     batting_tally_data = [["Medal", "Count"]] + [[m, str(c)] for m, c in batting_tally.items()]
@@ -4706,7 +4710,7 @@ def generate_team_pdf_report(data: dict):
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
         ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 8),  # smaller font
+        ('FONTSIZE', (0, 0), (-1, -1), 8),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
     ]))
     elements.append(batting_tally_table)
@@ -4727,6 +4731,7 @@ def generate_team_pdf_report(data: dict):
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 
 

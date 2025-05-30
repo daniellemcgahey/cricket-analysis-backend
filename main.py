@@ -4651,12 +4651,13 @@ def generate_team_pdf_report(data: dict):
     elements.append(Paragraph("OVER MEDALS REPORT", header))
     elements.append(Spacer(1, 10))
 
-    # Innings-style headers
+    # Flip the batting and bowling innings headers to match the correct side
     batting_innings = ms['innings'][0]
     bowling_innings = ms['innings'][1]
 
-    batting_header_text = f"<b>{batting_innings['batting_team']}</b> - {batting_innings['total_runs']}/{batting_innings['wickets']} ({batting_innings['overs']} overs)"
-    bowling_header_text = f"<b>{bowling_innings['batting_team']}</b> - {bowling_innings['total_runs']}/{bowling_innings['wickets']} ({bowling_innings['overs']} overs)"
+    # These headers are for the over-by-over data
+    batting_header_text = f"<b>{bowling_innings['batting_team']}</b> - {bowling_innings['total_runs']}/{bowling_innings['wickets']} ({bowling_innings['overs']} overs)"
+    bowling_header_text = f"<b>{batting_innings['batting_team']}</b> - {batting_innings['total_runs']}/{batting_innings['wickets']} ({batting_innings['overs']} overs)"
 
     batting_header = Paragraph(batting_header_text, bold)
     bowling_header = Paragraph(bowling_header_text, bold)
@@ -4684,7 +4685,7 @@ def generate_team_pdf_report(data: dict):
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),  # Even smaller font
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ]))
         return table, tally
@@ -4692,7 +4693,6 @@ def generate_team_pdf_report(data: dict):
     batting_table, batting_tally = build_over_table(data["over_medals"]["batting_over_medals"])
     bowling_table, bowling_tally = build_over_table(data["over_medals"]["bowling_over_medals"], reverse=True)
 
-    # Build medal tally tables for each side
     def build_tally_table(tally):
         data = [["Medal", "Count"]] + [[m, str(c)] for m, c in tally.items()]
         table = Table(data, colWidths=[50, 30])
@@ -4700,7 +4700,7 @@ def generate_team_pdf_report(data: dict):
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),  # Even smaller font
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ]))
         return table
@@ -4735,6 +4735,7 @@ def generate_team_pdf_report(data: dict):
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
 
 
 

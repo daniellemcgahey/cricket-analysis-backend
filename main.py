@@ -4362,37 +4362,45 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     over_runs = cursor.fetchall()
     runs_per_over_bowling = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs]
 
-
-    # Fielding Chances Taken
+    # Total drop chances
     cursor.execute("""
-        SELECT COALESCE(SUM(chances), 0) AS chances, COALESCE(SUM(taken), 0) AS taken
-        FROM fielding_events
-        WHERE match_id = ? AND team = ?
+        SELECT COUNT(*) AS total_chances
+        FROM ball_fielding_events
+        WHERE match_id = ? AND team = ? AND event_type IN (6, 7)
     """, (match_id, team_name))
-    row = cursor.fetchone()
-    chances = row["chances"] or 0
-    taken = row["taken"] or 0
-    actual = (taken / chances) * 100 if chances > 0 else 0
+    total_chances = cursor.fetchone()["total_chances"] or 0
+
+    # Drops (same as total chances)
+    drops = total_chances
+
+    # Taken catches
+    taken_catches = total_chances - drops
+    actual = (taken_catches / total_chances) * 100 if total_chances > 0 else 0
+
     thresholds = thresholds_config["Chances Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1
-    kpis.append({"name": "Chances Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
-
-    # Fielding Run Outs Taken
+    kpis.append({"name": "Catches Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
+    
+    # Total missed runout chances
     cursor.execute("""
-        SELECT COALESCE(SUM(run_out_chances), 0) AS chances, COALESCE(SUM(run_outs), 0) AS taken
-        FROM fielding_events
-        WHERE match_id = ? AND team = ?
+        SELECT COUNT(*) AS total_chances
+        FROM ball_fielding_events
+        WHERE match_id = ? AND team = ? AND event_type = 8
     """, (match_id, team_name))
-    row = cursor.fetchone()
-    chances = row["chances"] or 0
-    taken = row["taken"] or 0
-    actual = (taken / chances) * 100 if chances > 0 else 0
+    total_chances = cursor.fetchone()["total_chances"] or 0
+
+    # Missed runouts (same as total chances)
+    missed_runouts = total_chances
+
+    # Taken run outs
+    taken_runouts = total_chances - missed_runouts
+    actual = (taken_runouts / total_chances) * 100 if total_chances > 0 else 0
+
     thresholds = thresholds_config["Run Outs Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1
     kpis.append({"name": "Run Outs Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
-
 
 
     # Continue similarly for each KPI below

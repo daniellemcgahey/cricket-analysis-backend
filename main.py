@@ -2810,7 +2810,7 @@ def team_match_report_pdf(match_id: int, team_id: int):
     pdf_data = {
         "match_summary": match_summary,
         "kpis": kpis,
-        "medal_tally": medal_tally,
+        "medal_tallies_by_area": medal_tally,
         "over_medals": over_medals
     }
     pdf = generate_team_pdf_report(pdf_data)
@@ -4057,7 +4057,11 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     }
 
     kpis = []
-    medal_tally = {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0}
+    medal_tally = {
+    "batting": {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0},
+    "bowling": {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0},
+    "fielding": {"Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0},
+    }
 
     def assign_medal(value, thresholds, lower_is_better=False):
         thresholds = thresholds.copy()
@@ -4087,7 +4091,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["total_runs"] or 0
     thresholds = thresholds_config["Total Runs"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "Total Runs", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4105,7 +4109,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (scoring_shots / total_balls) * 100
     thresholds = thresholds_config["Scoring Shot %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "Scoring Shot %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
     # Powerplay Wickets
@@ -4118,7 +4122,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["wickets"] or 0
     thresholds = thresholds_config["PP Wickets"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # Lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "PP Wickets", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4134,7 +4138,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["pp_runs"] or 0
     thresholds = thresholds_config["PP Runs"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "PP Runs", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4148,7 +4152,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["boundaries"] or 0
     thresholds = thresholds_config["PP Boundaries"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "PP Boundaries", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4161,7 +4165,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     """, (match_id, team_name))
     actual = "Yes" if cursor.fetchone()["partnerships"] >= 3 else "No"
     medal = "Gold" if actual == "Yes" else "None"
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "3x25+ Partnerships", "actual": actual, "targets": "Yes", "medal": medal})
 
     # Partnerships >15
@@ -4173,7 +4177,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     """, (match_id, team_name))
     actual = "Yes" if cursor.fetchone()["partnerships"] >= 2 else "No"
     medal = "Gold" if actual == "Yes" else "None"
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "2x15+ Partnerships", "actual": actual, "targets": "Yes", "medal": medal})
 
 
@@ -4192,7 +4196,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (scoring_shots / total_balls) * 100
     thresholds = thresholds_config["Death Scoring Shot %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["batting"]: medal_tally["batting"][medal] += 1
     kpis.append({"name": "Death Scoring Shot %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
     # Total Runs Conceded
@@ -4207,7 +4211,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["total_runs_conceded"] or 0
     thresholds = thresholds_config["Total Runs"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "Total Runs Conceded", "actual": actual, "targets": thresholds, "medal": medal})
 
     # Dot Ball Percentage
@@ -4224,7 +4228,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (dot_balls / total_balls) * 100
     thresholds = thresholds_config["Dot Ball %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "Dot Ball %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
 
@@ -4242,7 +4246,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (dot_balls / total_balls) * 100
     thresholds = thresholds_config["PP Dot Ball %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "PP Dot Ball %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
     # Powerplay Boundaries
@@ -4255,7 +4259,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["boundaries"] or 0
     thresholds = thresholds_config["PP Boundaries (Bowling)"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "PP Boundaries (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
 
     # Powerplay Wickets
@@ -4269,7 +4273,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["wickets"] or 0
     thresholds = thresholds_config["PP Wickets (Bowling)"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "PP Wickets (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4285,7 +4289,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["pp_score"] or 0
     thresholds = thresholds_config["PP Score (Bowling)"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "PP Score (Bowling)", "actual": actual, "targets": thresholds, "medal": medal})
 
     # 0s and 1s Streak
@@ -4322,7 +4326,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["extras"] or 0
     thresholds = thresholds_config["Extras"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "Extras", "actual": actual, "targets": thresholds, "medal": medal})
 
     # Death Boundaries 
@@ -4335,7 +4339,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = cursor.fetchone()["boundaries"] or 0
     thresholds = thresholds_config["Death Boundaries"]
     medal = assign_medal(-actual, {k: -v for k, v in thresholds.items()})  # lower is better
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["bowling"]: medal_tally["bowling"][medal] += 1
     kpis.append({"name": "Death Boundaries", "actual": actual, "targets": thresholds, "medal": medal})
 
 
@@ -4362,7 +4366,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (taken / total_chances) * 100 if total_chances > 0 else 0
     thresholds = thresholds_config["Chances Taken %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["fielding"]: medal_tally["fielding"][medal] += 1
     kpis.append({"name": "Catches Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
         
@@ -4389,7 +4393,7 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     actual = (taken / total_chances) * 100 if total_chances > 0 else 0
     thresholds = thresholds_config["Run Outs Taken %"]
     medal = assign_medal(actual, thresholds)
-    if medal in medal_tally: medal_tally[medal] += 1
+    if medal in medal_tally["fielding"]: medal_tally["fielding"][medal] += 1
     kpis.append({"name": "Run Outs Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
 
@@ -4494,7 +4498,6 @@ def calculate_over_medals(cursor, match_id: int, team_name: str, total_overs: in
         "batting_over_medals": batting_over_medals,
         "bowling_over_medals": bowling_over_medals
     }
-
 
 def assign_medal(actual: float, thresholds: dict):
     if actual >= thresholds["Platinum"]:

@@ -2802,7 +2802,7 @@ def team_match_report_pdf(match_id: int, team_id: int):
     team_name = match_summary["team_a"] if "Brasil" in match_summary["team_a"] else match_summary["team_b"]
 
     # KPIs & Medal Tally
-    kpis, medal_tally, _ = calculate_kpis(cursor, match_id, team_id, team_name)
+    kpis, medal_tally = calculate_kpis(cursor, match_id, team_id, team_name)
 
     # Generate PDF
     pdf_data = {
@@ -4192,20 +4192,6 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     if medal in medal_tally: medal_tally[medal] += 1
     kpis.append({"name": "Death Scoring Shot %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
 
-    # Runs Per Over (Batting)
-    cursor.execute("""
-        SELECT over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.batting_team = ?
-        GROUP BY over_number
-        ORDER BY over_number
-    """, (match_id, team_name))
-    over_runs_batting = cursor.fetchall()
-    batting_over_runs = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs_batting]
-
-
-
     # Total Runs Conceded
     cursor.execute("""
         SELECT COALESCE(SUM(be.runs), 0) + COALESCE(SUM(be.wides), 0) +
@@ -4350,49 +4336,54 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     kpis.append({"name": "Death Boundaries", "actual": actual, "targets": thresholds, "medal": medal})
 
 
-    # Runs per Over
-    cursor.execute("""
-        SELECT be.over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ?
-        GROUP BY be.over_number
-        ORDER BY be.over_number
-    """, (match_id, team_name))
-    over_runs = cursor.fetchall()
-    runs_per_over_bowling = [{"over": row["over_number"] + 1, "runs": row["runs"]} for row in over_runs]
-
-    # Total drop chances (6, 7)
+    # Total catch chances (2, 6, 7)
     cursor.execute("""
         SELECT COUNT(*) AS total_chances
         FROM ball_fielding_events bfe
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id IN (6, 7)
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id IN (2, 6, 7)
     """, (match_id, team_name))
     total_chances = cursor.fetchone()["total_chances"] or 0
 
-    # Taken = 0 because these are only misses; so actual is always 0
-    # Or if you want to calculate % of non-drops (inverse), you’d need a way to log successful catches
-    actual = 0  # because these are all dropped chances
+    # Catches taken (2)
+    cursor.execute("""
+        SELECT COUNT(*) AS taken
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 2
+    """, (match_id, team_name))
+    taken = cursor.fetchone()["taken"] or 0
+
+    actual = (taken / total_chances) * 100 if total_chances > 0 else 0
     thresholds = thresholds_config["Chances Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1
     kpis.append({"name": "Catches Taken %", "actual": round(actual, 2), "targets": thresholds, "medal": medal})
-    
+
         
-    # Total missed runout chances (8)
+    # Total run out chances (3, 8)
     cursor.execute("""
         SELECT COUNT(*) AS total_chances
         FROM ball_fielding_events bfe
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 8
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id IN (3, 8)
     """, (match_id, team_name))
     total_chances = cursor.fetchone()["total_chances"] or 0
 
-    # Same note — actual % is 0 because these are missed runouts
-    actual = 0
+    # Run outs taken (3)
+    cursor.execute("""
+        SELECT COUNT(*) AS taken
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 3
+    """, (match_id, team_name))
+    taken = cursor.fetchone()["taken"] or 0
+
+    actual = (taken / total_chances) * 100 if total_chances > 0 else 0
     thresholds = thresholds_config["Run Outs Taken %"]
     medal = assign_medal(actual, thresholds)
     if medal in medal_tally: medal_tally[medal] += 1
@@ -4417,10 +4408,90 @@ def calculate_kpis(cursor, match_id: int, team_id: int, team_name: str):
     # medal = "Gold" if actual == "Yes" else "None"
     # Update medal_tally and kpis as above
 
-    return kpis, medal_tally, {
-        "batting_rpo": batting_over_runs,
-        "bowling_rpo": runs_per_over_bowling
+    return kpis, medal_tally
+
+def calculate_over_medals(cursor, match_id: int, team_name: str, total_overs: int = 20):
+    # 1️⃣ Get the target score
+    cursor.execute("""
+        SELECT adjusted_target FROM matches WHERE match_id = ?
+    """, (match_id,))
+    row = cursor.fetchone()
+    target_score = row["adjusted_target"] if row else None
+
+    # 2️⃣ Calculate dynamic thresholds if chasing
+    over_thresholds = {
+        "Platinum": 12,
+        "Gold": 8,
+        "Silver": 7,
+        "Bronze": 6
     }
+    if target_score and target_score > 0:
+        rr = target_score / total_overs
+        over_thresholds = {
+            "Platinum": rr + 6,
+            "Gold": rr + 2,
+            "Silver": rr + 1,
+            "Bronze": rr
+        }
+
+    def assign_over_medal(runs):
+        if runs >= over_thresholds["Platinum"]:
+            return "Platinum"
+        elif runs >= over_thresholds["Gold"]:
+            return "Gold"
+        elif runs >= over_thresholds["Silver"]:
+            return "Silver"
+        elif runs >= over_thresholds["Bronze"]:
+            return "Bronze"
+        return "None"
+
+    # Batting over medals
+    cursor.execute("""
+        SELECT over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.batting_team = ?
+        GROUP BY over_number
+        ORDER BY over_number
+    """, (match_id, team_name))
+    batting_overs = cursor.fetchall()
+    batting_over_medals = []
+    for row in batting_overs:
+        over_number = row["over_number"] + 1
+        runs = row["runs"]
+        medal = assign_over_medal(runs)
+        batting_over_medals.append({
+            "over": over_number,
+            "runs": runs,
+            "medal": medal
+        })
+
+    # Bowling over medals
+    cursor.execute("""
+        SELECT over_number, SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+        GROUP BY over_number
+        ORDER BY over_number
+    """, (match_id, team_name))
+    bowling_overs = cursor.fetchall()
+    bowling_over_medals = []
+    for row in bowling_overs:
+        over_number = row["over_number"] + 1
+        runs = row["runs"]
+        medal = assign_over_medal(runs)
+        bowling_over_medals.append({
+            "over": over_number,
+            "runs": runs,
+            "medal": medal
+        })
+
+    return {
+        "batting_over_medals": batting_over_medals,
+        "bowling_over_medals": bowling_over_medals
+    }
+
 
 
 def assign_medal(actual: float, thresholds: dict):

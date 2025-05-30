@@ -3917,13 +3917,21 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Ball by ball bowling breakdown
     cursor.execute("""
-        SELECT be.over_number, be.ball_number, be.runs, be.delivery_type, be.around_or_over, be.dismissal_type
+        SELECT be.over_number, be.ball_number, be.runs, be.delivery_type,
+            CASE
+                WHEN be.over_the_wicket = 1 THEN 'Over'
+                WHEN be.around_the_wicket = 1 THEN 'Around'
+                ELSE 'Unknown'
+            END AS around_or_over,
+            be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.bowler_id = ?
         ORDER BY be.over_number, be.ball_number
     """, (match_id, player_id))
+
     ball_by_ball_bowling = [dict(row) for row in cursor.fetchall()]
+
 
     # Example: wagon wheel data
     cursor.execute("""

@@ -3970,19 +3970,36 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     # Fielding summary
     cursor.execute("""
         SELECT
-            COUNT(*) AS total_balls_fielded,
-            SUM(CASE WHEN fc.clean_pickup = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS clean_pick_up_percentage,
-            SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches_taken,
-            SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_out_chances_taken,
-            AVG(fc.conversion_rate) AS total_conversion_rate,
-            AVG(fc.runs_allowed_saved) AS runs_allowed_saved
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON bfe.ball_id = be.ball_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND fc.fielder_id = ?
-    """, (match_id, player_id))
-    fielding = dict(cursor.fetchone())
+            (SELECT COUNT(*)
+            FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN innings i ON bfe.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 1) AS clean_pickups,
+            (SELECT COUNT(*)
+            FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN innings i ON bfe.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2) AS catches,
+            (SELECT COUNT(*)
+            FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN innings i ON bfe.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3) AS run_outs,
+            (SELECT COUNT(*)
+            FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN innings i ON bfe.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ?) AS total_fielding_events
+    """, (match_id, player_id, match_id, player_id, match_id, player_id, match_id, player_id))
+
+    fielding_row = cursor.fetchone()
+
+    fielding = {
+        "clean_pickups": fielding_row["clean_pickups"] or 0,
+        "catches": fielding_row["catches"] or 0,
+        "run_outs": fielding_row["run_outs"] or 0,
+        "total_fielding_events": fielding_row["total_fielding_events"] or 0
+    }
 
     # Ball by ball batting breakdown
     cursor.execute("""

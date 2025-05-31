@@ -4008,7 +4008,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Ball by ball batting breakdown
     cursor.execute("""
-        SELECT be.runs, be.footwork, be.shot_selection, be.intent, be.aerial, be.edged, be.ball_missed
+        SELECT be.runs, be.footwork, be.shot_selection, be.batting_intent_score, be.aerial, be.edged, be.ball_missed
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?
@@ -4048,15 +4048,58 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     else:
         off_side_percentage = leg_side_percentage = 0
 
-    # Ball by ball bowling breakdown
+    # Fetch raw data to compute ball lengths
     cursor.execute("""
-        SELECT be.runs, be.is_extra, be.length, be.dismissal_type
+        SELECT be.pitch_y, bw.bowling_style, be.runs, be.wides, be.no_balls,
+            be.dismissal_type, be.edged, be.ball_missed, be.shot_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players bw ON be.bowler_id = bw.player_id
         WHERE i.match_id = ? AND be.bowler_id = ?
         ORDER BY be.over_number, be.ball_number
     """, (match_id, player_id))
-    ball_by_ball_bowling = [dict(row) for row in cursor.fetchall()]
+
+    zone_maps = {
+        "spin": {
+            "Full Toss": (-0.0909, 0.03636),
+            "Yorker": (0.03636, 0.1636),
+            "Full": (0.1636, 0.31818),
+            "Good": (0.31818, 0.545454),
+            "Short": (0.545454, 1.0)
+        },
+        "pace": {
+            "Full Toss": (-0.0909, 0.03636),
+            "Yorker": (0.03636, 0.1636),
+            "Full": (0.1636, 0.31818),
+            "Good": (0.31818, 0.545454),
+            "Short": (0.545454, 1.0)
+        }
+    }
+
+    ball_by_ball_bowling = []
+    for idx, row in enumerate(cursor.fetchall(), start=1):
+        pitch_y = row["pitch_y"]
+        style = (row["bowling_style"] or "").lower()
+        zone_map = zone_maps["spin"] if "spin" in style else zone_maps["pace"]
+
+        length = "Unknown"
+        if pitch_y is not None:
+            for zone, (start, end) in zone_map.items():
+                if start <= pitch_y < end:
+                    length = zone
+                    break
+
+        total_runs = (row["runs"] or 0) + (row["wides"] or 0) + (row["no_balls"] or 0)
+
+        ball_by_ball_bowling.append({
+            "ball_number": idx,
+            "runs": row["runs"],
+            "extras": (row["wides"] or 0) + (row["no_balls"] or 0),
+            "length": length,
+            "dismissal_type": row["dismissal_type"] or "-",
+            "false_shot": ("Yes" if (row["edged"] or row["ball_missed"]) and row["shot_type"] and row["shot_type"].lower() != "leave" else "No")
+        })
+
 
     # Compute Zone Effectiveness
     cursor.execute("""

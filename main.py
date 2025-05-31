@@ -3904,41 +3904,89 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     cursor.execute("""
         SELECT
             SUM(be.runs) AS runs,
-            COUNT(*) AS balls,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissals
+            COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls_faced,  -- excludes wides, includes no balls
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS dismissals,
+            ROUND(AVG(be.batting_intent_score), 2) AS average_intent,
+            (
+                SELECT be2.dismissal_type
+                FROM ball_events be2
+                JOIN innings i2 ON be2.innings_id = i2.innings_id
+                WHERE i2.match_id = ? AND be2.batter_id = ? AND be2.dismissal_type IS NOT NULL AND LOWER(be2.dismissal_type) != 'not out'
+                ORDER BY be2.over_number DESC, be2.ball_number DESC
+                LIMIT 1
+            ) AS dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?
-    """, (match_id, player_id))
-    batting = cursor.fetchone()
+    """, (match_id, player_id, match_id, player_id))
+
+    batting = dict(cursor.fetchone())
+
+    # Strike Rate & Scoring Shot %
+    if batting['balls_faced']:
+        batting['strike_rate'] = round(batting['runs'] * 100.0 / batting['balls_faced'], 2)
+
+        # Count scoring shots (legal + no balls only)
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ? AND be.batter_id = ? AND be.runs > 0 AND be.wides = 0
+        """, (match_id, player_id))
+        scoring_shots = cursor.fetchone()[0]
+        batting['scoring_shot_percentage'] = round(scoring_shots * 100.0 / batting['balls_faced'], 2)
+    else:
+        batting.update({"strike_rate": 0, "scoring_shot_percentage": 0})
+
+    # If no dismissal_type found, mark as 'Not out'
+    if not batting['dismissal_type']:
+        batting['dismissal_type'] = "Not out"
+
 
     # Bowling summary
     cursor.execute("""
         SELECT
-            COUNT(*) AS balls_bowled,
-            SUM(be.runs) AS runs_conceded,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets
+            COUNT(*) AS total_balls,  -- includes wides and no balls
+            COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
+            SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dot_balls,
+            SUM(be.runs + be.wides + be.no_balls) AS runs_conceded,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+            SUM(be.wides + be.no_balls) AS extras
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.bowler_id = ?
     """, (match_id, player_id))
-    bowling = cursor.fetchone()
 
-    # Fielding summary (example: catches taken)
+    bowling = dict(cursor.fetchone())
+
+    if bowling['total_balls']:
+        bowling['overs'] = round(bowling['legal_balls'] / 6, 1)
+        bowling['dot_ball_percentage'] = round(bowling['dot_balls'] * 100.0 / bowling['total_balls'], 2)
+        bowling['economy'] = round(bowling['runs_conceded'] * 6.0 / bowling['total_balls'], 2)
+    else:
+        bowling.update({"overs": 0, "dot_ball_percentage": 0, "economy": 0})
+
+
+    # Fielding summary
     cursor.execute("""
-        SELECT COUNT(*) AS catches
+        SELECT
+            COUNT(*) AS total_balls_fielded,
+            SUM(CASE WHEN fc.clean_pickup = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS clean_pick_up_percentage,
+            SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches_taken,
+            SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_out_chances_taken,
+            AVG(fc.conversion_rate) AS total_conversion_rate,
+            AVG(fc.runs_allowed_saved) AS runs_allowed_saved
         FROM ball_fielding_events bfe
         JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2
+        WHERE i.match_id = ? AND fc.fielder_id = ?
     """, (match_id, player_id))
-    fielding = cursor.fetchone()
+    fielding = dict(cursor.fetchone())
 
     # Ball by ball batting breakdown
     cursor.execute("""
-        SELECT be.over_number, be.ball_number, be.runs, be.footwork, be.shot_selection, be.shot_type,
-               be.aerial, be.edged, be.ball_missed
+        SELECT be.runs, be.footwork, be.shot_selection, be.intent, be.aerial, be.edged, be.ball_missed
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?
@@ -3956,34 +4004,113 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     """, (match_id, player_id))
     scoring_shots_breakdown = {str(row["runs"]): row["count"] for row in cursor.fetchall()}
 
+    # Off side and leg side run distribution
+    cursor.execute("""
+        SELECT
+            SUM(CASE WHEN be.shot_x < 0 THEN be.runs ELSE 0 END) AS off_side_runs,
+            SUM(CASE WHEN be.shot_x >= 0 THEN be.runs ELSE 0 END) AS leg_side_runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+    """, (match_id, player_id))
+
+    side_data = cursor.fetchone()
+    off_side_runs = side_data['off_side_runs'] or 0
+    leg_side_runs = side_data['leg_side_runs'] or 0
+    total_runs = off_side_runs + leg_side_runs
+
+    # Calculate percentages
+    if total_runs > 0:
+        off_side_percentage = round(off_side_runs * 100.0 / total_runs, 2)
+        leg_side_percentage = round(leg_side_runs * 100.0 / total_runs, 2)
+    else:
+        off_side_percentage = leg_side_percentage = 0
+
     # Ball by ball bowling breakdown
     cursor.execute("""
-        SELECT be.over_number, be.ball_number, be.runs, be.delivery_type,
-            CASE
-                WHEN be.over_the_wicket = 1 THEN 'Over'
-                WHEN be.around_the_wicket = 1 THEN 'Around'
-                ELSE 'Unknown'
-            END AS around_or_over,
-            be.dismissal_type
+        SELECT be.runs, be.is_extra, be.length, be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.bowler_id = ?
         ORDER BY be.over_number, be.ball_number
     """, (match_id, player_id))
-
     ball_by_ball_bowling = [dict(row) for row in cursor.fetchall()]
 
-
-    # Example: wagon wheel data
+    # Compute Zone Effectiveness
     cursor.execute("""
-        SELECT be.shot_x, be.shot_y
+        SELECT be.pitch_y, bw.bowling_style, be.runs, be.wides, be.no_balls, 
+            (CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dot_balls,
+            be.edged, be.ball_missed, be.shot_type, be.dismissal_type
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players bw ON be.bowler_id = bw.player_id
+        WHERE be.bowler_id = ? AND i.match_id = ? AND be.pitch_y IS NOT NULL
+    """, (player_id, match_id))
+
+    zone_data = cursor.fetchall()
+
+    zone_labels = ["Full Toss", "Yorker", "Full", "Good", "Short"]
+    zone_maps = {
+        "spin": {
+            "Full Toss": (-0.0909, 0.03636),
+            "Yorker": (0.03636, 0.1636),
+            "Full": (0.1636, 0.31818),
+            "Good": (0.31818, 0.545454),
+            "Short": (0.545454, 1.0)
+        },
+        "pace": {
+            "Full Toss": (-0.0909, 0.03636),
+            "Yorker": (0.03636, 0.1636),
+            "Full": (0.1636, 0.31818),
+            "Good": (0.31818, 0.545454),
+            "Short": (0.545454, 1.0)
+        }
+    }
+
+    zone_stats = {label: {"balls": 0, "runs": 0, "wickets": 0, "dots": 0, "false_shots": 0} for label in zone_labels}
+
+    for row in zone_data:
+        pitch_y = row["pitch_y"]
+        style = (row["bowling_style"] or "").lower()
+        zone_map = zone_maps["spin"] if "spin" in style else zone_maps["pace"]
+
+        total_runs = (row["runs"] or 0) + (row["wides"] or 0) + (row["no_balls"] or 0)
+
+        for zone, (start, end) in zone_map.items():
+            if start <= pitch_y < end:
+                zone_stats[zone]["balls"] += 1
+                zone_stats[zone]["runs"] += total_runs
+                zone_stats[zone]["dots"] += row["dot_balls"] or 0
+                if row["dismissal_type"] and row["dismissal_type"].lower() != "not out":
+                    zone_stats[zone]["wickets"] += 1
+                if (row["edged"] or row["ball_missed"]) and row["shot_type"] and row["shot_type"].lower() != "leave":
+                    zone_stats[zone]["false_shots"] += 1
+                break
+
+    zone_effectiveness = []
+    for zone in zone_labels:
+        z = zone_stats[zone]
+        balls = z["balls"] or 1  # prevent division by zero
+        zone_effectiveness.append({
+            "zone": zone,
+            "balls": z["balls"],
+            "runs": z["runs"],
+            "wickets": z["wickets"],
+            "avg_runs_per_ball": round(z["runs"] / balls, 2),
+            "dot_pct": round((z["dots"] / balls) * 100, 2),
+            "false_shot_pct": round((z["false_shots"] / balls) * 100, 2)
+        })
+
+    # Wagon wheel data
+    cursor.execute("""
+        SELECT be.shot_x, be.shot_y, be.runs
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ? AND be.shot_x IS NOT NULL AND be.shot_y IS NOT NULL
     """, (match_id, player_id))
     wagon_wheel_data = [dict(row) for row in cursor.fetchall()]
 
-    # Example: pitch map data
+    # Pitch map data
     cursor.execute("""
         SELECT be.pitch_x, be.pitch_y
         FROM ball_events be
@@ -3997,64 +4124,121 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     return {
         "player_name": player_name,
         "match": dict(match_row),
-        "batting": dict(batting),
-        "bowling": dict(bowling),
-        "fielding": dict(fielding),
-        "ball_by_ball_batting": ball_by_ball_batting,
-        "scoring_shots_breakdown": scoring_shots_breakdown,
-        "wagon_wheel_data": wagon_wheel_data,
-        "ball_by_ball_bowling": ball_by_ball_bowling,
-        "pitch_map_data": pitch_map_data
+        "batting": batting,  # Updated to include off/leg side data and other batting insights
+        "bowling": bowling,  # Updated to include dot ball % and economy
+        "fielding": fielding,  # Fielding summary (like catches)
+        "ball_by_ball_batting": ball_by_ball_batting,  # Full ball-by-ball batting data
+        "scoring_shots_breakdown": scoring_shots_breakdown,  # 0s, 1s, 2s breakdown
+        "side_runs": {
+            "off_side_runs": off_side_runs,
+            "leg_side_runs": leg_side_runs,
+            "off_side_percentage": off_side_percentage,
+            "leg_side_percentage": leg_side_percentage
+        },
+        "wagon_wheel_data": wagon_wheel_data,  # For your zone-based & line-based rendering
+        "ball_by_ball_bowling": ball_by_ball_bowling,  # Full ball-by-ball bowling data
+        "pitch_map_data": pitch_map_data,  # Pitch map for the bowler
+        "zone_effectiveness": zone_effectiveness  # Zone-wise effectiveness for the bowler
     }
 
 def generate_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
+    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
     elements = []
 
-    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
-
-    # Match summary
+    # 1️⃣ Header
     elements.append(Paragraph(f"<b>Player: {data['player_name']}</b>", styles['Title']))
     match = data['match']
     elements.append(Paragraph(f"Match: {match['team_a']} vs {match['team_b']} on {match['match_date']}", styles['Normal']))
     elements.append(Spacer(1, 10))
 
-    # Batting Summary
-    batting = data['batting']
+    # 2️⃣ Batting Summary
     elements.append(Paragraph("<b>Batting Summary</b>", bold))
-    batting_data = [["Runs", "Balls", "Dismissals"],
-                    [batting['runs'] or 0, batting['balls'] or 0, batting['dismissals'] or 0]]
-    elements.append(Table(batting_data))
+    batting = data['batting']
+    if batting:
+        batting_table_data = [
+            ["Runs", "Balls", "Strike Rate", "Scoring Shot %", "Average Intent", "Dismissal"],
+            [
+                batting.get('runs', 0),
+                batting.get('balls', 0),
+                batting.get('strike_rate', 0),
+                batting.get('scoring_shot_percentage', "N/A"),
+                batting.get('average_intent', "N/A"),
+                batting.get('dismissal', "Not out")
+            ]
+        ]
+        batting_table = Table(batting_table_data)
+        batting_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
+        ]))
+        elements.append(batting_table)
+    else:
+        elements.append(Paragraph("Did not bat", styles['Normal']))
     elements.append(Spacer(1, 10))
 
-    # Ball by ball batting breakdown
-    if data['ball_by_ball_batting']:
-        elements.append(Paragraph("<b>Ball-by-Ball Batting Breakdown</b>", bold))
-        bb_data = [["Over", "Ball", "Runs", "Footwork", "Shot", "Type", "Aerial", "Edged", "Missed"]]
-        for ball in data['ball_by_ball_batting']:
-            bb_data.append([
-                f"{ball['over_number']}.{ball['ball_number']}",
-                ball['ball_number'],
-                ball['runs'],
-                ball['footwork'],
-                ball['shot_selection'],
-                ball['shot_type'],
-                "Yes" if ball['aerial'] else "No",
-                "Yes" if ball['edged'] else "No",
-                "Yes" if ball['ball_missed'] else "No"
-            ])
-        table = Table(bb_data, colWidths=[40, 30, 30, 60, 60, 60, 30, 30, 30])
-        table.setStyle(TableStyle([
+    # 3️⃣ Bowling Summary
+    elements.append(Paragraph("<b>Bowling Summary</b>", bold))
+    bowling = data['bowling']
+    if bowling:
+        bowling_table_data = [
+            ["Overs", "Dot Balls", "Runs Conceded", "Wickets", "Extras", "Dot Ball %", "Economy"],
+            [
+                bowling.get('overs', 0),
+                bowling.get('dot_balls', 0),
+                bowling.get('runs_conceded', 0),
+                bowling.get('wickets', 0),
+                bowling.get('extras', 0),
+                bowling.get('dot_ball_percentage', "N/A"),
+                bowling.get('economy', "N/A")
+            ]
+        ]
+        bowling_table = Table(bowling_table_data)
+        bowling_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
         ]))
-        elements.append(table)
+        elements.append(bowling_table)
+    else:
+        elements.append(Paragraph("Did not bowl", styles['Normal']))
+    elements.append(Spacer(1, 10))
+
+    # 4️⃣ Fielding Summary
+    elements.append(Paragraph("<b>Fielding Summary</b>", bold))
+    fielding = data['fielding']
+    if fielding:
+        fielding_table_data = [
+            ["Total Balls Fielded", "Clean Pick Up %", "Catches Taken", "Run Out Chances Taken", "Total Conversion Rate", "Runs Allowed/Saved"],
+            [
+                fielding.get('total_balls_fielded', 0),
+                fielding.get('clean_pick_up_percentage', "N/A"),
+                fielding.get('catches_taken', 0),
+                fielding.get('run_out_chances_taken', 0),
+                fielding.get('total_conversion_rate', "N/A"),
+                fielding.get('runs_allowed_saved', "N/A")
+            ]
+        ]
+        fielding_table = Table(fielding_table_data)
+        fielding_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
+        ]))
+        elements.append(fielding_table)
+    else:
+        elements.append(Paragraph("No fielding data available", styles['Normal']))
+    elements.append(PageBreak())
+
+    # 5️⃣ Detailed Batting Summary
+    elements.append(Paragraph("<b>Detailed Batting Summary</b>", styles['Title']))
+    elements.append(Spacer(1, 10))
+
+    if os.path.exists("/tmp/wagon_wheel_chart.png"):
+        elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
+        elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
         elements.append(Spacer(1, 10))
 
-    # Scoring shot breakdown
     elements.append(Paragraph("<b>Scoring Shot Breakdown</b>", bold))
     score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
     table = Table(score_data)
@@ -4063,47 +4247,103 @@ def generate_pdf_report(data: dict):
         ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
     ]))
     elements.append(table)
-    elements.append(PageBreak())
-
-    if os.path.exists("/tmp/wagon_wheel_chart.png"):
-        elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
-        elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
-        elements.append(PageBreak())
-    else:
-        print("❌ /tmp/wagon_wheel_chart.png not found - skipping wagon wheel in PDF")
-
-    # Bowling Summary
-    bowling = data['bowling']
-    elements.append(Paragraph("<b>Bowling Summary</b>", bold))
-    bowling_data = [["Balls Bowled", "Runs Conceded", "Wickets"],
-                    [bowling['balls_bowled'] or 0, bowling['runs_conceded'] or 0, bowling['wickets'] or 0]]
-    elements.append(Table(bowling_data))
     elements.append(Spacer(1, 10))
 
-    # Ball by ball bowling breakdown
-    if data['ball_by_ball_bowling']:
-        elements.append(Paragraph("<b>Ball-by-Ball Bowling Breakdown</b>", bold))
-        bb_data = [["Over", "Ball", "Runs", "Delivery", "Around/Over", "Dismissal"]]
-        for ball in data['ball_by_ball_bowling']:
-            bb_data.append([
-                f"{ball['over_number']}.{ball['ball_number']}",
-                ball['ball_number'],
-                ball['runs'],
-                ball['delivery_type'],
-                ball['around_or_over'],
-                ball['dismissal_type'] or "-"
-            ])
-        table = Table(bb_data, colWidths=[40, 30, 30, 60, 60, 60])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('FONTSIZE', (0, 0), (-1, -1), 7),
-        ]))
-        elements.append(table)
-        elements.append(PageBreak())
+    # Off/Leg Side Runs Table
+    elements.append(Paragraph("<b>Off/Leg Side Run Distribution</b>", bold))
+    side_data = data.get("side_runs", {})
+    side_table_data = [["Side", "Runs", "Percentage"]]
 
-    # Generate pitch map
-    if data['pitch_map_data']:
+    side_table_data.append([
+        "Off Side",
+        side_data.get("off_side_runs", 0),
+        f"{side_data.get('off_side_percentage', 0)}%"
+    ])
+    side_table_data.append([
+        "Leg Side",
+        side_data.get("leg_side_runs", 0),
+        f"{side_data.get('leg_side_percentage', 0)}%"
+    ])
+
+    side_table = Table(side_table_data)
+    side_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+    ]))
+    elements.append(side_table)
+    elements.append(Spacer(1, 10))
+
+
+    # Ball by Ball Breakdown
+    elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
+    bb_data = [["Ball", "Runs", "Shot", "Footwork", "Intent", "Aerial", "Edged", "Missed"]]
+    for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
+        bb_data.append([
+            idx,
+            ball.get("runs", "N/A"),
+            ball.get("shot_selection", "N/A"),
+            ball.get("footwork", "N/A"),
+            ball.get("intent", "N/A"),
+            "Yes" if ball.get("aerial") else "No",
+            "Yes" if ball.get("edged") else "No",
+            "Yes" if ball.get("ball_missed") else "No"
+        ])
+    table = Table(bb_data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+    ]))
+    elements.append(table)
+    elements.append(PageBreak())
+
+    # 6️⃣ Detailed Bowling Summary
+    elements.append(Paragraph("<b>Detailed Bowling Summary</b>", styles['Title']))
+    elements.append(Spacer(1, 10))
+
+    # Zone Effectiveness Table
+    elements.append(Paragraph("<b>Zone Effectiveness</b>", bold))
+
+    zone_effectiveness = data.get("zone_effectiveness", [])
+    zone_table_data = [["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot %", "False Shot %"]]
+    for zone in zone_effectiveness:
+        zone_table_data.append([
+            zone["zone"],
+            zone["balls"],
+            zone["runs"],
+            zone["wickets"],
+            zone["avg_runs_per_ball"],
+            f"{zone['dot_pct']}%",
+            f"{zone['false_shot_pct']}%"
+        ])
+    zone_table = Table(zone_table_data)
+    zone_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+        ('FONTSIZE', (0, 0), (-1, -1), 8)
+    ]))
+    elements.append(zone_table)
+    elements.append(Spacer(1, 10))
+
+    elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
+    bb_data = [["Ball", "Runs", "Extras", "Length", "Dismissal"]]
+    for idx, ball in enumerate(data['ball_by_ball_bowling'], start=1):
+        bb_data.append([
+            idx,
+            ball.get("runs", "N/A"),
+            ball.get("extras", "N/A"),
+            ball.get("length", "N/A"),
+            ball.get("dismissal_type", "N/A")
+        ])
+    table = Table(bb_data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+    ]))
+    elements.append(table)
+    elements.append(PageBreak())
+
+    # Pitch Map
+    if data.get('pitch_map_data'):
         fig, ax = plt.subplots(figsize=(4, 6))
         for ball in data['pitch_map_data']:
             ax.scatter(ball['pitch_x'], ball['pitch_y'], color='red', s=10)
@@ -4114,18 +4354,6 @@ def generate_pdf_report(data: dict):
         plt.close(fig)
         elements.append(Paragraph("<b>Pitch Map</b>", bold))
         elements.append(Image("/tmp/pitch_map.png", width=300, height=400))
-
-    # Fielding summary
-    if data['fielding'] and data['fielding'].get('catches', 0) > 0:
-        elements.append(PageBreak())
-        elements.append(Paragraph("<b>Fielding Summary</b>", bold))
-        fielding_data = [["Catches"], [data['fielding']['catches']]]
-        table = Table(fielding_data)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
-        ]))
-        elements.append(table)
 
     doc.build(elements)
     buffer.seek(0)

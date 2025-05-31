@@ -3973,22 +3973,26 @@ def fetch_player_match_stats(match_id: int, player_id: int):
             (SELECT COUNT(*)
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN innings i ON bfe.innings_id = i.innings_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
             WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 1) AS clean_pickups,
             (SELECT COUNT(*)
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN innings i ON bfe.innings_id = i.innings_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
             WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2) AS catches,
             (SELECT COUNT(*)
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN innings i ON bfe.innings_id = i.innings_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
             WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3) AS run_outs,
             (SELECT COUNT(*)
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN innings i ON bfe.innings_id = i.innings_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
             WHERE i.match_id = ? AND fc.fielder_id = ?) AS total_fielding_events
     """, (match_id, player_id, match_id, player_id, match_id, player_id, match_id, player_id))
 
@@ -4000,6 +4004,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         "run_outs": fielding_row["run_outs"] or 0,
         "total_fielding_events": fielding_row["total_fielding_events"] or 0
     }
+
 
     # Ball by ball batting breakdown
     cursor.execute("""

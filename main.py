@@ -4066,15 +4066,15 @@ def generate_pdf_report(data: dict):
     elements.append(PageBreak())
 
     if os.path.exists("/tmp/wagon_wheel_lines_chart.png"):
-    elements.append(Paragraph("<b>Wagon Wheel (Lines)</b>", bold))
-    elements.append(Image("/tmp/wagon_wheel_lines_chart.png", width=300, height=300))
-    elements.append(Spacer(1, 10))
+        elements.append(Paragraph("<b>Wagon Wheel (Lines)</b>", bold))
+        elements.append(Image("/tmp/wagon_wheel_lines_chart.png", width=300, height=300))
+        elements.append(Spacer(1, 10))
 
     if os.path.exists("/tmp/wagon_wheel_zones_chart.png"):
         elements.append(Paragraph("<b>Wagon Wheel (Zones)</b>", bold))
         elements.append(Image("/tmp/wagon_wheel_zones_chart.png", width=300, height=300))
         elements.append(PageBreak())
-        
+
     # Bowling Summary
     bowling = data['bowling']
     elements.append(Paragraph("<b>Bowling Summary</b>", bold))

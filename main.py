@@ -4341,14 +4341,14 @@ def generate_pdf_report(data: dict):
 
     # Ball by Ball Breakdown
     elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
-    bb_data = [["Ball", "Runs", "Shot", "Footwork", "Intent", "Aerial", "Edged", "Missed"]]
+    bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
     for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
         bb_data.append([
             idx,
             ball.get("runs", "N/A"),
             ball.get("shot_selection", "N/A"),
             ball.get("footwork", "N/A"),
-            ball.get("intent", "N/A"),
+            ball.get("shot_type", "N/A"),
             "Yes" if ball.get("aerial") else "No",
             "Yes" if ball.get("edged") else "No",
             "Yes" if ball.get("ball_missed") else "No"

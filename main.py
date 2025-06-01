@@ -4018,50 +4018,26 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     # Fielding summary
     cursor.execute("""
         SELECT
-            COALESCE((
-                SELECT COUNT(*)
-                FROM ball_fielding_events bfe
-                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-                JOIN ball_events be ON bfe.ball_id = be.ball_id
-                JOIN innings i ON be.innings_id = i.innings_id
-                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 1
-            ), 0) AS clean_pickups,
+            SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) AS clean_pickups,
+            SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches,
+            SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_outs,
+            COUNT(*) AS total_fielding_events
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND fc.fielder_id = ?
+    """, (match_id, player_id))
 
-            COALESCE((
-                SELECT COUNT(*)
-                FROM ball_fielding_events bfe
-                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-                JOIN ball_events be ON bfe.ball_id = be.ball_id
-                JOIN innings i ON be.innings_id = i.innings_id
-                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2
-            ), 0) AS catches,
+    fielding_row = cursor.fetchone() or {}
 
-            COALESCE((
-                SELECT COUNT(*)
-                FROM ball_fielding_events bfe
-                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-                JOIN ball_events be ON bfe.ball_id = be.ball_id
-                JOIN innings i ON be.innings_id = i.innings_id
-                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3
-            ), 0) AS run_outs,
-
-            COALESCE((
-                SELECT COUNT(*)
-                FROM ball_fielding_events bfe
-                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-                JOIN ball_events be ON bfe.ball_id = be.ball_id
-                JOIN innings i ON be.innings_id = i.innings_id
-                WHERE i.match_id = ? AND fc.fielder_id = ?
-            ), 0) AS total_fielding_events
-    """, (match_id, player_id, match_id, player_id, match_id, player_id, match_id, player_id))
-
-    fielding_row = cursor.fetchone()
     fielding = {
-        "clean_pickups": fielding_row["clean_pickups"],
-        "catches": fielding_row["catches"],
-        "run_outs": fielding_row["run_outs"],
-        "total_fielding_events": fielding_row["total_fielding_events"]
+        "clean_pickups": fielding_row.get("clean_pickups", 0) or 0,
+        "catches": fielding_row.get("catches", 0) or 0,
+        "run_outs": fielding_row.get("run_outs", 0) or 0,
+        "total_fielding_events": fielding_row.get("total_fielding_events", 0) or 0
     }
+
 
 
 
@@ -4473,10 +4449,11 @@ def generate_pdf_report(data: dict):
             ('FONTSIZE', (0, 0), (-1, -1), 7)
         ]))
         elements.append(table)
+        elements.append(Spacer(1, 8))
 
         # If the batter was dismissed, add wicket details
         if data["batting"].get("dismissal_type", "").lower() != "not out":
-            dismissal_type = data["batting"]["dismissal_type"].capitalize()
+            dismissal_type = data["batting"]["dismissal_type"]
             runs = data["batting"]["runs"]
             balls_faced = data["batting"]["balls_faced"]
             wicket_details = f"{dismissal_type} for {runs} runs from {balls_faced} balls"

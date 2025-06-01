@@ -3958,7 +3958,8 @@ def fetch_player_match_stats(match_id: int, player_id: int):
                 SELECT be2.dismissal_type
                 FROM ball_events be2
                 JOIN innings i2 ON be2.innings_id = i2.innings_id
-                WHERE i2.match_id = ? AND be2.batter_id = ? AND be2.dismissal_type IS NOT NULL AND LOWER(be2.dismissal_type) != 'not out'
+                WHERE i2.match_id = ? AND be2.dismissed_player_id = ?
+                AND be2.dismissal_type IS NOT NULL
                 ORDER BY be2.over_number DESC, be2.ball_number DESC
                 LIMIT 1
             ) AS dismissal_type
@@ -4297,9 +4298,9 @@ def generate_pdf_report(data: dict):
 
 
     # 2️⃣ Batting Summary
+    elements.append(Paragraph("<b>Batting Summary</b>", bold))
+    elements.append(Spacer(1, 5))
     if data["batting"]["balls_faced"] > 0:
-        elements.append(Paragraph("<b>Batting Summary</b>", bold))
-        elements.append(Spacer(1, 5))
         batting = data['batting']
         if batting:
             batting_table_data = [
@@ -4327,9 +4328,9 @@ def generate_pdf_report(data: dict):
         elements.append(Spacer(1, 10))
 
     # 3️⃣ Bowling Summary
+    elements.append(Paragraph("<b>Bowling Summary</b>", bold))
+    elements.append(Spacer(1, 5))
     if data["bowling"]["total_balls"] > 0:
-        elements.append(Paragraph("<b>Bowling Summary</b>", bold))
-        elements.append(Spacer(1, 5))
         bowling = data['bowling']
         if bowling:
             bowling_table_data = [
@@ -4461,6 +4462,16 @@ def generate_pdf_report(data: dict):
             ('FONTSIZE', (0, 0), (-1, -1), 7)
         ]))
         elements.append(table)
+
+        # If the batter was dismissed, add wicket details
+        if data["batting"].get("dismissal_type", "").lower() != "not out":
+            dismissal_type = data["batting"]["dismissal_type"].capitalize()
+            runs = data["batting"]["runs"]
+            balls_faced = data["batting"]["balls_faced"]
+            wicket_details = f"{dismissal_type} for {runs} runs from {balls_faced} balls"
+            elements.append(Paragraph(f"<b>Wicket:</b> {wicket_details}", styles["Normal"]))
+            elements.append(Spacer(1, 10))
+            
         elements.append(PageBreak())
 
 

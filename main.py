@@ -4260,8 +4260,8 @@ def generate_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
-    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
-    centered = ParagraphStyle(name='Centered', parent=styles['Normal'], alignment=1)
+    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12)
+    centered = ParagraphStyle(name='Centered', parent=styles['Normal'], fontSize=8, alignment=1)
     elements = []
 
     # 1️⃣ Header
@@ -4316,7 +4316,7 @@ def generate_pdf_report(data: dict):
         elements.append(batting_table)
     else:
         elements.append(Paragraph("Did not bat", styles['Normal']))
-    elements.append(Spacer(1, 10))
+    elements.append(Spacer(1, 30))
 
     # 3️⃣ Bowling Summary
     elements.append(Paragraph("<b>Bowling Summary</b>", bold))
@@ -4342,7 +4342,7 @@ def generate_pdf_report(data: dict):
         elements.append(bowling_table)
     else:
         elements.append(Paragraph("Did not bowl", styles['Normal']))
-    elements.append(Spacer(1, 10))
+    elements.append(Spacer(1, 30))
 
     # 4️⃣ Fielding Summary
     elements.append(Paragraph("<b>Fielding Summary</b>", bold))

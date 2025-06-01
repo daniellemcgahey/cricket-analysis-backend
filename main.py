@@ -4391,7 +4391,7 @@ def generate_pdf_report(data: dict):
         if os.path.exists("/tmp/wagon_wheel_chart.png"):
             elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
             elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
-            elements.append(Spacer(1, 10))
+            elements.append(Spacer(1, 40))
 
         # 🟩 Create column layout with labels above each table
         # First column: Scoring Shot Breakdown
@@ -4441,6 +4441,7 @@ def generate_pdf_report(data: dict):
 
         # 🟩 Ball by ball breakdown on next page
         elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
+        elements.append(Spacer(1, 5))
         bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
         for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
             bb_data.append([

@@ -4008,7 +4008,8 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Ball by ball batting breakdown
     cursor.execute("""
-        SELECT be.runs, be.footwork, be.shot_selection, be.batting_intent_score, be.aerial, be.edged, be.ball_missed
+        SELECT be.over_number, be.ball_number, be.runs, be.footwork, be.shot_selection, be.shot_type,
+            be.aerial, be.edged, be.ball_missed
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?

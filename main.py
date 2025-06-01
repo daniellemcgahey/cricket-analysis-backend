@@ -4085,19 +4085,23 @@ def fetch_player_match_stats(match_id: int, player_id: int):
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
             JOIN ball_events be ON bfe.ball_id = be.ball_id
             JOIN innings i ON be.innings_id = i.innings_id
-            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id IN (6, 7, 8)) AS missed_chances
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id IN (4, 5, 6)) AS missed_chances
     """, (match_id, player_id, match_id, player_id, match_id, player_id))
-
     row = cursor.fetchone()
     catches = row["catches"] or 0
     run_outs = row["run_outs"] or 0
     missed_chances = row["missed_chances"] or 0
 
-    total_chances = catches + run_outs + missed_chances
+
+    chances_taken = catches + run_outs
+    total_chances = chances_taken + missed_chances
+
     if total_chances:
-        conversion_rate = round((catches + run_outs) * 100.0 / total_chances, 2)
+        conversion_percentage = round((chances_taken * 100.0) / total_chances, 2)
+        conversion_rate_display = f"{chances_taken}/{total_chances} ({conversion_percentage}%)"
     else:
-        conversion_rate = 0.0
+        conversion_rate_display = "0/0 (0%)"
+
 
 
 
@@ -4109,7 +4113,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         "total_fielding_events": fielding_row["total_fielding_events"] if fielding_row["total_fielding_events"] is not None else 0,
         "runs_saved_allowed": runs_saved_allowed,
         "clean_pickup_percentage": clean_pickup_pct,
-        "conversion_rate": conversion_rate
+        "conversion_rate": conversion_rate_display
     }
 
 

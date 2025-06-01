@@ -4369,10 +4369,10 @@ def generate_pdf_report(data: dict):
         fielding_table_data = [
             ["Total Balls Fielded", "Clean Pick Up %", "Catche(s)", "Run Out(s)", "Conversion Rate", "Runs Allowed/Saved"],
             [
-                fielding.get('total_balls_fielded', 0),
+                fielding.get('total_fielding_events', 0),
                 fielding.get('clean_pick_up_percentage', "N/A"),
-                fielding.get('catches_taken', 0),
-                fielding.get('run_out_chances_taken', 0),
+                fielding.get('catches', 0),
+                fielding.get('run_outs', 0),
                 fielding.get('total_conversion_rate', "N/A"),
                 fielding.get('runs_allowed_saved', "N/A")
             ]

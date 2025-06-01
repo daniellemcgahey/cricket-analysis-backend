@@ -4032,10 +4032,10 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     fielding_row = cursor.fetchone() or {}
 
     fielding = {
-        "clean_pickups": fielding_row.get("clean_pickups", 0) or 0,
-        "catches": fielding_row.get("catches", 0) or 0,
-        "run_outs": fielding_row.get("run_outs", 0) or 0,
-        "total_fielding_events": fielding_row.get("total_fielding_events", 0) or 0
+        "clean_pickups": fielding_row["clean_pickups"] or 0,
+        "catches": fielding_row["catches"] or 0,
+        "run_outs": fielding_row["run_outs"] or 0,
+        "total_fielding_events": fielding_row["total_fielding_events"] or 0
     }
 
 

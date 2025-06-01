@@ -2920,6 +2920,19 @@ async def upload_wagon_wheel(request: Request):
 
     return {"message": f"{image_type} image saved successfully"}
 
+@app.post("/api/upload-pitch-map")
+async def upload_pitch_map(request: Request):
+    data = await request.json()
+    base64_image = data["image"]
+    header, encoded = base64_image.split(",", 1)
+    image_data = base64.b64decode(encoded)
+     
+    filename = "/tmp/pitch_map_chart.png"
+    with open(filename, "wb") as f:
+        f.write(image_data)
+    
+    return {"message": "pitch_map image saved successfully"}
+
 
 @app.get("/player-wagon-wheel-data")
 def player_wagon_wheel_data(matchId: int, playerId: int):
@@ -2937,6 +2950,25 @@ def player_wagon_wheel_data(matchId: int, playerId: int):
     shots = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return shots
+
+
+@app.get("/player-pitch-map-data")
+def player_pitch_map_data(matchId: int, playerId: int):
+    conn = sqlite3.connect("cricket_analysis.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT be.pitch_x, be.pitch_y
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.bowler_id = ? AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+    """, (matchId, playerId))
+
+    pitch_map_data = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return pitch_map_data
+
 
 
 
@@ -4571,18 +4603,14 @@ def generate_pdf_report(data: dict):
         elements.append(zone_table)
         elements.append(Spacer(1, 10))
 
-        # Pitch Map
-        if data.get('pitch_map_data'):
-            fig, ax = plt.subplots(figsize=(4, 6))
-            for ball in data['pitch_map_data']:
-                ax.scatter(ball['pitch_x'], ball['pitch_y'], color='red', s=10)
-            ax.set_xlim(-1, 1)
-            ax.set_ylim(0, 2)
-            ax.axis('off')
-            plt.savefig("/tmp/pitch_map.png")
-            plt.close(fig)
+        # 6️⃣ Pitch Map Page
+        if os.path.exists("/tmp/pitch_map_chart.png"):
             elements.append(Paragraph("<b>Pitch Map</b>", bold))
-            elements.append(Image("/tmp/pitch_map.png", width=300, height=400))
+            elements.append(Image("/tmp/pitch_map_chart.png", width=300, height=400))
+            elements.append(PageBreak())
+        else:
+            print("❌ /tmp/pitch_map_chart.png not found - skipping pitch map in PDF")
+
 
     doc.build(elements)
     buffer.seek(0)

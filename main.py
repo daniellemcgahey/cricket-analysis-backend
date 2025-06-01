@@ -4297,57 +4297,65 @@ def generate_pdf_report(data: dict):
 
 
     # 2️⃣ Batting Summary
-    elements.append(Paragraph("<b>Batting Summary</b>", bold))
-    elements.append(Spacer(1, 5))
-    batting = data['batting']
-    if batting:
-        batting_table_data = [
-            ["Runs", "Balls", "Strike Rate", "Scoring Shot %", "Average Intent", "Dismissal"],
-            [
-                batting.get('runs', 0),
-                batting.get('balls_faced', 0),
-                batting.get('strike_rate', 0),
-                batting.get('scoring_shot_percentage', "N/A"),
-                batting.get('average_intent', "N/A"),
-                batting.get('dismissal', "Not out")
+    if data["batting"]["balls_faced"] > 0:
+        elements.append(Paragraph("<b>Batting Summary</b>", bold))
+        elements.append(Spacer(1, 5))
+        batting = data['batting']
+        if batting:
+            batting_table_data = [
+                ["Runs", "Balls", "Strike Rate", "Scoring Shot %", "Average Intent", "Dismissal"],
+                [
+                    batting.get('runs', 0),
+                    batting.get('balls_faced', 0),
+                    batting.get('strike_rate', 0),
+                    batting.get('scoring_shot_percentage', "N/A"),
+                    batting.get('average_intent', "N/A"),
+                    batting.get('dismissal', "Not out")
+                ]
             ]
-        ]
-        batting_table = Table(batting_table_data)
-        batting_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
-        ]))
-        elements.append(batting_table)
+            batting_table = Table(batting_table_data)
+            batting_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
+            ]))
+            elements.append(batting_table)
+        else:
+            elements.append(Paragraph("Did not bat", styles['Normal']))
+        elements.append(Spacer(1, 30))
     else:
-        elements.append(Paragraph("Did not bat", styles['Normal']))
-    elements.append(Spacer(1, 30))
+        elements.append(Paragraph("Did not bat", centered))
+        elements.append(Spacer(1, 10))
 
     # 3️⃣ Bowling Summary
-    elements.append(Paragraph("<b>Bowling Summary</b>", bold))
-    elements.append(Spacer(1, 5))
-    bowling = data['bowling']
-    if bowling:
-        bowling_table_data = [
-            ["Overs", "Dot Balls", "Runs Conceded", "Wickets", "Extras", "Dot Ball %", "Economy"],
-            [
-                bowling.get('overs', 0),
-                bowling.get('dot_balls', 0),
-                bowling.get('runs_conceded', 0),
-                bowling.get('wickets', 0),
-                bowling.get('extras', 0),
-                bowling.get('dot_ball_percentage', "N/A"),
-                bowling.get('economy', "N/A")
+    if data["bowling"]["total_balls"] > 0:
+        elements.append(Paragraph("<b>Bowling Summary</b>", bold))
+        elements.append(Spacer(1, 5))
+        bowling = data['bowling']
+        if bowling:
+            bowling_table_data = [
+                ["Overs", "Dot Balls", "Runs Conceded", "Wickets", "Extras", "Dot Ball %", "Economy"],
+                [
+                    bowling.get('overs', 0),
+                    bowling.get('dot_balls', 0),
+                    bowling.get('runs_conceded', 0),
+                    bowling.get('wickets', 0),
+                    bowling.get('extras', 0),
+                    bowling.get('dot_ball_percentage', "N/A"),
+                    bowling.get('economy', "N/A")
+                ]
             ]
-        ]
-        bowling_table = Table(bowling_table_data)
-        bowling_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
-        ]))
-        elements.append(bowling_table)
+            bowling_table = Table(bowling_table_data)
+            bowling_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.black)
+            ]))
+            elements.append(bowling_table)
+        else:
+            elements.append(Paragraph("Did not bowl", styles['Normal']))
+        elements.append(Spacer(1, 30))
     else:
-        elements.append(Paragraph("Did not bowl", styles['Normal']))
-    elements.append(Spacer(1, 30))
+        elements.append(Paragraph("Did not bowl", centered))
+        elements.append(Spacer(1, 10))
 
     # 4️⃣ Fielding Summary
     elements.append(Paragraph("<b>Fielding Summary</b>", bold))
@@ -4376,111 +4384,119 @@ def generate_pdf_report(data: dict):
     elements.append(PageBreak())
 
     # 5️⃣ Detailed Batting Summary
-    elements.append(Paragraph("<b>Detailed Batting Summary</b>", styles['Title']))
-    elements.append(Spacer(1, 10))
-
-    if os.path.exists("/tmp/wagon_wheel_chart.png"):
-        elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
-        elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
+    if data["batting"]["balls_faced"] > 0:
+        elements.append(Paragraph("<b>Detailed Batting Summary</b>", styles['Title']))
         elements.append(Spacer(1, 10))
 
-    elements.append(Paragraph("<b>Scoring Shot Breakdown</b>", bold))
-    score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
-    table = Table(score_data)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
-    ]))
-    elements.append(table)
-    elements.append(Spacer(1, 10))
+        if os.path.exists("/tmp/wagon_wheel_chart.png"):
+            elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
+            elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
+            elements.append(Spacer(1, 10))
 
-    # Off/Leg Side Runs Table
-    elements.append(Paragraph("<b>Off/Leg Side Run Distribution</b>", bold))
-    side_data = data.get("side_runs", {})
-    side_table_data = [["Side", "Runs", "Percentage"]]
+        # 🟩 Scoring Shot Breakdown table
+        score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
+        scoring_table = Table(score_data)
+        scoring_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+        ]))
 
-    side_table_data.append([
-        "Off Side",
-        side_data.get("off_side_runs", 0),
-        f"{side_data.get('off_side_percentage', 0)}%"
-    ])
-    side_table_data.append([
-        "Leg Side",
-        side_data.get("leg_side_runs", 0),
-        f"{side_data.get('leg_side_percentage', 0)}%"
-    ])
-
-    side_table = Table(side_table_data)
-    side_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
-    ]))
-    elements.append(side_table)
-    elements.append(PageBreak())
-
-
-    # Ball by Ball Breakdown
-    elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
-    bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
-    for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
-        bb_data.append([
-            idx,
-            ball.get("runs", "N/A"),
-            ball.get("shot_selection", "N/A"),
-            ball.get("footwork", "N/A"),
-            ball.get("shot_type", "N/A"),
-            "Yes" if ball.get("aerial") else "No",
-            "Yes" if ball.get("edged") else "No",
-            "Yes" if ball.get("ball_missed") else "No"
+        # 🟩 Off/Leg Side Runs table
+        side_data = data.get("side_runs", {})
+        side_table_data = [["Side", "Runs", "Percentage"]]
+        side_table_data.append([
+            "Off Side",
+            side_data.get("off_side_runs", 0),
+            f"{side_data.get('off_side_percentage', 0)}%"
         ])
-    table = Table(bb_data)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
-    ]))
-    elements.append(table)
-    elements.append(PageBreak())
+        side_table_data.append([
+            "Leg Side",
+            side_data.get("leg_side_runs", 0),
+            f"{side_data.get('leg_side_percentage', 0)}%"
+        ])
+        side_table = Table(side_table_data)
+        side_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
+        ]))
+
+        # 🟩 Combine them side-by-side
+        combined_table = Table([
+            [scoring_table, side_table]
+        ], colWidths=[270, 270])
+        combined_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ]))
+
+        elements.append(combined_table)
+        elements.append(Spacer(1, 10))
+
+        # 🟩 Ball by ball breakdown
+        elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
+        bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
+        for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
+            bb_data.append([
+                idx,
+                ball.get("runs", "N/A"),
+                ball.get("shot_selection", "N/A"),
+                ball.get("footwork", "N/A"),
+                ball.get("shot_type", "N/A"),
+                "Yes" if ball.get("aerial") else "No",
+                "Yes" if ball.get("edged") else "No",
+                "Yes" if ball.get("ball_missed") else "No"
+            ])
+        table = Table(bb_data)
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('FONTSIZE', (0, 0), (-1, -1), 7)
+        ]))
+        elements.append(table)
+        elements.append(PageBreak())
+
 
     # 6️⃣ Detailed Bowling Summary
-    elements.append(Paragraph("<b>Detailed Bowling Summary</b>", styles['Title']))
-    elements.append(Spacer(1, 10))
+    if data["bowling"]["total_balls"] > 0:
+        elements.append(Paragraph("<b>Detailed Bowling Summary</b>", styles['Title']))
+        elements.append(Spacer(1, 10))
 
-    # Zone Effectiveness Table
-    elements.append(Paragraph("<b>Zone Effectiveness</b>", bold))
+        # Zone Effectiveness Table
+        elements.append(Paragraph("<b>Zone Effectiveness</b>", bold))
 
-    zone_effectiveness = data.get("zone_effectiveness", [])
-    zone_table_data = [["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot %", "False Shot %"]]
-    for zone in zone_effectiveness:
-        zone_table_data.append([
-            zone["zone"],
-            zone["balls"],
-            zone["runs"],
-            zone["wickets"],
-            zone["avg_runs_per_ball"],
-            f"{zone['dot_pct']}%",
-            f"{zone['false_shot_pct']}%"
-        ])
-    zone_table = Table(zone_table_data)
-    zone_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-        ('FONTSIZE', (0, 0), (-1, -1), 8)
-    ]))
-    elements.append(zone_table)
-    elements.append(Spacer(1, 10))
+        zone_effectiveness = data.get("zone_effectiveness", [])
+        zone_table_data = [["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot %", "False Shot %"]]
+        for zone in zone_effectiveness:
+            zone_table_data.append([
+                zone["zone"],
+                zone["balls"],
+                zone["runs"],
+                zone["wickets"],
+                zone["avg_runs_per_ball"],
+                f"{zone['dot_pct']}%",
+                f"{zone['false_shot_pct']}%"
+            ])
+        zone_table = Table(zone_table_data)
+        zone_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+            ('FONTSIZE', (0, 0), (-1, -1), 8)
+        ]))
+        elements.append(zone_table)
+        elements.append(Spacer(1, 10))
 
-    # Pitch Map
-    if data.get('pitch_map_data'):
-        fig, ax = plt.subplots(figsize=(4, 6))
-        for ball in data['pitch_map_data']:
-            ax.scatter(ball['pitch_x'], ball['pitch_y'], color='red', s=10)
-        ax.set_xlim(-1, 1)
-        ax.set_ylim(0, 2)
-        ax.axis('off')
-        plt.savefig("/tmp/pitch_map.png")
-        plt.close(fig)
-        elements.append(Paragraph("<b>Pitch Map</b>", bold))
-        elements.append(Image("/tmp/pitch_map.png", width=300, height=400))
+        # Pitch Map
+        if data.get('pitch_map_data'):
+            fig, ax = plt.subplots(figsize=(4, 6))
+            for ball in data['pitch_map_data']:
+                ax.scatter(ball['pitch_x'], ball['pitch_y'], color='red', s=10)
+            ax.set_xlim(-1, 1)
+            ax.set_ylim(0, 2)
+            ax.axis('off')
+            plt.savefig("/tmp/pitch_map.png")
+            plt.close(fig)
+            elements.append(Paragraph("<b>Pitch Map</b>", bold))
+            elements.append(Image("/tmp/pitch_map.png", width=300, height=400))
 
     doc.build(elements)
     buffer.seek(0)

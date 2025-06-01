@@ -4393,7 +4393,9 @@ def generate_pdf_report(data: dict):
             elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
             elements.append(Spacer(1, 10))
 
-        # 🟩 Scoring Shot Breakdown table
+        # 🟩 Create column layout with labels above each table
+        # First column: Scoring Shot Breakdown
+        scoring_label = Paragraph("<b>Scoring Shot Breakdown</b>", bold)
         score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
         scoring_table = Table(score_data)
         scoring_table.setStyle(TableStyle([
@@ -4401,7 +4403,8 @@ def generate_pdf_report(data: dict):
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
         ]))
 
-        # 🟩 Off/Leg Side Runs table
+        # Second column: Off/Leg Side Runs
+        side_label = Paragraph("<b>Off/Leg Side Run Distribution</b>", bold)
         side_data = data.get("side_runs", {})
         side_table_data = [["Side", "Runs", "Percentage"]]
         side_table_data.append([
@@ -4420,19 +4423,23 @@ def generate_pdf_report(data: dict):
             ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
         ]))
 
-        # 🟩 Combine them side-by-side
+        # 🟩 Combine into a two-column layout
         combined_table = Table([
-            [scoring_table, side_table]
+            [[scoring_label, scoring_table], [side_label, side_table]]
         ], colWidths=[270, 270])
         combined_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6)
         ]))
-
         elements.append(combined_table)
         elements.append(Spacer(1, 10))
 
-        # 🟩 Ball by ball breakdown
+        # 🟩 Page break before ball by ball
+        elements.append(PageBreak())
+
+        # 🟩 Ball by ball breakdown on next page
         elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
         bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
         for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):

@@ -3912,7 +3912,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     cursor.execute("""
         SELECT batting_team, total_runs, wickets, overs_bowled
         FROM innings
-        WHERE match_id = ? AND innings_number = 1
+        WHERE match_id = ? AND innings = 1
     """, (match_id,))
     first_innings_summary = dict(cursor.fetchone() or {})
 
@@ -3920,7 +3920,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     cursor.execute("""
         SELECT batting_team, total_runs, wickets, overs_bowled
         FROM innings
-        WHERE match_id = ? AND innings_number = 2
+        WHERE match_id = ? AND innings = 2
     """, (match_id,))
     second_innings_summary = dict(cursor.fetchone() or {})
 
@@ -4257,12 +4257,12 @@ def generate_pdf_report(data: dict):
 
     # First Innings Score
     first_innings = data.get("first_innings_summary", {})
-    first_innings_score = f"{first_innings.get('batting_team', 'N/A')}: {first_innings.get('runs', 0)}/{first_innings.get('wickets', 0)} from {first_innings.get('overs', '0')} overs"
+    first_innings_score = f"{first_innings.get('batting_team', 'N/A')}: {first_innings.get('total_runs', 0)}/{first_innings.get('wickets', 0)} from {first_innings.get('overs_bowled', '0')} overs"
     elements.append(Paragraph(first_innings_score, centered))
 
     # Second Innings Score
     second_innings = data.get("second_innings_summary", {})
-    second_innings_score = f"{second_innings.get('batting_team', 'N/A')}: {second_innings.get('runs', 0)}/{second_innings.get('wickets', 0)} from {second_innings.get('overs', '0')} overs"
+    second_innings_score = f"{second_innings.get('batting_team', 'N/A')}: {second_innings.get('total_runs', 0)}/{second_innings.get('wickets', 0)} from {second_innings.get('overs_bowled', '0')} overs"
     elements.append(Paragraph(second_innings_score, centered))
 
     # Match Result

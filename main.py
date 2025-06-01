@@ -3885,20 +3885,45 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    # Player name
     cursor.execute("SELECT player_name FROM players WHERE player_id = ?", (player_id,))
     player_row = cursor.fetchone()
     if not player_row:
         return None
     player_name = player_row["player_name"]
 
+    # Match info
     cursor.execute("""
-        SELECT m.match_date, c1.country_name as team_a, c2.country_name as team_b
+        SELECT m.match_date, c1.country_name AS team_a, c2.country_name AS team_b, t.tournament_name
         FROM matches m
         JOIN countries c1 ON m.team_a = c1.country_id
         JOIN countries c2 ON m.team_b = c2.country_id
+        JOIN tournaments t ON m.tournament_id = t.tournament_id
         WHERE m.match_id = ?
     """, (match_id,))
     match_row = cursor.fetchone()
+
+    # Match result
+    cursor.execute("SELECT result FROM matches WHERE match_id = ?", (match_id,))
+    match_result_row = cursor.fetchone()
+    match_result = match_result_row["result"] if match_result_row else "N/A"
+
+    # First innings summary
+    cursor.execute("""
+        SELECT batting_team, runs, wickets, overs
+        FROM innings
+        WHERE match_id = ? AND innings_number = 1
+    """, (match_id,))
+    first_innings_summary = dict(cursor.fetchone() or {})
+
+    # Second innings summary
+    cursor.execute("""
+        SELECT batting_team, runs, wickets, overs
+        FROM innings
+        WHERE match_id = ? AND innings_number = 2
+    """, (match_id,))
+    second_innings_summary = dict(cursor.fetchone() or {})
+
 
     # Batting summary
     cursor.execute("""
@@ -4189,7 +4214,9 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     return {
         "player_name": player_name,
-        "match": dict(match_row),
+        "match": {**dict(match_row), "result": match_result},
+        "first_innings_summary": first_innings_summary,
+        "second_innings_summary": second_innings_summary,
         "batting": batting,  # Updated to include off/leg side data and other batting insights
         "bowling": bowling,  # Updated to include dot ball % and economy
         "fielding": fielding,  # Fielding summary (like catches)
@@ -4212,13 +4239,36 @@ def generate_pdf_report(data: dict):
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
+    centered = ParagraphStyle(name='Centered', parent=styles['Normal'], alignment=1)
     elements = []
 
     # 1️⃣ Header
-    elements.append(Paragraph(f"<b>Player: {data['player_name']}</b>", styles['Title']))
-    match = data['match']
-    elements.append(Paragraph(f"Match: {match['team_a']} vs {match['team_b']} on {match['match_date']}", styles['Normal']))
+    elements.append(Paragraph(f"<b>{data['player_name']}</b>", styles['Title']))
+    elements.append(Spacer(1, 6))
+
+    # Center-aligned Tournament Name
+    elements.append(Paragraph(f"{data['match']['tournament_name']}", centered))
+
+    # Team A vs Team B
+    elements.append(Paragraph(f"{data['match']['team_a']} vs {data['match']['team_b']}", centered))
+
+    # Match Date
+    elements.append(Paragraph(f"{data['match']['match_date']}", centered))
+
+    # First Innings Score
+    first_innings = data.get("first_innings_summary", {})
+    first_innings_score = f"{first_innings.get('batting_team', 'N/A')}: {first_innings.get('runs', 0)}/{first_innings.get('wickets', 0)} from {first_innings.get('overs', '0')} overs"
+    elements.append(Paragraph(first_innings_score, centered))
+
+    # Second Innings Score
+    second_innings = data.get("second_innings_summary", {})
+    second_innings_score = f"{second_innings.get('batting_team', 'N/A')}: {second_innings.get('runs', 0)}/{second_innings.get('wickets', 0)} from {second_innings.get('overs', '0')} overs"
+    elements.append(Paragraph(second_innings_score, centered))
+
+    # Match Result
+    elements.append(Paragraph(f"{data['match']['result']}", centered))
     elements.append(Spacer(1, 10))
+
 
     # 2️⃣ Batting Summary
     elements.append(Paragraph("<b>Batting Summary</b>", bold))

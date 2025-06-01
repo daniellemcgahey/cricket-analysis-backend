@@ -4063,7 +4063,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     expected_runs, actual_runs = cursor.fetchone()
     runs_saved_allowed = (expected_runs or 0) - (actual_runs or 0)
 
-    if fielding["total_fielding_events"]:
+    if fielding_row["total_fielding_events"]:
         clean_pickup_pct = round(fielding_row["clean_pickups"] * 100.0 / fielding_row["total_fielding_events"], 2)
     else:
         clean_pickup_pct = 0.0

@@ -3914,7 +3914,17 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         FROM innings
         WHERE match_id = ? AND innings = 1
     """, (match_id,))
-    first_innings_summary = dict(cursor.fetchone() or {})
+    first_innings_row = cursor.fetchone()
+    first_innings_summary = dict(first_innings_row or {})
+
+    # Convert overs_bowled to cricket-style overs (if exists)
+    if first_innings_summary.get("overs_bowled") is not None:
+        legal_balls = first_innings_summary["overs_bowled"]
+        overs_whole = int(legal_balls / 6)
+        balls_remaining = legal_balls % 6
+        first_innings_summary["overs"] = f"{overs_whole}.{balls_remaining}"
+    else:
+        first_innings_summary["overs"] = "0.0"
 
     # Second innings summary
     cursor.execute("""
@@ -3922,7 +3932,18 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         FROM innings
         WHERE match_id = ? AND innings = 2
     """, (match_id,))
-    second_innings_summary = dict(cursor.fetchone() or {})
+    second_innings_row = cursor.fetchone()
+    second_innings_summary = dict(second_innings_row or {})
+
+    # Convert overs_bowled to cricket-style overs (if exists)
+    if second_innings_summary.get("overs_bowled") is not None:
+        legal_balls = second_innings_summary["overs_bowled"]
+        overs_whole = int(legal_balls / 6)
+        balls_remaining = legal_balls % 6
+        second_innings_summary["overs"] = f"{overs_whole}.{balls_remaining}"
+    else:
+        second_innings_summary["overs"] = "0.0"
+
 
 
     # Batting summary
@@ -4247,13 +4268,14 @@ def generate_pdf_report(data: dict):
     elements.append(Spacer(1, 6))
 
     # Center-aligned Tournament Name
-    elements.append(Paragraph(f"{data['match']['tournament_name']}", centered))
+    elements.append(Paragraph(f"<b>{data['match']['tournament_name']}</b>", centered))
 
     # Team A vs Team B
-    elements.append(Paragraph(f"{data['match']['team_a']} vs {data['match']['team_b']}", centered))
+    elements.append(Paragraph(f"<b>{data['match']['team_a']} vs {data['match']['team_b']}</b>", centered))
 
     # Match Date
-    elements.append(Paragraph(f"{data['match']['match_date']}", centered))
+    elements.append(Paragraph(f"<b>{data['match']['match_date']}</b>", centered))
+    elements.append(Spacer(1, 10))
 
     # First Innings Score
     first_innings = data.get("first_innings_summary", {})
@@ -4266,7 +4288,7 @@ def generate_pdf_report(data: dict):
     elements.append(Paragraph(second_innings_score, centered))
 
     # Match Result
-    elements.append(Paragraph(f"{data['match']['result']}", centered))
+    elements.append(Paragraph(f"<b>{data['match']['result']}</b>", centered))
     elements.append(Spacer(1, 10))
 
 

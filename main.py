@@ -4279,17 +4279,17 @@ def generate_pdf_report(data: dict):
 
     # First Innings Score
     first_innings = data.get("first_innings_summary", {})
-    first_innings_score = f"{first_innings.get('batting_team', 'N/A')}: {first_innings.get('total_runs', 0)}/{first_innings.get('wickets', 0)} from {first_innings.get('overs_bowled', '0')} overs"
+    first_innings_score = f"{first_innings.get('batting_team', 'N/A')}: {first_innings.get('total_runs', 0)}/{first_innings.get('wickets', 0)} from {first_innings.get('overs', '0')} overs"
     elements.append(Paragraph(first_innings_score, centered))
 
     # Second Innings Score
     second_innings = data.get("second_innings_summary", {})
-    second_innings_score = f"{second_innings.get('batting_team', 'N/A')}: {second_innings.get('total_runs', 0)}/{second_innings.get('wickets', 0)} from {second_innings.get('overs_bowled', '0')} overs"
+    second_innings_score = f"{second_innings.get('batting_team', 'N/A')}: {second_innings.get('total_runs', 0)}/{second_innings.get('wickets', 0)} from {second_innings.get('overs', '0')} overs"
     elements.append(Paragraph(second_innings_score, centered))
 
     # Match Result
     elements.append(Paragraph(f"<b>{data['match']['result']}</b>", centered))
-    elements.append(Spacer(1, 10))
+    elements.append(Spacer(1, 40))
 
 
     # 2️⃣ Batting Summary

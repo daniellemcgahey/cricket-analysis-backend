@@ -3962,7 +3962,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     if bowling['total_balls']:
         bowling['overs'] = round(bowling['legal_balls'] / 6, 1)
         bowling['dot_ball_percentage'] = round(bowling['dot_balls'] * 100.0 / bowling['total_balls'], 2)
-        bowling['economy'] = round(bowling['runs_conceded'] * 6.0 / bowling['total_balls'], 2)
+        bowling['economy'] = round(bowling['runs_conceded'] * 6.0 / bowling['legal_balls'], 2)
     else:
         bowling.update({"overs": 0, "dot_ball_percentage": 0, "economy": 0})
 
@@ -4227,7 +4227,7 @@ def generate_pdf_report(data: dict):
             ["Runs", "Balls", "Strike Rate", "Scoring Shot %", "Average Intent", "Dismissal"],
             [
                 batting.get('runs', 0),
-                batting.get('balls', 0),
+                batting.get('balls_faced', 0),
                 batting.get('strike_rate', 0),
                 batting.get('scoring_shot_percentage', "N/A"),
                 batting.get('average_intent', "N/A"),
@@ -4275,7 +4275,7 @@ def generate_pdf_report(data: dict):
     fielding = data['fielding']
     if fielding:
         fielding_table_data = [
-            ["Total Balls Fielded", "Clean Pick Up %", "Catches Taken", "Run Out Chances Taken", "Total Conversion Rate", "Runs Allowed/Saved"],
+            ["Total Balls Fielded", "Clean Pick Up %", "Catche(s)", "Run Out(s)", "Conversion Rate", "Runs Allowed/Saved"],
             [
                 fielding.get('total_balls_fielded', 0),
                 fielding.get('clean_pick_up_percentage', "N/A"),
@@ -4336,7 +4336,7 @@ def generate_pdf_report(data: dict):
         ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
     ]))
     elements.append(side_table)
-    elements.append(Spacer(1, 10))
+    elements.append(PageBreak())
 
 
     # Ball by Ball Breakdown
@@ -4388,24 +4388,6 @@ def generate_pdf_report(data: dict):
     ]))
     elements.append(zone_table)
     elements.append(Spacer(1, 10))
-
-    elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
-    bb_data = [["Ball", "Runs", "Extras", "Length", "Dismissal"]]
-    for idx, ball in enumerate(data['ball_by_ball_bowling'], start=1):
-        bb_data.append([
-            idx,
-            ball.get("runs", "N/A"),
-            ball.get("extras", "N/A"),
-            ball.get("length", "N/A"),
-            ball.get("dismissal_type", "N/A")
-        ])
-    table = Table(bb_data)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey)
-    ]))
-    elements.append(table)
-    elements.append(PageBreak())
 
     # Pitch Map
     if data.get('pitch_map_data'):

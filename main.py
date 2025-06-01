@@ -4260,8 +4260,8 @@ def generate_pdf_report(data: dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
-    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=12)
-    centered = ParagraphStyle(name='Centered', parent=styles['Normal'], fontSize=8, alignment=1)
+    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
+    centered = ParagraphStyle(name='Centered', parent=styles['Normal'], fontSize=12, alignment=1)
     elements = []
 
     # 1️⃣ Header

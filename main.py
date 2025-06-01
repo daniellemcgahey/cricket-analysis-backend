@@ -3908,6 +3908,12 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     match_result_row = cursor.fetchone()
     match_result = match_result_row["result"] if match_result_row else "N/A"
 
+    def convert_partial_overs_to_cricket(overs_float):
+        overs_whole = int(overs_float)
+        fraction = overs_float - overs_whole
+        balls = int(round(fraction * 6))
+        return f"{overs_whole}.{balls}"
+
     # First innings summary
     cursor.execute("""
         SELECT batting_team, total_runs, wickets, overs_bowled
@@ -3919,10 +3925,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Convert overs_bowled to cricket-style overs (if exists)
     if first_innings_summary.get("overs_bowled") is not None:
-        legal_balls = first_innings_summary["overs_bowled"]
-        overs_whole = int(legal_balls / 6)
-        balls_remaining = legal_balls % 6
-        first_innings_summary["overs"] = f"{overs_whole}.{balls_remaining}"
+        first_innings_summary["overs"] = convert_partial_overs_to_cricket(first_innings_summary["overs_bowled"])
     else:
         first_innings_summary["overs"] = "0.0"
 
@@ -3937,12 +3940,10 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Convert overs_bowled to cricket-style overs (if exists)
     if second_innings_summary.get("overs_bowled") is not None:
-        legal_balls = second_innings_summary["overs_bowled"]
-        overs_whole = int(legal_balls / 6)
-        balls_remaining = legal_balls % 6
-        second_innings_summary["overs"] = f"{overs_whole}.{balls_remaining}"
+        second_innings_summary["overs"] = convert_partial_overs_to_cricket(second_innings_summary["overs_bowled"])
     else:
         second_innings_summary["overs"] = "0.0"
+
 
 
 

@@ -4045,12 +4045,71 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     fielding_row = cursor.fetchone()
 
+    # Runs saved / allowed
+    cursor.execute("""
+        SELECT 
+            COALESCE(SUM(be.expected_runs), 0) AS expected_runs,
+            COALESCE(SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes + be.penalty_runs), 0) AS actual_runs
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? 
+        AND EXISTS (
+            SELECT 1 FROM fielding_contributions fc 
+            WHERE fc.ball_id = be.ball_id AND fc.fielder_id = ?
+        )
+    """, (match_id, player_id))
+
+    expected_runs, actual_runs = cursor.fetchone()
+    runs_saved_allowed = (expected_runs or 0) - (actual_runs or 0)
+
+    if fielding["total_fielding_events"]:
+        clean_pickup_pct = round(fielding_row["clean_pickups"] * 100.0 / fielding_row["total_fielding_events"], 2)
+    else:
+        clean_pickup_pct = 0.0
+
+
+    cursor.execute("""
+        SELECT
+            (SELECT COUNT(*) FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2) AS catches,
+            (SELECT COUNT(*) FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3) AS run_outs,
+            (SELECT COUNT(*) FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN ball_events be ON bfe.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id IN (6, 7, 8)) AS missed_chances
+    """, (match_id, player_id, match_id, player_id, match_id, player_id))
+
+    row = cursor.fetchone()
+    catches = row["catches"] or 0
+    run_outs = row["run_outs"] or 0
+    missed_chances = row["missed_chances"] or 0
+
+    total_chances = catches + run_outs + missed_chances
+    if total_chances:
+        conversion_rate = round((catches + run_outs) * 100.0 / total_chances, 2)
+    else:
+        conversion_rate = 0.0
+
+
+
     # Now extract values using indexing
     fielding = {
         "clean_pickups": fielding_row["clean_pickups"] if fielding_row["clean_pickups"] is not None else 0,
         "catches": fielding_row["catches"] if fielding_row["catches"] is not None else 0,
         "run_outs": fielding_row["run_outs"] if fielding_row["run_outs"] is not None else 0,
-        "total_fielding_events": fielding_row["total_fielding_events"] if fielding_row["total_fielding_events"] is not None else 0
+        "total_fielding_events": fielding_row["total_fielding_events"] if fielding_row["total_fielding_events"] is not None else 0,
+        "runs_saved_allowed": runs_saved_allowed,
+        "clean_pickup_percentage": clean_pickup_pct,
+        "conversion_rate": conversion_rate
     }
 
 
@@ -4367,14 +4426,14 @@ def generate_pdf_report(data: dict):
     fielding = data['fielding']
     if fielding:
         fielding_table_data = [
-            ["Total Balls Fielded", "Clean Pick Up %", "Catche(s)", "Run Out(s)", "Conversion Rate", "Runs Allowed/Saved"],
+            ["Total Balls Fielded", "Clean Pick Up %", "Catch(es)", "Run Out(s)", "Conversion Rate", "Runs Allowed/Saved"],
             [
                 fielding.get('total_fielding_events', 0),
-                fielding.get('clean_pick_up_percentage', "N/A"),
+                fielding.get('clean_pickup_percentage', "N/A"),
                 fielding.get('catches', 0),
                 fielding.get('run_outs', 0),
-                fielding.get('total_conversion_rate', "N/A"),
-                fielding.get('runs_allowed_saved', "N/A")
+                fielding.get('conversion_rate', "N/A"),
+                fielding.get('runs_saved_allowed', "N/A")
             ]
         ]
         fielding_table = Table(fielding_table_data)

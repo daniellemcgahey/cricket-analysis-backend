@@ -3910,7 +3910,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # First innings summary
     cursor.execute("""
-        SELECT batting_team, runs, wickets, overs
+        SELECT batting_team, total_runs, wickets, overs_bowled
         FROM innings
         WHERE match_id = ? AND innings_number = 1
     """, (match_id,))
@@ -3918,7 +3918,7 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Second innings summary
     cursor.execute("""
-        SELECT batting_team, runs, wickets, overs
+        SELECT batting_team, total_runs, wickets, overs_bowled
         FROM innings
         WHERE match_id = ? AND innings_number = 2
     """, (match_id,))

@@ -4018,40 +4018,51 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     # Fielding summary
     cursor.execute("""
         SELECT
-            (SELECT COUNT(*)
-            FROM ball_fielding_events bfe
-            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN ball_events be ON bfe.ball_id = be.ball_id
-            JOIN innings i ON be.innings_id = i.innings_id
-            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 1) AS clean_pickups,
-            (SELECT COUNT(*)
-            FROM ball_fielding_events bfe
-            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN ball_events be ON bfe.ball_id = be.ball_id
-            JOIN innings i ON be.innings_id = i.innings_id
-            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2) AS catches,
-            (SELECT COUNT(*)
-            FROM ball_fielding_events bfe
-            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN ball_events be ON bfe.ball_id = be.ball_id
-            JOIN innings i ON be.innings_id = i.innings_id
-            WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3) AS run_outs,
-            (SELECT COUNT(*)
-            FROM ball_fielding_events bfe
-            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN ball_events be ON bfe.ball_id = be.ball_id
-            JOIN innings i ON be.innings_id = i.innings_id
-            WHERE i.match_id = ? AND fc.fielder_id = ?) AS total_fielding_events
+            COALESCE((
+                SELECT COUNT(*)
+                FROM ball_fielding_events bfe
+                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+                JOIN ball_events be ON bfe.ball_id = be.ball_id
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 1
+            ), 0) AS clean_pickups,
+
+            COALESCE((
+                SELECT COUNT(*)
+                FROM ball_fielding_events bfe
+                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+                JOIN ball_events be ON bfe.ball_id = be.ball_id
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 2
+            ), 0) AS catches,
+
+            COALESCE((
+                SELECT COUNT(*)
+                FROM ball_fielding_events bfe
+                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+                JOIN ball_events be ON bfe.ball_id = be.ball_id
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE i.match_id = ? AND fc.fielder_id = ? AND bfe.event_id = 3
+            ), 0) AS run_outs,
+
+            COALESCE((
+                SELECT COUNT(*)
+                FROM ball_fielding_events bfe
+                JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+                JOIN ball_events be ON bfe.ball_id = be.ball_id
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE i.match_id = ? AND fc.fielder_id = ?
+            ), 0) AS total_fielding_events
     """, (match_id, player_id, match_id, player_id, match_id, player_id, match_id, player_id))
 
     fielding_row = cursor.fetchone()
-
     fielding = {
-        "clean_pickups": fielding_row["clean_pickups"] or 0,
-        "catches": fielding_row["catches"] or 0,
-        "run_outs": fielding_row["run_outs"] or 0,
-        "total_fielding_events": fielding_row["total_fielding_events"] or 0
+        "clean_pickups": fielding_row["clean_pickups"],
+        "catches": fielding_row["catches"],
+        "run_outs": fielding_row["run_outs"],
+        "total_fielding_events": fielding_row["total_fielding_events"]
     }
+
 
 
     # Ball by ball batting breakdown
@@ -4311,7 +4322,7 @@ def generate_pdf_report(data: dict):
                     batting.get('strike_rate', 0),
                     batting.get('scoring_shot_percentage', "N/A"),
                     batting.get('average_intent', "N/A"),
-                    batting.get('dismissal', "Not out")
+                    batting.get('dismissal_type', "Not out")
                 ]
             ]
             batting_table = Table(batting_table_data)
@@ -4471,7 +4482,7 @@ def generate_pdf_report(data: dict):
             wicket_details = f"{dismissal_type} for {runs} runs from {balls_faced} balls"
             elements.append(Paragraph(f"<b>Wicket:</b> {wicket_details}", styles["Normal"]))
             elements.append(Spacer(1, 10))
-            
+
         elements.append(PageBreak())
 
 

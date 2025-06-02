@@ -3136,6 +3136,11 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
             "dismissal_pct": round(dismissal_pct, 1),
             "dot_pct": round((stats["balls"] - stats["runs"]) * 100 / stats["balls"], 1)
         })
+    
+    # 🟩 Determine best/worst zone for coloring
+    zone_scores.sort(reverse=True)
+    best_score = zone_scores[0][0] if zone_scores else None
+    worst_score = zone_scores[-1][0] if zone_scores else None
 
     conn.close()
     return {
@@ -3155,7 +3160,9 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         "recommended_bowler_type": recommended_type,
         "recommended_zones": recommended_zones,
         "summary": summary,
-        "zone_data": zone_data
+        "zone_data": zone_data,
+        "best_zone_score": best_score,
+        "worst_zone_score": worst_score
     }
 
 

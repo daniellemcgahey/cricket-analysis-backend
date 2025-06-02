@@ -4615,7 +4615,7 @@ def generate_pdf_report(data: dict):
     # 6️⃣ Detailed Bowling Summary
     if data["bowling"]["total_balls"] > 0:
         elements.append(Paragraph("<b>Detailed Bowling Summary</b>", styles['Title']))
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 6))
 
         # Zone Effectiveness Table
         elements.append(Paragraph("<b>Zone Effectiveness</b>", bold))
@@ -4640,7 +4640,7 @@ def generate_pdf_report(data: dict):
             ('FONTSIZE', (0, 0), (-1, -1), 8)
         ]))
         elements.append(zone_table)
-        elements.append(Spacer(1, 20))
+        elements.append(Spacer(1, 10))
 
         # 6️⃣ Pitch Map Page
         if os.path.exists("/tmp/pitch_map_chart.png"):
@@ -4701,7 +4701,6 @@ def add_wagon_wheel_legend(elements):
     elements.append(legend_table)
     elements.append(Spacer(1, 10))
 
-
 def add_pitch_map_legend(elements):
     legend_items = [
         ("Dot Ball", colors.red),
@@ -4714,21 +4713,45 @@ def add_pitch_map_legend(elements):
     for label, color in legend_items:
         square = ColorSquare(color, size=8)
         legend_flowables.append(square)
-        legend_flowables.append(Spacer(3, 0))
-        legend_flowables.append(Paragraph(label, ParagraphStyle(name="LegendLabel", fontSize=8)))
-        legend_flowables.append(Spacer(6, 0))  # spacing between items
+        legend_flowables.append(Spacer(2, 0))
 
-    # Put them all on a single horizontal line
-    legend_table = Table([legend_flowables])
+        # 🔥 No-wrap paragraph for label
+        legend_flowables.append(Paragraph(
+            label,
+            ParagraphStyle(
+                name="LegendLabel",
+                fontSize=8,
+                leading=9,
+                spaceAfter=0,
+                wordWrap='CJK',  # prevents wrapping
+                allowOrphans=1,
+                allowWidows=1,
+                splitLongWords=False
+            )
+        ))
+        legend_flowables.append(Spacer(8, 0))  # space between legend items
+
+    # 🟩 Single-row table with auto width
+    legend_table = Table([legend_flowables], hAlign='LEFT')
     legend_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 1),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
     ]))
 
+    # 🧱 Add to PDF elements
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph("<b>Pitch Map Legend:</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)))
+    elements.append(Paragraph(
+        "<b>Pitch Map Legend:</b>",
+        ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)
+    ))
     elements.append(Spacer(1, 2))
     elements.append(legend_table)
     elements.append(Spacer(1, 10))
+
 
 def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Get innings summaries (team totals from the innings table)

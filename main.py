@@ -3176,11 +3176,18 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
+    indent = ParagraphStyle(name='Indent', parent=styles['Normal'], leftIndent=20, fontSize=10)
     normal = styles['Normal']
+    
     elements = []
 
     elements.append(Paragraph("<b>Game Plan Sheet</b>", styles['Title']))
     elements.append(Spacer(1, 10))
+
+    # 🟩 Add Opponent Country up top
+    opponent_country = payload.opponent_country if hasattr(payload, "opponent_country") else "Unknown"
+    elements.append(Paragraph(f"<b>Opponent:</b> {opponent_country}", styles['Title']))
+    elements.append(Spacer(1, 15))
 
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
@@ -3316,10 +3323,13 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
         else:
             best_length, best_line = "Good", "Outside Off"
 
-        summary = f"Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
-        line = f"<b>{batter_name}</b>: {summary} Recommended bowlers: {bowler_names}."
-        elements.append(Paragraph(line, normal))
-        elements.append(Spacer(1, 4))
+        # 🟩 Output lines with formatting
+        summary_line = f"<b>{batter_name}</b>: Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
+        bowlers_line = f"Recommended bowlers: {bowler_names}"
+
+        elements.append(Paragraph(summary_line, normal))
+        elements.append(Paragraph(bowlers_line, indent))
+        elements.append(Spacer(1, 15))  # larger gap
 
     conn.close()
     doc.build(elements)

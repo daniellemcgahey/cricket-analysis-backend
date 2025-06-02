@@ -201,6 +201,7 @@ class GamePlanPayload(BaseModel):
     player_ids: list[int]  # opposition batter IDs
     bowler_ids: list[int]  # our selected bowler IDs
     team_category: str
+    opponent_country: str
 
 class MatchupDetailPayload(BaseModel):
     player_id: int
@@ -3178,7 +3179,7 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
     indent = ParagraphStyle(name='Indent', parent=styles['Normal'], leftIndent=20, fontSize=10)
     normal = styles['Normal']
-    
+
     elements = []
 
     elements.append(Paragraph("<b>Game Plan Sheet</b>", styles['Title']))

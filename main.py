@@ -197,6 +197,13 @@ class MatchBallByBallPayload(BaseModel):
     tournament: Optional[str] = None
     match_id: int
 
+class GamePlanPayload(BaseModel):
+    player_ids: list
+    team_category: str
+
+class MatchupDetailPayload(BaseModel):
+    player_id: int
+    team_category: str
 
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
@@ -2989,6 +2996,268 @@ def player_pitch_map_data(matchId: int, playerId: int):
 
     conn.close()
     return data
+
+
+@app.post("/tactical-matchup-detailed")
+def get_tactical_matchup_detail(payload: MatchupDetailPayload):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT player_name FROM players WHERE player_id = ?", (payload.player_id,))
+    player = cursor.fetchone()
+    if not player:
+        conn.close()
+        return {}
+
+    batter_name = player["player_name"]
+
+    effectiveness = {}
+    detailed_stats = {}
+
+    for style in ["Pace", "Medium", "Off Spin", "Leg Spin"]:
+        cursor.execute("""
+            SELECT COUNT(*) AS balls, SUM(be.runs) AS runs,
+                   SUM(CASE WHEN be.runs=0 THEN 1 ELSE 0 END) AS dots,
+                   SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS outs
+            FROM ball_events be
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE be.batter_id = ? AND bowl.bowling_style = ?
+        """, (payload.player_id, style))
+        row = cursor.fetchone()
+        balls = row["balls"] or 1
+        rpb = (row["runs"] or 0) / balls
+        rpb = round(rpb, 2)
+        rpb_safe = max(rpb, 0.1)
+        dot_pct = round((row["dots"] or 0) * 100 / balls, 1)
+        out_pct = round((row["outs"] or 0) * 100 / balls, 1)
+
+        effectiveness_score = (out_pct / 100) + (1 / rpb_safe)
+        effectiveness[style] = effectiveness_score
+
+        detailed_stats[style] = {
+            "balls": balls,
+            "rpb": rpb,
+            "dot_pct": dot_pct,
+            "dismissal_pct": out_pct
+        }
+
+    recommended_type = max(effectiveness, key=effectiveness.get)
+
+    # 🔎 Retrieve all balls for recommended type
+    cursor.execute("""
+        SELECT be.pitch_x, be.pitch_y, be.runs, be.dismissal_type
+        FROM ball_events be
+        JOIN players bowl ON be.bowler_id = bowl.player_id
+        WHERE be.batter_id = ? AND bowl.bowling_style = ?
+          AND be.wides = 0 AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+    """, (payload.player_id, recommended_type))
+    balls = cursor.fetchall()
+
+    # 🟩 Line and length classification
+    zone_maps = {
+        "Full Toss": (-0.0909, 0.03636),
+        "Yorker": (0.03636, 0.1636),
+        "Full": (0.1636, 0.31818),
+        "Good": (0.31818, 0.545454),
+        "Short": (0.545454, 1.0)
+    }
+    zones = {}
+    for length_label in zone_maps:
+        for line_label in ["Wide Outside Off", "Outside Off", "Straight", "Leg"]:
+            zones[(length_label, line_label)] = {"balls": 0, "runs": 0, "outs": 0}
+
+    for b in balls:
+        py, px = b["pitch_y"], b["pitch_x"]
+        # Line
+        if px > 0.55:
+            line_label = "Leg"
+        elif 0.44 < px <= 0.55:
+            line_label = "Straight"
+        elif 0.26 < px <= 0.44:
+            line_label = "Outside Off"
+        else:
+            line_label = "Wide Outside Off"
+        # Length
+        length_label = next((l for l, (start, end) in zone_maps.items() if start <= py < end), "Unknown")
+
+        zone = zones[(length_label, line_label)]
+        zone["balls"] += 1
+        zone["runs"] += b["runs"] or 0
+        if b["dismissal_type"]:
+            zone["outs"] += 1
+
+    # 🟩 Determine best zone
+    zone_scores = []
+    for (length, line), stats in zones.items():
+        if stats["balls"] == 0:
+            continue
+        rpb = stats["runs"] / stats["balls"]
+        rpb = max(rpb, 0.1)
+        dismissal_pct = (stats["outs"] / stats["balls"]) * 100
+        score = (dismissal_pct / 100) + (1 / rpb)
+        zone_scores.append((score, length, line, round(rpb, 2), round(dismissal_pct, 1)))
+
+    zone_scores.sort(reverse=True)
+    if zone_scores:
+        _, best_length, best_line, _, _ = zone_scores[0]
+    else:
+        best_length, best_line = "Good", "Outside Off"
+
+    recommended_zones = {"length": best_length, "line": best_line}
+    summary = f"Use {recommended_type} bowlers, target {best_length} and {best_line}."
+
+    conn.close()
+    return {
+        "batter": batter_name,
+        "avg_rpb_pace": detailed_stats["Pace"]["rpb"],
+        "avg_rpb_medium": detailed_stats["Medium"]["rpb"],
+        "avg_rpb_off_spin": detailed_stats["Off Spin"]["rpb"],
+        "avg_rpb_leg_spin": detailed_stats["Leg Spin"]["rpb"],
+        "dismissal_pct_pace": detailed_stats["Pace"]["dismissal_pct"],
+        "dismissal_pct_medium": detailed_stats["Medium"]["dismissal_pct"],
+        "dismissal_pct_off_spin": detailed_stats["Off Spin"]["dismissal_pct"],
+        "dismissal_pct_leg_spin": detailed_stats["Leg Spin"]["dismissal_pct"],
+        "dot_pct_pace": detailed_stats["Pace"]["dot_pct"],
+        "dot_pct_medium": detailed_stats["Medium"]["dot_pct"],
+        "dot_pct_off_spin": detailed_stats["Off Spin"]["dot_pct"],
+        "dot_pct_leg_spin": detailed_stats["Leg Spin"]["dot_pct"],
+        "recommended_bowler_type": recommended_type,
+        "recommended_zones": recommended_zones,
+        "summary": summary
+    }
+
+
+
+@app.post("/generate-game-plan-pdf")
+def generate_game_plan_pdf(payload: GamePlanPayload):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    bold = ParagraphStyle(name='Bold', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=10)
+    normal = styles['Normal']
+    elements = []
+
+    elements.append(Paragraph("<b>Game Plan Sheet</b>", styles['Title']))
+    elements.append(Spacer(1, 10))
+
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    for pid in payload.player_ids:
+        cursor.execute("SELECT player_name, country_id FROM players WHERE player_id = ?", (pid,))
+        player = cursor.fetchone()
+        if not player:
+            continue
+        batter_name = player["player_name"]
+        team_id = player["country_id"]
+
+        # 1️⃣ Determine effectiveness for each of the 4 bowler types
+        effectiveness = {}
+        for style in ["Pace", "Medium", "Off Spin", "Leg Spin"]:
+            cursor.execute("""
+                SELECT SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END) AS balls,
+                       SUM(be.runs) AS runs,
+                       SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS outs
+                FROM ball_events be
+                JOIN players bowl ON be.bowler_id = bowl.player_id
+                WHERE be.batter_id = ? AND bowl.bowling_style = ?
+            """, (pid, style))
+            row = cursor.fetchone()
+            balls = row["balls"] or 1
+            rpb = (row["runs"] or 0) / balls
+            rpb = max(rpb, 0.1)
+            outs = (row["outs"] or 0) * 100 / balls
+            effectiveness[style] = (outs / 100) + (1 / rpb)
+
+        recommended_type = max(effectiveness, key=effectiveness.get)
+
+        # 2️⃣ Retrieve all balls for recommended type
+        cursor.execute("""
+            SELECT be.pitch_x, be.pitch_y, be.runs, be.dismissal_type
+            FROM ball_events be
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE be.batter_id = ? AND bowl.bowling_style = ?
+              AND be.wides = 0 AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+        """, (pid, recommended_type))
+        balls = cursor.fetchall()
+
+        # 3️⃣ Line & Length classification
+        zone_maps = {
+            "Full Toss": (-0.0909, 0.03636),
+            "Yorker": (0.03636, 0.1636),
+            "Full": (0.1636, 0.31818),
+            "Good": (0.31818, 0.545454),
+            "Short": (0.545454, 1.0)
+        }
+        zones = {}
+        for length_label in zone_maps:
+            for line_label in ["Wide Outside Off", "Outside Off", "Straight", "Leg"]:
+                zones[(length_label, line_label)] = {"balls": 0, "runs": 0, "outs": 0}
+
+        for b in balls:
+            py, px = b["pitch_y"], b["pitch_x"]
+            # Line
+            if px > 0.55:
+                line_label = "Leg"
+            elif 0.44 < px <= 0.55:
+                line_label = "Straight"
+            elif 0.26 < px <= 0.44:
+                line_label = "Outside Off"
+            else:
+                line_label = "Wide Outside Off"
+            # Length
+            length_label = next((l for l, (start, end) in zone_maps.items() if start <= py < end), "Unknown")
+
+            zone = zones[(length_label, line_label)]
+            zone["balls"] += 1
+            zone["runs"] += b["runs"] or 0
+            if b["dismissal_type"]:
+                zone["outs"] += 1
+
+        # 4️⃣ Zone effectiveness
+        zone_scores = []
+        for (length, line), stats in zones.items():
+            if stats["balls"] == 0:
+                continue
+            rpb = stats["runs"] / stats["balls"]
+            rpb = max(rpb, 0.1)
+            dismissal_pct = (stats["outs"] / stats["balls"]) * 100
+            score = (dismissal_pct / 100) + (1 / rpb)
+            zone_scores.append((score, length, line, round(rpb, 2), round(dismissal_pct, 1)))
+
+        zone_scores.sort(reverse=True)
+        if zone_scores:
+            _, best_length, best_line, _, _ = zone_scores[0]
+        else:
+            best_length, best_line = "Good", "Outside Off"
+
+        # 5️⃣ Find matching bowlers
+        cursor.execute("""
+            SELECT player_name, bowling_arm
+            FROM players
+            WHERE country_id = ? AND bowling_style = ?
+        """, (team_id, recommended_type))
+        bowlers = cursor.fetchall()
+        bowler_names = ", ".join([f"{b['player_name']} ({b['bowling_arm']})" for b in bowlers])
+
+        # 6️⃣ Final summary
+        summary = f"Use {recommended_type} bowlers, target {best_length} and {best_line}."
+        line = f"{batter_name}: {summary} Recommended bowlers: {bowler_names}."
+        elements.append(Paragraph(line, normal))
+        elements.append(Spacer(1, 4))
+
+    conn.close()
+    doc.build(elements)
+    buffer.seek(0)
+
+    return StreamingResponse(buffer, media_type="application/pdf", headers={
+        "Content-Disposition": "inline; filename=game_plan_sheet.pdf"
+    })
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

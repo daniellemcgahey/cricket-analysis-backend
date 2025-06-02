@@ -4584,7 +4584,7 @@ def generate_pdf_report(data: dict):
 
         # ✅ Create individual tables for each half
         def create_half_table(data_rows):
-            t = Table(data_rows, colWidths=[25, 25, 50, 50, 45, 25, 25, 25])
+            t = Table(data_rows, colWidths=[23, 23, 50, 50, 43, 24, 25, 25])
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),

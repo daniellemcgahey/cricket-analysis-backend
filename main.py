@@ -4515,6 +4515,7 @@ def generate_pdf_report(data: dict):
         # 🟩 Create column layout with labels above each table
         # First column: Scoring Shot Breakdown
         scoring_label = Paragraph("<b>Scoring Shot Breakdown</b>", bold)
+        elements.append(Spacer(1, 6))
         score_data = [["Runs", "Count"]] + [[r, c] for r, c in data['scoring_shots_breakdown'].items()]
         scoring_table = Table(score_data)
         scoring_table.setStyle(TableStyle([
@@ -4524,6 +4525,7 @@ def generate_pdf_report(data: dict):
 
         # Second column: Off/Leg Side Runs
         side_label = Paragraph("<b>Off/Leg Side Run Distribution</b>", bold)
+        elements.append(Spacer(1, 6))
         side_data = data.get("side_runs", {})
         side_table_data = [["Side", "Runs", "Percentage"]]
         side_table_data.append([
@@ -4712,7 +4714,7 @@ def add_wagon_wheel_legend(elements):
         "<b>Wagon Wheel Legend:</b>",
         ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)
     ))
-    elements.append(Spacer(1, 2))
+    elements.append(Spacer(1, 4))
     elements.append(legend_table)
     elements.append(Spacer(1, 10))
 

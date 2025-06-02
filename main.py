@@ -768,32 +768,40 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
     if team_category:
         if team_category.lower() == "training":
             cursor.execute("""
-                SELECT player_id, player_name
+                SELECT p.player_id, p.player_name, p.bowling_style
                 FROM players p
                 JOIN countries c ON p.country_id = c.country_id
                 WHERE c.country_name = ? AND LOWER(c.country_name) LIKE ?
-                ORDER BY player_name
+                ORDER BY p.player_name
             """, (country_name, "%training%"))
         else:
             cursor.execute("""
-                SELECT player_id, player_name
+                SELECT p.player_id, p.player_name, p.bowling_style
                 FROM players p
                 JOIN countries c ON p.country_id = c.country_id
                 WHERE c.country_name = ? AND LOWER(c.country_name) NOT LIKE ?
-                ORDER BY player_name
+                ORDER BY p.player_name
             """, (country_name, "%training%"))
     else:
         cursor.execute("""
-            SELECT player_id, player_name
+            SELECT p.player_id, p.player_name, p.bowling_style
             FROM players p
             JOIN countries c ON p.country_id = c.country_id
             WHERE c.country_name = ?
-            ORDER BY player_name
+            ORDER BY p.player_name
         """, (country_name,))
-    
-    players = [{"id": row[0], "name": row[1]} for row in cursor.fetchall()]
+
+    players = [
+        {
+            "id": row[0],
+            "name": row[1],
+            "bowling_style": row[2] if row[2] else None  # If style is NULL, set to None
+        }
+        for row in cursor.fetchall()
+    ]
     conn.close()
     return players
+
 
 @app.get("/players")
 def get_players_by_team_category(team_category: str):
@@ -2952,7 +2960,6 @@ async def upload_pitch_map(request: Request):
     
     return {"message": "pitch_map image saved successfully"}
 
-
 @app.get("/player-wagon-wheel-data")
 def player_wagon_wheel_data(matchId: int, playerId: int):
     conn = sqlite3.connect("cricket_analysis.db")
@@ -3165,10 +3172,6 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         "worst_zone_score": worst_score
     }
 
-
-
-
-
 @app.post("/generate-game-plan-pdf")
 def generate_game_plan_pdf(payload: GamePlanPayload):
     buffer = io.BytesIO()
@@ -3317,7 +3320,6 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     return StreamingResponse(buffer, media_type="application/pdf", headers={
         "Content-Disposition": "inline; filename=game_plan_sheet.pdf"
     })
-
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

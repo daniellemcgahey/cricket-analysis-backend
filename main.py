@@ -4627,33 +4627,65 @@ def generate_pdf_report(data: dict):
     return buffer
 
 def add_wagon_wheel_legend(elements):
-    legend_text = (
-        "<b>Wagon Wheel Legend:</b> "
-        "<font color='grey'>&#9632;</font> 0  "
-        "<font color='white'>&#9632;</font> 1  "
-        "<font color='yellow'>&#9632;</font> 2  "
-        "<font color='orange'>&#9632;</font> 3  "
-        "<font color='blue'>&#9632;</font> 4  "
-        "<font color='pink'>&#9632;</font> 5  "
-        "<font color='red'>&#9632;</font> 6"
-    )
+    color_mapping = [
+        ("0 Runs", colors.grey),
+        ("1 Run", colors.white),
+        ("2 Runs", colors.yellow),
+        ("3 Runs", colors.orange),
+        ("4 Runs", colors.blue),
+        ("5 Runs", colors.pink),
+        ("6 Runs", colors.red),
+    ]
+    data = [["Event", "Color"]]
+    for label, color in color_mapping:
+        data.append([label, ""])
+    
+    t = Table(data, colWidths=[120, 40])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+    for idx, (_, color) in enumerate(color_mapping, start=1):
+        t.setStyle([('BACKGROUND', (1, idx), (1, idx), color)])
+    
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("<b>Wagon Wheel Legend</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=10)))
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph(legend_text, ParagraphStyle(name='Normal', fontSize=9)))
+    elements.append(t)
     elements.append(Spacer(1, 10))
-
 
 def add_pitch_map_legend(elements):
-    legend_text = (
-        "<b>Pitch Map Legend:</b> "
-        "<font color='red'>&#9632;</font> Dot Ball  "
-        "<font color='green'>&#9632;</font> Runs (1-3)  "
-        "<font color='blue'>&#9632;</font> Boundary (4/6)  "
-        "<font color='white'>&#9632;</font> Wicket"
-    )
+    legend_data = [
+        ["Legend", "Color"],
+        ["Dot Ball", "", "Red"],
+        ["Runs (1-3)", "", "Green"],
+        ["Boundary (4/6)", "", "Blue"],
+        ["Wicket", "", "White"],
+    ]
+    data = [["Event", "Color"]]
+    color_mapping = [
+        ("Dot Ball", colors.red),
+        ("Runs (1-3)", colors.green),
+        ("Boundary (4/6)", colors.blue),
+        ("Wicket", colors.white),
+    ]
+    for label, color in color_mapping:
+        data.append([label, "",])
+    
+    t = Table(data, colWidths=[120, 40])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+    for idx, (_, color) in enumerate(color_mapping, start=1):
+        t.setStyle([('BACKGROUND', (1, idx), (1, idx), color)])
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("<b>Pitch Map Legend</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=10)))
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph(legend_text, ParagraphStyle(name='Normal', fontSize=9)))
+    elements.append(t)
     elements.append(Spacer(1, 10))
-
 
 def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Get innings summaries (team totals from the innings table)

@@ -768,7 +768,7 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
     if team_category:
         if team_category.lower() == "training":
             cursor.execute("""
-                SELECT p.player_id, p.player_name, p.bowling_style
+                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
                 FROM players p
                 JOIN countries c ON p.country_id = c.country_id
                 WHERE c.country_name = ? AND LOWER(c.country_name) LIKE ?
@@ -776,7 +776,7 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
             """, (country_name, "%training%"))
         else:
             cursor.execute("""
-                SELECT p.player_id, p.player_name, p.bowling_style
+                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
                 FROM players p
                 JOIN countries c ON p.country_id = c.country_id
                 WHERE c.country_name = ? AND LOWER(c.country_name) NOT LIKE ?
@@ -784,23 +784,22 @@ def get_players_for_team(country_name: str, team_category: Optional[str] = None)
             """, (country_name, "%training%"))
     else:
         cursor.execute("""
-            SELECT p.player_id, p.player_name, p.bowling_style
+            SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
             FROM players p
             JOIN countries c ON p.country_id = c.country_id
             WHERE c.country_name = ?
             ORDER BY p.player_name
         """, (country_name,))
-
-    players = [
-        {
-            "id": row[0],
-            "name": row[1],
-            "bowling_style": row[2] if row[2] else None  # If style is NULL, set to None
-        }
-        for row in cursor.fetchall()
-    ]
+    
+    players = [{
+        "id": row[0],
+        "name": row[1],
+        "bowling_arm": row[2],
+        "bowling_style": row[3]
+    } for row in cursor.fetchall()]
     conn.close()
     return players
+
 
 
 @app.get("/players")

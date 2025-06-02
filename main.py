@@ -4673,20 +4673,34 @@ def add_wagon_wheel_legend(elements):
     for label, color in legend_items:
         square = ColorSquare(color, size=8)
         legend_flowables.append(square)
-        legend_flowables.append(Spacer(3, 0))
-        legend_flowables.append(Paragraph(label, ParagraphStyle(name="LegendLabel", fontSize=8)))
-        legend_flowables.append(Spacer(6, 0))  # spacing between items
+        legend_flowables.append(Spacer(2, 0))
+        # 🔥 Force no-wrap style for text
+        legend_flowables.append(
+            Paragraph(
+                label,
+                ParagraphStyle(name="LegendLabel", fontSize=8, wordWrap='CJK', leading=10)
+            )
+        )
+        legend_flowables.append(Spacer(6, 0))
 
-    legend_table = Table([legend_flowables])
+    # 🟩 Put them in a single row table with 1 row
+    legend_table = Table([legend_flowables], colWidths=[None] * len(legend_flowables))
     legend_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        # 🔥 Prevent wrapping for all text cells
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
     ]))
 
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph("<b>Wagon Wheel Legend:</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)))
+    elements.append(Paragraph(
+        "<b>Wagon Wheel Legend:</b>",
+        ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)
+    ))
     elements.append(Spacer(1, 2))
     elements.append(legend_table)
     elements.append(Spacer(1, 10))
+
 
 def add_pitch_map_legend(elements):
     legend_items = [

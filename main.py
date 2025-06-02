@@ -4297,7 +4297,14 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         }
     }
 
-    zone_stats = {label: {"balls": 0, "runs": 0, "wickets": 0, "dots": 0, "false_shots": 0} for label in zone_labels}
+    zone_stats = {
+        label: {
+            "balls": 0, "runs": 0, "wickets": 0,
+            "dots": 0, "false_shots": 0,
+            "wides": 0, "no_balls": 0  # new entries!
+        }
+        for label in zone_labels
+    }
 
     for row in zone_data:
         pitch_y = row["pitch_y"]
@@ -4311,6 +4318,9 @@ def fetch_player_match_stats(match_id: int, player_id: int):
                 zone_stats[zone]["balls"] += 1
                 zone_stats[zone]["runs"] += total_runs
                 zone_stats[zone]["dots"] += row["dot_balls"] or 0
+                zone_stats[zone]["wides"] += row["wides"] or 0   # new
+                zone_stats[zone]["no_balls"] += row["no_balls"] or 0  # new
+
                 if row["dismissal_type"] and row["dismissal_type"].lower() != "not out":
                     zone_stats[zone]["wickets"] += 1
                 if (row["edged"] or row["ball_missed"]) and row["shot_type"] and row["shot_type"].lower() != "leave":
@@ -4328,8 +4338,12 @@ def fetch_player_match_stats(match_id: int, player_id: int):
             "wickets": z["wickets"],
             "avg_runs_per_ball": round(z["runs"] / balls, 2),
             "dot_pct": round((z["dots"] / balls) * 100, 2),
-            "false_shot_pct": round((z["false_shots"] / balls) * 100, 2)
+            "false_shot_pct": round((z["false_shots"] / balls) * 100, 2),
+            "wides": z["wides"],
+            "no_balls": z["no_balls"],  # new
+            "dot_balls": z["dots"],     # for direct display
         })
+
 
     # Wagon wheel data
     cursor.execute("""
@@ -4624,7 +4638,9 @@ def generate_pdf_report(data: dict):
         elements.append(Spacer(1, 6))
 
         zone_effectiveness = data.get("zone_effectiveness", [])
-        zone_table_data = [["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot %", "False Shot %"]]
+        zone_table_data = [
+            ["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot Balls", "Dot %", "Wides", "No Balls", "False Shot %"]
+        ]
         for zone in zone_effectiveness:
             zone_table_data.append([
                 zone["zone"],
@@ -4632,9 +4648,13 @@ def generate_pdf_report(data: dict):
                 zone["runs"],
                 zone["wickets"],
                 zone["avg_runs_per_ball"],
+                zone["dot_balls"],         # new column
                 f"{zone['dot_pct']}%",
+                zone["wides"],             # new column
+                zone["no_balls"],          # new column
                 f"{zone['false_shot_pct']}%"
             ])
+
         zone_table = Table(zone_table_data)
         zone_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),

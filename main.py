@@ -3118,6 +3118,25 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
     recommended_zones = {"length": best_length, "line": best_line}
     summary = f"Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
 
+    # 🟩 Return detailed zone data
+    zone_data = []
+    for (length, line), stats in zones.items():
+        if stats["balls"] == 0:
+            continue
+        rpb = stats["runs"] / stats["balls"]
+        rpb_safe = max(rpb, 0.1)
+        dismissal_pct = (stats["outs"] / stats["balls"]) * 100
+        zone_data.append({
+            "length": length,
+            "line": line,
+            "balls": stats["balls"],
+            "runs": stats["runs"],
+            "dismissals": stats["outs"],
+            "avg_rpb": round(rpb, 2),
+            "dismissal_pct": round(dismissal_pct, 1),
+            "dot_pct": round((stats["balls"] - stats["runs"]) * 100 / stats["balls"], 1)
+        })
+
     conn.close()
     return {
         "batter": batter_name,
@@ -3135,7 +3154,8 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         "dot_pct_leg_spin": detailed_stats["Leg Spin"]["dot_pct"],
         "recommended_bowler_type": recommended_type,
         "recommended_zones": recommended_zones,
-        "summary": summary
+        "summary": summary,
+        "zone_data": zone_data
     }
 
 

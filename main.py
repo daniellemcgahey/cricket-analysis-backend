@@ -3182,7 +3182,7 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     elements.append(Paragraph("<b>Game Plan Sheet</b>", styles['Title']))
     elements.append(Spacer(1, 10))
 
-    db_path = "cricket_analysis.db"
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -3196,8 +3196,8 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
 
         effectiveness = {}
         detailed_stats = {}
+        has_data = False
 
-        # 🟩 Determine effectiveness for each bowler type
         for style in ["Pace", "Medium", "Off Spin", "Leg Spin"]:
             cursor.execute("""
                 SELECT 
@@ -3210,11 +3210,13 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
                 WHERE be.batter_id = ? AND LOWER(bowl.bowling_style) = LOWER(?)
             """, (pid, style))
             row = cursor.fetchone()
+
             if not row or not row["legal_balls"]:
                 detailed_stats[style] = {"balls": 0, "rpb": 0, "dot_pct": 0, "dismissal_pct": 0}
                 effectiveness[style] = 0
                 continue
 
+            has_data = True  # ✅ Mark that we have at least some data
             balls = row["legal_balls"]
             runs = row["runs"] or 0
             outs = row["outs"] or 0
@@ -3233,44 +3235,30 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
                 "dismissal_pct": out_pct
             }
 
-        # 🟩 Determine best bowler type with fallback logic
-        pace_medium = [("Pace", effectiveness["Pace"]), ("Medium", effectiveness["Medium"])]
-        spin = [("Off Spin", effectiveness["Off Spin"]), ("Leg Spin", effectiveness["Leg Spin"])]
+        if not has_data:
+            # 🟩 No data at all — simple line
+            line = f"<b>{batter_name}</b>: No Data Available"
+            elements.append(Paragraph(line, normal))
+            elements.append(Spacer(1, 4))
+            continue
 
-        pace_data = any(detailed_stats[style]["balls"] > 0 for style in ["Pace", "Medium"])
-        spin_data = any(detailed_stats[style]["balls"] > 0 for style in ["Off Spin", "Leg Spin"])
+        recommended_type = max(effectiveness, key=effectiveness.get)
 
-        if all(detailed_stats[style]["balls"] > 0 for style in ["Pace", "Medium"]):
-            best_pace_type = max(pace_medium, key=lambda x: x[1])[0]
-            best_pace_score = max(pace_medium, key=lambda x: x[1])[1]
+        # 🟩 Brasil bowler selection (from frontend-provided bowler_ids)
+        bowler_ids = payload.bowler_ids
+        if bowler_ids:
+            cursor.execute("""
+                SELECT player_name, bowling_arm
+                FROM players
+                WHERE player_id IN ({})
+                  AND LOWER(bowling_style) = LOWER(?)
+            """.format(",".join(["?"] * len(bowler_ids))),
+            bowler_ids + [recommended_type])
+            bowlers = cursor.fetchall()
         else:
-            best_pace_type = "Pace/Medium"
-            best_pace_score = max(effectiveness["Pace"], effectiveness["Medium"])
+            bowlers = []
 
-        if all(detailed_stats[style]["balls"] > 0 for style in ["Off Spin", "Leg Spin"]):
-            best_spin_type = max(spin, key=lambda x: x[1])[0]
-            best_spin_score = max(spin, key=lambda x: x[1])[1]
-        else:
-            best_spin_type = "Spin"
-            best_spin_score = max(effectiveness["Off Spin"], effectiveness["Leg Spin"])
-
-        if not pace_data and not spin_data:
-            recommended_type = "No Data"
-        elif not spin_data or (pace_data and best_pace_score >= best_spin_score):
-            recommended_type = best_pace_type
-        else:
-            recommended_type = best_spin_type
-
-        # 🟩 Brasil bowlers from selected bowler_ids matching recommended type
-        bowler_names = []
-        for bowler_id in payload.bowler_ids:
-            cursor.execute("SELECT player_name, bowling_style, bowling_arm FROM players WHERE player_id = ?", (bowler_id,))
-            b = cursor.fetchone()
-            if b and (recommended_type == "Pace/Medium" and b["bowling_style"] in ["Pace", "Medium"]) \
-               or (recommended_type == "Spin" and b["bowling_style"] in ["Off Spin", "Leg Spin"]) \
-               or b["bowling_style"] == recommended_type:
-                bowler_names.append(f"{b['player_name']} ({b['bowling_arm']})")
-        bowler_str = ", ".join(bowler_names) or "No data"
+        bowler_names = ", ".join([f"{b['player_name']} ({b['bowling_arm']})" for b in bowlers]) or "No data"
 
         # 🟩 Zone analysis
         cursor.execute("""
@@ -3305,13 +3293,13 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
             else:
                 line_label = "Wide Outside Off"
             length_label = next((l for l, (start, end) in zone_maps.items() if start <= py < end), "Unknown")
+
             zone = zones[(length_label, line_label)]
             zone["balls"] += 1
             zone["runs"] += b["runs"] or 0
             if b["dismissal_type"]:
                 zone["outs"] += 1
 
-        # Determine best zone
         zone_scores = []
         for (length, line), stats in zones.items():
             if stats["balls"] == 0:
@@ -3321,12 +3309,15 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
             dismissal_pct = (stats["outs"] / stats["balls"]) * 100
             score = (dismissal_pct / 100) + (1 / rpb_safe)
             zone_scores.append((score, length, line))
-        zone_scores.sort(reverse=True)
-        best_length, best_line = zone_scores[0][1:] if zone_scores else ("Good", "Outside Off")
 
-        # 🟩 Final summary
+        zone_scores.sort(reverse=True)
+        if zone_scores:
+            _, best_length, best_line = zone_scores[0]
+        else:
+            best_length, best_line = "Good", "Outside Off"
+
         summary = f"Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
-        line = f"<b>{batter_name}</b>: {summary} Recommended bowlers: {bowler_str}."
+        line = f"<b>{batter_name}</b>: {summary} Recommended bowlers: {bowler_names}."
         elements.append(Paragraph(line, normal))
         elements.append(Spacer(1, 4))
 
@@ -3337,6 +3328,7 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     return StreamingResponse(buffer, media_type="application/pdf", headers={
         "Content-Disposition": "inline; filename=game_plan_sheet.pdf"
     })
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

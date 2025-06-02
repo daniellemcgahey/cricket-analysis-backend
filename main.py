@@ -4560,23 +4560,43 @@ def generate_pdf_report(data: dict):
                 "Yes" if ball.get("edged") else "No",
                 "Yes" if ball.get("ball_missed") else "No"
             ])
-        table = Table(bb_data)
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
-            ('FONTSIZE', (0, 0), (-1, -1), 7)
-        ]))
-        elements.append(table)
-        elements.append(Spacer(1, 8))
 
-        # If the batter was dismissed, add wicket details
-        if data["batting"].get("dismissal_type", "").lower() != "not out":
-            dismissal_type = data["batting"]["dismissal_type"]
-            runs = data["batting"]["runs"]
-            balls_faced = data["batting"]["balls_faced"]
-            wicket_details = f"{dismissal_type} for {runs} runs from {balls_faced} balls"
-            elements.append(Paragraph(f"<b>Wicket:</b> {wicket_details}", styles["Normal"]))
-            elements.append(Spacer(1, 10))
+        # ✅ Split the data into two parts (excluding the header row)
+        header_row = bb_data[0]
+        rows = bb_data[1:]
+        half = len(rows) // 2 + (len(rows) % 2 > 0)  # handle odd rows
+
+        left_table_data = [header_row] + rows[:half]
+        right_table_data = [header_row] + rows[half:]
+
+        # ✅ Create individual tables for each half
+        def create_half_table(data_rows):
+            t = Table(data_rows, colWidths=[30, 30, 50, 50, 50, 30, 30, 30])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                ('FONTSIZE', (0, 0), (-1, -1), 7),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER')
+            ]))
+            return t
+
+        left_table = create_half_table(left_table_data)
+        right_table = create_half_table(right_table_data)
+
+        # ✅ Wrap in a single 2-column layout
+        combined_table = Table([[left_table, right_table]], colWidths=[270, 270])
+        combined_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6)
+        ]))
+
+        # ✅ Add to elements
+        elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
+        elements.append(Spacer(1, 5))
+        elements.append(combined_table)
+        elements.append(Spacer(1, 10))
 
         elements.append(PageBreak())
 
@@ -4629,7 +4649,7 @@ def generate_pdf_report(data: dict):
 def add_wagon_wheel_legend(elements):
     legend_text = (
         "<b>Wagon Wheel Legend:</b> "
-        "<font color='grey'>&#9632;</font> 0  "
+        "<font color='grey'>&#9632;</font> Dot  "
         "<font color='white'>&#9632;</font> 1  "
         "<font color='yellow'>&#9632;</font> 2  "
         "<font color='orange'>&#9632;</font> 3  "
@@ -4640,7 +4660,6 @@ def add_wagon_wheel_legend(elements):
     elements.append(Spacer(1, 4))
     elements.append(Paragraph(legend_text, ParagraphStyle(name='Normal', fontSize=9)))
     elements.append(Spacer(1, 10))
-
 
 def add_pitch_map_legend(elements):
     legend_text = (

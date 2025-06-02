@@ -2997,7 +2997,6 @@ def player_pitch_map_data(matchId: int, playerId: int):
     conn.close()
     return data
 
-
 @app.post("/tactical-matchup-detailed")
 def get_tactical_matchup_detail(payload: MatchupDetailPayload):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3016,23 +3015,26 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
     effectiveness = {}
     detailed_stats = {}
 
+    # 🟩 Loop through bowler types to gather stats
     for style in ["Pace", "Medium", "Off Spin", "Leg Spin"]:
         cursor.execute("""
-            SELECT COUNT(*) AS balls, SUM(be.runs) AS runs,
-                   SUM(CASE WHEN be.runs=0 THEN 1 ELSE 0 END) AS dots,
-                   SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS outs
+            SELECT 
+                COALESCE(SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END), 0) AS balls,
+                COALESCE(SUM(be.runs), 0) AS runs,
+                COALESCE(SUM(CASE WHEN be.runs=0 AND be.wides=0 THEN 1 ELSE 0 END), 0) AS dots,
+                COALESCE(SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END), 0) AS outs
             FROM ball_events be
             JOIN players bowl ON be.bowler_id = bowl.player_id
-            WHERE be.batter_id = ? AND bowl.bowling_style = ?
+            WHERE be.batter_id = ? AND LOWER(bowl.bowling_style) = LOWER(?)
         """, (payload.player_id, style))
         row = cursor.fetchone()
-        balls = row["balls"] or 1
-        rpb = (row["runs"] or 0) / balls
-        rpb = round(rpb, 2)
-        rpb_safe = max(rpb, 0.1)
+        balls = row["balls"] or 1  # prevent division by zero
+        rpb = round((row["runs"] or 0) / balls, 2)
+        rpb_safe = max(rpb, 0.1)  # avoid division by zero
         dot_pct = round((row["dots"] or 0) * 100 / balls, 1)
         out_pct = round((row["outs"] or 0) * 100 / balls, 1)
 
+        # 🟩 New effectiveness: wickets + economy balance
         effectiveness_score = (out_pct / 100) + (1 / rpb_safe)
         effectiveness[style] = effectiveness_score
 
@@ -3043,14 +3045,15 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
             "dismissal_pct": out_pct
         }
 
+    # 🔎 Determine recommended bowler type
     recommended_type = max(effectiveness, key=effectiveness.get)
 
-    # 🔎 Retrieve all balls for recommended type
+    # 🟩 Retrieve all balls of recommended type for zone analysis
     cursor.execute("""
         SELECT be.pitch_x, be.pitch_y, be.runs, be.dismissal_type
         FROM ball_events be
         JOIN players bowl ON be.bowler_id = bowl.player_id
-        WHERE be.batter_id = ? AND bowl.bowling_style = ?
+        WHERE be.batter_id = ? AND LOWER(bowl.bowling_style) = LOWER(?)
           AND be.wides = 0 AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
     """, (payload.player_id, recommended_type))
     balls = cursor.fetchall()
@@ -3070,7 +3073,7 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
 
     for b in balls:
         py, px = b["pitch_y"], b["pitch_x"]
-        # Line
+        # Line classification
         if px > 0.55:
             line_label = "Leg"
         elif 0.44 < px <= 0.55:
@@ -3079,7 +3082,7 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
             line_label = "Outside Off"
         else:
             line_label = "Wide Outside Off"
-        # Length
+        # Length classification
         length_label = next((l for l, (start, end) in zone_maps.items() if start <= py < end), "Unknown")
 
         zone = zones[(length_label, line_label)]
@@ -3088,15 +3091,15 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         if b["dismissal_type"]:
             zone["outs"] += 1
 
-    # 🟩 Determine best zone
+    # 🟩 Determine best zone by ranking
     zone_scores = []
     for (length, line), stats in zones.items():
         if stats["balls"] == 0:
             continue
         rpb = stats["runs"] / stats["balls"]
-        rpb = max(rpb, 0.1)
+        rpb_safe = max(rpb, 0.1)
         dismissal_pct = (stats["outs"] / stats["balls"]) * 100
-        score = (dismissal_pct / 100) + (1 / rpb)
+        score = (dismissal_pct / 100) + (1 / rpb_safe)
         zone_scores.append((score, length, line, round(rpb, 2), round(dismissal_pct, 1)))
 
     zone_scores.sort(reverse=True)
@@ -3106,7 +3109,7 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         best_length, best_line = "Good", "Outside Off"
 
     recommended_zones = {"length": best_length, "line": best_line}
-    summary = f"Use {recommended_type} bowlers, target {best_length} and {best_line}."
+    summary = f"Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
 
     conn.close()
     return {
@@ -3127,6 +3130,7 @@ def get_tactical_matchup_detail(payload: MatchupDetailPayload):
         "recommended_zones": recommended_zones,
         "summary": summary
     }
+
 
 
 

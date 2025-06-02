@@ -4674,24 +4674,39 @@ def add_wagon_wheel_legend(elements):
         square = ColorSquare(color, size=8)
         legend_flowables.append(square)
         legend_flowables.append(Spacer(2, 0))
-        # 🔥 Force no-wrap style for text
-        legend_flowables.append(
-            Paragraph(
-                label,
-                ParagraphStyle(name="LegendLabel", fontSize=8, wordWrap='CJK', leading=10)
-            )
-        )
-        legend_flowables.append(Spacer(6, 0))
 
-    # 🟩 Put them in a single row table with 1 row
-    legend_table = Table([legend_flowables], colWidths=[None] * len(legend_flowables))
+        # Use Paragraph with no-wrap style
+        p = Paragraph(label, ParagraphStyle(
+            name="LegendLabel",
+            fontSize=8,
+            leading=9,
+            spaceAfter=0,
+            wordWrap='CJK',
+            allowOrphans=1,
+            allowWidows=1,
+            splitLongWords=False
+        ))
+        legend_flowables.append(p)
+
+        legend_flowables.append(Spacer(8, 0))  # space between legend items
+
+    # 🟩 Set explicit column widths for each item
+    col_widths = []
+    for _ in legend_items:
+        col_widths.extend([10, 2, 50, 8])  # adjust widths for square, spacer, label, spacer
+
+    # Single row table with fixed widths
+    legend_table = Table([legend_flowables], colWidths=col_widths, hAlign='LEFT')
     legend_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        # 🔥 Prevent wrapping for all text cells
-        ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+        ('LEFTPADDING', (0, 0), (-1, -1), 1),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 1),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
     ]))
 
+    # 🧱 Add to PDF elements
     elements.append(Spacer(1, 4))
     elements.append(Paragraph(
         "<b>Wagon Wheel Legend:</b>",
@@ -4715,24 +4730,28 @@ def add_pitch_map_legend(elements):
         legend_flowables.append(square)
         legend_flowables.append(Spacer(2, 0))
 
-        # 🔥 No-wrap paragraph for label
-        legend_flowables.append(Paragraph(
-            label,
-            ParagraphStyle(
-                name="LegendLabel",
-                fontSize=8,
-                leading=9,
-                spaceAfter=0,
-                wordWrap='CJK',  # prevents wrapping
-                allowOrphans=1,
-                allowWidows=1,
-                splitLongWords=False
-            )
+        # Use Paragraph with no-wrap style
+        p = Paragraph(label, ParagraphStyle(
+            name="LegendLabel",
+            fontSize=8,
+            leading=9,
+            spaceAfter=0,
+            wordWrap='CJK',
+            allowOrphans=1,
+            allowWidows=1,
+            splitLongWords=False
         ))
+        legend_flowables.append(p)
+
         legend_flowables.append(Spacer(8, 0))  # space between legend items
 
-    # 🟩 Single-row table with auto width
-    legend_table = Table([legend_flowables], hAlign='LEFT')
+    # 🟩 Set explicit column widths for each item
+    col_widths = []
+    for _ in legend_items:
+        col_widths.extend([10, 2, 50, 8])  # adjust widths for square, spacer, label, spacer
+
+    # Single row table with fixed widths
+    legend_table = Table([legend_flowables], colWidths=col_widths, hAlign='LEFT')
     legend_table.setStyle(TableStyle([
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
@@ -4750,8 +4769,6 @@ def add_pitch_map_legend(elements):
     ))
     elements.append(Spacer(1, 2))
     elements.append(legend_table)
-    elements.append(Spacer(1, 10))
-
 
 def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Get innings summaries (team totals from the innings table)

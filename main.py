@@ -4745,7 +4745,7 @@ def add_pitch_map_legend(elements):
         ))
         legend_flowables.append(p)
 
-        legend_flowables.append(Spacer(8, 0))  # space between legend items
+        legend_flowables.append(Spacer(10, 0))  # space between legend items
 
     # 🟩 Set explicit column widths for each item
     col_widths = []

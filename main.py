@@ -2951,7 +2951,6 @@ def player_wagon_wheel_data(matchId: int, playerId: int):
     conn.close()
     return shots
 
-
 @app.get("/player-pitch-map-data")
 def player_pitch_map_data(matchId: int, playerId: int):
     conn = sqlite3.connect("cricket_analysis.db")
@@ -2978,10 +2977,6 @@ def player_pitch_map_data(matchId: int, playerId: int):
 
     conn.close()
     return data
-
-
-
-
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -4501,6 +4496,7 @@ def generate_pdf_report(data: dict):
         if os.path.exists("/tmp/wagon_wheel_chart.png"):
             elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
             elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
+            add_wagon_wheel_legend(elements)
             elements.append(Spacer(1, 40))
 
         # 🟩 Create column layout with labels above each table
@@ -4592,6 +4588,7 @@ def generate_pdf_report(data: dict):
 
         # Zone Effectiveness Table
         elements.append(Paragraph("<b>Zone Effectiveness</b>", bold))
+        elements.append(Spacer(1, 6))
 
         zone_effectiveness = data.get("zone_effectiveness", [])
         zone_table_data = [["Zone", "Balls", "Runs", "Wickets", "Avg Runs/Ball", "Dot %", "False Shot %"]]
@@ -4612,12 +4609,14 @@ def generate_pdf_report(data: dict):
             ('FONTSIZE', (0, 0), (-1, -1), 8)
         ]))
         elements.append(zone_table)
-        elements.append(Spacer(1, 10))
+        elements.append(Spacer(1, 20))
 
         # 6️⃣ Pitch Map Page
         if os.path.exists("/tmp/pitch_map_chart.png"):
             elements.append(Paragraph("<b>Pitch Map</b>", bold))
+            elements.append(Spacer(1, 6))
             elements.append(Image("/tmp/pitch_map_chart.png", width=300, height=400))
+            add_pitch_map_legend(elements)
             elements.append(PageBreak())
         else:
             print("❌ /tmp/pitch_map_chart.png not found - skipping pitch map in PDF")
@@ -4626,6 +4625,67 @@ def generate_pdf_report(data: dict):
     doc.build(elements)
     buffer.seek(0)
     return buffer
+
+def add_wagon_wheel_legend(elements):
+    color_mapping = [
+        ("0 Runs", colors.grey),
+        ("1 Run", colors.white),
+        ("2 Runs", colors.yellow),
+        ("3 Runs", colors.orange),
+        ("4 Runs", colors.blue),
+        ("5 Runs", colors.pink),
+        ("6 Runs", colors.red),
+    ]
+    data = [["Event", "Color"]]
+    for label, color in color_mapping:
+        data.append([label, ""])
+    
+    t = Table(data, colWidths=[120, 40])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+    for idx, (_, color) in enumerate(color_mapping, start=1):
+        t.setStyle([('BACKGROUND', (1, idx), (1, idx), color)])
+    
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("<b>Wagon Wheel Legend</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=10)))
+    elements.append(Spacer(1, 4))
+    elements.append(t)
+    elements.append(Spacer(1, 10))
+
+def add_pitch_map_legend(elements):
+    legend_data = [
+        ["Legend", "Color"],
+        ["Dot Ball", "", "Red"],
+        ["Runs (1-3)", "", "Green"],
+        ["Boundary (4/6)", "", "Blue"],
+        ["Wicket", "", "White"],
+    ]
+    data = [["Event", "Color"]]
+    color_mapping = [
+        ("Dot Ball", colors.red),
+        ("Runs (1-3)", colors.green),
+        ("Boundary (4/6)", colors.blue),
+        ("Wicket", colors.white),
+    ]
+    for label, color in color_mapping:
+        data.append([label, "",])
+    
+    t = Table(data, colWidths=[120, 40])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('GRID', (0, 0), (-1, -1), 0.25, colors.black),
+        ('ALIGN', (1, 1), (-1, -1), 'CENTER'),
+    ]))
+    for idx, (_, color) in enumerate(color_mapping, start=1):
+        t.setStyle([('BACKGROUND', (1, idx), (1, idx), color)])
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph("<b>Pitch Map Legend</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=10)))
+    elements.append(Spacer(1, 4))
+    elements.append(t)
+    elements.append(Spacer(1, 10))
 
 def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Get innings summaries (team totals from the innings table)

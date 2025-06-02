@@ -7,8 +7,9 @@ from reportlab.lib import colors
 import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak, Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer, TableStyle, PageBreak, Image, Flowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.graphics.shapes import Drawing, Rect
 from reportlab.lib.enums import TA_CENTER
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -38,6 +39,17 @@ app.add_middleware(
 from fastapi.staticfiles import StaticFiles
 
 app.mount("/static", StaticFiles(directory="/tmp"), name="static")
+
+class ColorSquare(Flowable):
+    def __init__(self, fill_color, size=8):
+        super().__init__()
+        self.fill_color = fill_color
+        self.size = size
+
+    def draw(self):
+        self.canv.setStrokeColor(colors.black)
+        self.canv.setFillColor(self.fill_color)
+        self.canv.rect(0, 0, self.size, self.size, fill=1, stroke=1)
 
 
 class ComparisonPayload(BaseModel):
@@ -4496,6 +4508,7 @@ def generate_pdf_report(data: dict):
         if os.path.exists("/tmp/wagon_wheel_chart.png"):
             elements.append(Paragraph("<b>Wagon Wheel</b>", bold))
             elements.append(Image("/tmp/wagon_wheel_chart.png", width=300, height=300))
+            elements.append(Spacer(1, 6))
             add_wagon_wheel_legend(elements)
             elements.append(Spacer(1, 40))
 
@@ -4546,8 +4559,6 @@ def generate_pdf_report(data: dict):
         elements.append(PageBreak())
 
         # 🟩 Ball by ball breakdown on next page
-        elements.append(Paragraph("<b>Ball by Ball Breakdown</b>", bold))
-        elements.append(Spacer(1, 5))
         bb_data = [["Ball", "Runs", "Shot", "Footwork", "Shot Type", "Aerial", "Edged", "Missed"]]
         for idx, ball in enumerate(data['ball_by_ball_batting'], start=1):
             bb_data.append([
@@ -4571,7 +4582,7 @@ def generate_pdf_report(data: dict):
 
         # ✅ Create individual tables for each half
         def create_half_table(data_rows):
-            t = Table(data_rows, colWidths=[30, 30, 50, 50, 50, 30, 30, 30])
+            t = Table(data_rows, colWidths=[25, 25, 50, 50, 45, 25, 25, 25])
             t.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
                 ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
@@ -4636,6 +4647,7 @@ def generate_pdf_report(data: dict):
             elements.append(Paragraph("<b>Pitch Map</b>", bold))
             elements.append(Spacer(1, 6))
             elements.append(Image("/tmp/pitch_map_chart.png", width=300, height=400))
+            elements.append(Spacer(1, 6))
             add_pitch_map_legend(elements)
             elements.append(PageBreak())
         else:
@@ -4647,32 +4659,62 @@ def generate_pdf_report(data: dict):
     return buffer
 
 def add_wagon_wheel_legend(elements):
-    legend_text = (
-        "<b>Wagon Wheel Legend:</b> "
-        "<font color='grey'>&#9632;</font> Dot  "
-        "<font color='white'>&#9632;</font> 1  "
-        "<font color='yellow'>&#9632;</font> 2  "
-        "<font color='orange'>&#9632;</font> 3  "
-        "<font color='blue'>&#9632;</font> 4  "
-        "<font color='pink'>&#9632;</font> 5  "
-        "<font color='red'>&#9632;</font> 6"
-    )
+    legend_items = [
+        ("0 Runs", colors.grey),
+        ("1 Run", colors.white),
+        ("2 Runs", colors.yellow),
+        ("3 Runs", colors.orange),
+        ("4 Runs", colors.blue),
+        ("5 Runs", colors.pink),
+        ("6 Runs", colors.red),
+    ]
+
+    legend_flowables = []
+    for label, color in legend_items:
+        square = ColorSquare(color, size=8)
+        legend_flowables.append(square)
+        legend_flowables.append(Spacer(3, 0))
+        legend_flowables.append(Paragraph(label, ParagraphStyle(name="LegendLabel", fontSize=8)))
+        legend_flowables.append(Spacer(6, 0))  # spacing between items
+
+    legend_table = Table([legend_flowables])
+    legend_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+
     elements.append(Spacer(1, 4))
-    elements.append(Paragraph(legend_text, ParagraphStyle(name='Normal', fontSize=9)))
+    elements.append(Paragraph("<b>Wagon Wheel Legend:</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)))
+    elements.append(Spacer(1, 2))
+    elements.append(legend_table)
     elements.append(Spacer(1, 10))
 
 def add_pitch_map_legend(elements):
-    legend_text = (
-        "<b>Pitch Map Legend:</b> "
-        "<font color='red'>&#9632;</font> Dot Ball  "
-        "<font color='green'>&#9632;</font> Runs (1-3)  "
-        "<font color='blue'>&#9632;</font> Boundary (4/6)  "
-        "<font color='white'>&#9632;</font> Wicket"
-    )
-    elements.append(Spacer(1, 4))
-    elements.append(Paragraph(legend_text, ParagraphStyle(name='Normal', fontSize=9)))
-    elements.append(Spacer(1, 10))
+    legend_items = [
+        ("Dot Ball", colors.red),
+        ("Runs (1-3)", colors.green),
+        ("Boundary (4/6)", colors.blue),
+        ("Wicket", colors.white),
+    ]
 
+    legend_flowables = []
+    for label, color in legend_items:
+        square = ColorSquare(color, size=8)
+        legend_flowables.append(square)
+        legend_flowables.append(Spacer(3, 0))
+        legend_flowables.append(Paragraph(label, ParagraphStyle(name="LegendLabel", fontSize=8)))
+        legend_flowables.append(Spacer(6, 0))  # spacing between items
+
+    # Put them all on a single horizontal line
+    legend_table = Table([legend_flowables])
+    legend_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+
+    elements.append(Spacer(1, 4))
+    elements.append(Paragraph("<b>Pitch Map Legend:</b>", ParagraphStyle(name='Bold', fontName='Helvetica-Bold', fontSize=9)))
+    elements.append(Spacer(1, 2))
+    elements.append(legend_table)
+    elements.append(Spacer(1, 10))
 
 def fetch_match_summary(cursor, match_id: int, team_id: int):
     # Get innings summaries (team totals from the innings table)

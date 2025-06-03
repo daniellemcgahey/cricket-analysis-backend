@@ -4554,11 +4554,13 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Scoring shot breakdown
     cursor.execute("""
-        SELECT runs, COUNT(*) AS count
+        SELECT be.runs, COUNT(*) AS count
         FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN innings i ON be.innings_id = i.innings_id  
         WHERE i.match_id = ? AND be.batter_id = ?
-        GROUP BY runs
+            AND be.wides = 0  -- ✅ only legal deliveries
+        GROUP BY be.runs
+
     """, (match_id, player_id))
     scoring_shots_breakdown = {str(row["runs"]): row["count"] for row in cursor.fetchall()}
 

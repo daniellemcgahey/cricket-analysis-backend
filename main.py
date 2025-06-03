@@ -948,9 +948,14 @@ def player_batting_analysis(payload: PlayerBattingAnalysisPayload):
         SELECT 
             t.tournament_name,
             COUNT(DISTINCT i.innings_id) AS innings,
-            COUNT(*) AS balls_faced,
+            SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END) AS balls_faced,
             SUM(be.runs) AS total_runs,
-            SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dots,
+            SUM(
+                CASE
+                    WHEN be.wides = 0 AND be.runs = 0 THEN 1
+                    ELSE 0
+                END
+                ) AS dots,
             SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
             SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
             SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,

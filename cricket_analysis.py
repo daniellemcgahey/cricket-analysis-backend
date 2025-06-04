@@ -556,9 +556,6 @@ class MatchViewer:
             return
 
         match_id, completed = self.matches[selection[0]]
-        if completed:
-            messagebox.showinfo("Match Completed", "This match is already completed and cannot be resumed.")
-            return
 
         try:
             #print(f"[DEBUG] Loading match {match_id}")
@@ -1541,10 +1538,30 @@ class MatchData:
 
         conn.close()
 
-        #print(f"[DEBUG] MatchData keys: {list(match_data.__dict__.keys())}")
-        #print(f"[DEBUG] Overs Phases: {match_data.overs_phases}")
-        #print(f"[DEBUG] Current Over Float: {match_data.current_over}")
-        return match_data   
+        # ✅ PATCH: Ensure striker and non-striker exist in batter dict
+        fallback_batter = {
+            "balls": 0,
+            "runs": 0,
+            "fours": 0,
+            "sixes": 0,
+            "dismissed": False,
+            "dismissal_type": None,
+            "runs_this_ball": 0
+        }
+
+        for pid in [match_data.striker, match_data.non_striker]:
+            if pid is not None and pid not in match_data.batters:
+                match_data.batters[pid] = fallback_batter.copy()
+
+        # ✅ PATCH: Also ensure partnership batters exist if applicable
+        if match_data.current_partnership:
+            for key in ['batter1', 'batter2']:
+                pid = match_data.current_partnership.get(key)
+                if pid is not None and pid not in match_data.batters:
+                    match_data.batters[pid] = fallback_batter.copy()
+
+        return match_data
+ 
     
 # ================= Opening Players Selection =================
 class OpeningPlayers:

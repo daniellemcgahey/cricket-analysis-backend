@@ -4419,7 +4419,13 @@ def fetch_player_match_stats(match_id: int, player_id: int):
             COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
             SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dot_balls,
             SUM(be.runs + be.wides + be.no_balls) AS runs_conceded,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+            SUM(
+                CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'run out', 'obstructing the field', 'retired out', 'retired hurt')
+                    THEN 1 ELSE 0
+                END
+            ) AS wickets,
             SUM(be.wides + be.no_balls) AS extras
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
@@ -5209,17 +5215,25 @@ def fetch_match_summary(cursor, match_id: int, team_id: int):
 
         # Complete Bowling Scorecard
         cursor.execute("""
-            SELECT p.player_name, SUM(be.runs) AS runs_conceded,
-                   SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
-                   COUNT(CASE 
-                     WHEN (be.wides = 0 OR be.wides IS NULL) AND (be.no_balls = 0 OR be.no_balls IS NULL) THEN 1 
-                     ELSE NULL END) AS balls_bowled
+            SELECT p.player_name,
+                SUM(be.runs + be.wides + be.no_balls) AS runs_conceded,
+                SUM(
+                    CASE
+                        WHEN be.dismissed_player_id = be.batter_id
+                            AND LOWER(be.dismissal_type) NOT IN ('not out', 'run out', 'obstructing the field', 'retired hurt', 'retired out')
+                        THEN 1 ELSE 0
+                    END
+                ) AS wickets,
+                COUNT(CASE 
+                    WHEN (be.wides = 0 OR be.wides IS NULL) AND (be.no_balls = 0 OR be.no_balls IS NULL) THEN 1 
+                    ELSE NULL END) AS balls_bowled
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?
             GROUP BY be.bowler_id
             ORDER BY wickets DESC, runs_conceded ASC
         """, (inn["innings_id"],))
+
         bowling_card = []
         for b in cursor.fetchall():
             overs_bowled = convert_overs_decimal(b["balls_bowled"] / 6)  # legal deliveries

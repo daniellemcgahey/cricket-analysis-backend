@@ -3813,7 +3813,7 @@ def fetch_phase_pressure(conn, team_names, match_ids, selected_phases):
 
     return phase_pressure_result
 
-def fetch_top_bottom_players(conn, match_ids):
+def fetch_top_bottom_players(conn, match_ids, team_names):
     result = {
         "batting": {"top": [], "bottom": []},
         "bowling": {"top": [], "bottom": []},
@@ -3839,8 +3839,10 @@ def fetch_top_bottom_players(conn, match_ids):
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE m.match_id IN ({','.join(['?'] * len(match_ids))})
+        AND c.country_name IN ({','.join(['?'] * len(team_names))})
         GROUP BY p.player_name, ppi.team_role, ppi.player_id
-    """, match_ids)
+    """, match_ids + team_names)
+
 
     players = cursor.fetchall()
 
@@ -3851,7 +3853,7 @@ def fetch_top_bottom_players(conn, match_ids):
         "net_impact": 0.0
     })
 
-    for name, role, player_id, country_id, country_name, team_role, applied, relieved in players:
+    for name, role, player_id, country_ids, country_name, team_role, applied, relieved in players:
 
         net_impact = relieved - applied
 
@@ -3947,7 +3949,7 @@ def get_pressure_analysis(payload: PressurePayload):
     # ✅ Fetch pressure data using country names
     batting_pressure, bowling_pressure = fetch_over_pressure(conn, team_names, match_ids, payload.selectedPhases)
     phase_pressure = fetch_phase_pressure(conn, team_names, match_ids, payload.selectedPhases)
-    top_bottom_players = fetch_top_bottom_players(conn, match_ids)
+    top_bottom_players = fetch_top_bottom_players(conn, match_ids, team_names)
 
     conn.close()
     print("✅ Finished calculating pressure data")

@@ -3370,6 +3370,70 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
     })
 
 
+@app.get("/scorecard-player-detail")
+def scorecard_player_detail(matchId: int, playerId: int):
+    import sqlite3
+
+    conn = sqlite3.connect("cricket_analysis.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 🧭 Shot locations for wagon wheel
+    cursor.execute("""
+        SELECT be.shot_x, be.shot_y, be.runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+          AND be.shot_x IS NOT NULL AND be.shot_y IS NOT NULL
+    """, (matchId, playerId))
+    shots = [dict(row) for row in cursor.fetchall()]
+
+    # 🎯 Detailed breakdown: run counts, dot %, scoring shot %, avg intent
+    cursor.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE be.wides = 0) AS balls_faced,
+            SUM(be.runs) AS total_runs,
+            SUM(CASE WHEN be.runs = 0 AND be.wides = 0 THEN 1 ELSE 0 END) AS dots,
+            SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
+            SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
+            SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
+            SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
+            SUM(CASE WHEN be.runs = 5 THEN 1 ELSE 0 END) AS fives,
+            SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+            ROUND(AVG(be.batting_intent_score), 2) AS avg_intent
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND be.batter_id = ?
+    """, (matchId, playerId))
+
+    row = cursor.fetchone()
+    balls = row["balls_faced"] or 0
+    dots = row["dots"] or 0
+    scoring_shots = balls - dots
+    scoring_pct = round((scoring_shots / balls) * 100, 1) if balls else 0.0
+
+    breakdown = {
+        "0": dots,
+        "1": row["ones"] or 0,
+        "2": row["twos"] or 0,
+        "3": row["threes"] or 0,
+        "4": row["fours"] or 0,
+        "5": row["fives"] or 0,
+        "6": row["sixes"] or 0,
+    }
+
+    conn.close()
+
+    return {
+        "shots": shots,
+        "run_breakdown": breakdown,
+        "scoring_pct": scoring_pct,
+        "avg_intent": row["avg_intent"] or 0.0
+    }
+
+
+
+
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)

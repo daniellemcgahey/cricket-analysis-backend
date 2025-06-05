@@ -1797,93 +1797,96 @@ def get_match_scorecard(payload: MatchScorecardPayload):
     for innings in innings_list:
         innings_id = innings["innings_id"]
 
-        # Batting data ordered by first appearance
+        # STEP 1: Determine actual batter arrival order (from both batter_id and non_striker_id)
+        cursor.execute("""
+            SELECT ball_id, batter_id, non_striker_id
+            FROM ball_events
+            WHERE innings_id = ?
+            ORDER BY ball_id ASC
+        """, (innings_id,))
+        batter_order = []
+        seen = set()
+        for row in cursor.fetchall():
+            for pid in [row["batter_id"], row["non_striker_id"]]:
+                if pid and pid not in seen:
+                    batter_order.append(pid)
+                    seen.add(pid)
+
+        # STEP 2: Get per-batter stats
         cursor.execute("""
             SELECT 
-                p.player_id,
-                p.player_name,
-                MIN(be.ball_id) AS first_ball_id,
+                be.batter_id,
                 SUM(be.runs) AS runs,
                 COUNT(*) AS balls,
                 SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
                 SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes
             FROM ball_events be
-            JOIN players p ON be.batter_id = p.player_id
             WHERE be.innings_id = ?
             GROUP BY be.batter_id
-            ORDER BY first_ball_id ASC
         """, (innings_id,))
-        batting_data = cursor.fetchall()
+        batting_stats = {
+            row["batter_id"]: dict(row)
+            for row in cursor.fetchall()
+        }
 
-        # Load non-ball dismissals first
-        cursor.execute("""
-            SELECT player_id, dismissal_type
-            FROM non_ball_dismissals
-            WHERE innings_id = ?
-        """, (innings_id,))
-        non_ball_dismissals = {row["player_id"]: row["dismissal_type"] for row in cursor.fetchall()}
+        # STEP 3: Get dismissal info from both ball_events and non_ball_dismissals
+        dismissal_map = {}
 
-        # Now load regular dismissals (excluding 'not out' and blanks)
         cursor.execute("""
             SELECT 
-                be.dismissed_player_id,
-                be.dismissal_type,
+                dismissed_player_id,
+                dismissal_type,
                 fp.player_name AS fielder,
                 bp.player_name AS bowler
             FROM ball_events be
             LEFT JOIN players fp ON be.fielder_id = fp.player_id
             LEFT JOIN players bp ON be.bowler_id = bp.player_id
             WHERE be.innings_id = ?
-            AND TRIM(LOWER(be.dismissal_type)) NOT IN ('', 'not out')
+              AND be.dismissal_type IS NOT NULL
         """, (innings_id,))
-        dismissal_map = {}
-
         for row in cursor.fetchall():
             pid = row["dismissed_player_id"]
-            if pid and pid not in non_ball_dismissals and pid not in dismissal_map:
-                dismissal_map[pid] = {
-                    "dismissal_type": row["dismissal_type"],
-                    "fielder": row["fielder"] or "",
-                    "bowler": row["bowler"] or ""
-                }
-
-        # Merge in the non-ball dismissals with a simplified label
-        for pid, dismissal_type in non_ball_dismissals.items():
             dismissal_map[pid] = {
-                "dismissal_type": dismissal_type,
+                "dismissal_type": row["dismissal_type"],
+                "fielder": row["fielder"] or "",
+                "bowler": row["bowler"] or ""
+            }
+
+        # Now apply non_ball_dismissals override if available
+        cursor.execute("""
+            SELECT player_id, dismissal_type
+            FROM non_ball_dismissals
+            WHERE innings_id = ?
+        """, (innings_id,))
+        for row in cursor.fetchall():
+            pid = row["player_id"]
+            dismissal_map[pid] = {
+                "dismissal_type": row["dismissal_type"],
                 "fielder": "",
                 "bowler": ""
             }
 
-
+        # STEP 4: Get playing XI for this team
         cursor.execute("SELECT country_id FROM countries WHERE country_name = ?", (innings["batting_team"],))
         batting_team_id = cursor.fetchone()["country_id"]
 
         cursor.execute("""
             SELECT p.player_id, p.player_name, pmr.is_captain, pmr.is_keeper
             FROM players p
-            JOIN player_match_roles pmr ON pmr.player_id = p.player_id
+            JOIN player_match_roles pmr ON p.player_id = pmr.player_id
             WHERE pmr.match_id = ? AND pmr.team_id = ?
         """, (match_id, batting_team_id))
         playing_xi = cursor.fetchall()
         role_map = {p["player_id"]: {"is_captain": p["is_captain"], "is_keeper": p["is_keeper"]} for p in playing_xi}
+        player_name_map = {p["player_id"]: p["player_name"] for p in playing_xi}
 
-        cursor.execute("""
-            SELECT batter1_id, batter2_id
-            FROM partnerships
-            WHERE innings_id = ?
-            ORDER BY partnership_id DESC LIMIT 1
-        """, (innings_id,))
-        partnership_row = cursor.fetchone()
-        active_batters = set()
-        if partnership_row:
-            active_batters = {partnership_row["batter1_id"], partnership_row["batter2_id"]}
-
-        batted_ids = {row["player_id"] for row in batting_data}
+        # STEP 5: Build batting card
+        all_seen_ids = set()
         batting_card = []
 
-        for row in batting_data:
-            pid = row["player_id"]
+        for pid in batter_order:
+            all_seen_ids.add(pid)
+            stats = batting_stats.get(pid, {"runs": 0, "balls": 0, "fours": 0, "sixes": 0})
             dismissal = dismissal_map.get(pid, {})
             dismissal_type = (dismissal.get("dismissal_type") or "").lower()
             fielder_text = ""
@@ -1907,34 +1910,35 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                     bowler_text = f"{dismissal_type.title()}. {bowler}"
 
             batting_card.append({
-                "player": row["player_name"],
-                "runs": row["runs"],
-                "balls": row["balls"],
-                "fours": row["fours"],
-                "sixes": row["sixes"],
-                "strike_rate": round((row["runs"] / row["balls"]) * 100, 2) if row["balls"] else 0,
+                "player": player_name_map.get(pid, "Unknown"),
+                "runs": stats["runs"],
+                "balls": stats["balls"],
+                "fours": stats["fours"],
+                "sixes": stats["sixes"],
+                "strike_rate": round((stats["runs"] / stats["balls"]) * 100, 2) if stats["balls"] else 0,
                 "fielder_text": fielder_text,
                 "bowler_text": bowler_text,
                 "is_captain": role_map.get(pid, {}).get("is_captain", 0),
                 "is_keeper": role_map.get(pid, {}).get("is_keeper", 0)
             })
 
+        # STEP 6: Add "Did Not Bat" players
         for player in playing_xi:
             pid = player["player_id"]
-            if pid not in batted_ids:
-                is_active = pid in active_batters
+            if pid not in all_seen_ids:
                 batting_card.append({
                     "player": player["player_name"],
-                    "runs": 0 if is_active else "-",
-                    "balls": 0 if is_active else "-",
-                    "fours": 0 if is_active else "-",
-                    "sixes": 0 if is_active else "-",
-                    "strike_rate": 0 if is_active else "-",
-                    "fielder_text": "" if is_active else "Did Not Bat",
+                    "runs": "-",
+                    "balls": "-",
+                    "fours": "-",
+                    "sixes": "-",
+                    "strike_rate": "-",
+                    "fielder_text": "Did Not Bat",
                     "bowler_text": "",
                     "is_captain": player["is_captain"],
                     "is_keeper": player["is_keeper"]
                 })
+
 
         # Bowling Card ordered by appearance
         cursor.execute("""

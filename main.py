@@ -3443,6 +3443,68 @@ def scorecard_player_detail(matchId: int, playerId: int):
         "avg_intent": row["avg_intent"] or 0.0
     }
 
+@app.get("/scorecard-bowler-detail")
+def scorecard_bowler_detail(matchId: int, playerId: int):
+    conn = sqlite3.connect("cricket_analysis.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 🟡 Get pitch map data (valid pitch points only)
+    cursor.execute("""
+        SELECT pitch_x, pitch_y
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.bowler_id = ? AND i.match_id = ?
+          AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+    """, (playerId, matchId))
+    pitch_map = [dict(row) for row in cursor.fetchall()]
+
+    # 🔢 Summary metrics (exclude run outs and similar)
+    cursor.execute("""
+        SELECT
+            SUM(be.runs) AS runs,
+            SUM(be.expected_runs) AS expected_runs,
+            COUNT(*) FILTER (
+                WHERE be.dismissal_type IS NOT NULL
+                AND LOWER(be.dismissal_type) NOT IN ('run out', 'obstructing the field', 'retired', 'retired out', 'timed out', 'handled the ball')
+                AND LOWER(be.dismissal_type) != 'not out'
+            ) AS wickets,
+            COUNT(*) FILTER (WHERE be.expected_wicket > 0) AS chance_events,
+            SUM(be.expected_wicket) AS expected_wickets,
+            COUNT(*) FILTER (WHERE be.wides = 0 AND be.no_balls = 0) AS balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.bowler_id = ? AND i.match_id = ?
+    """, (playerId, matchId))
+
+    row = cursor.fetchone()
+
+    runs = row["runs"] or 0
+    expected_runs = row["expected_runs"] or 0
+    wickets = row["wickets"] or 0
+    expected_wickets = row["expected_wickets"] or 0
+    balls = row["balls"] or 0
+    chances_from_expected = row["chance_events"] or 0
+
+    # ✅ Final chance = expected wicket events + real dismissals
+    chances_made = chances_from_expected + wickets
+
+    real_econ = (expected_runs / (balls / 6)) if balls else 0
+    real_sr = (balls / expected_wickets) if expected_wickets else None
+
+    return {
+        "pitch_map": pitch_map,
+        "summary": {
+            "runs_conceded": runs,
+            "real_runs_conceded": round(expected_runs, 2),
+            "chances_made": round(chances_made, 2),
+            "wickets": wickets,
+            "real_wickets": round(expected_wickets, 2),
+            "real_economy": round(real_econ, 2) if balls else "–",
+            "real_strike_rate": round(real_sr, 2) if real_sr else "–"
+        }
+    }
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

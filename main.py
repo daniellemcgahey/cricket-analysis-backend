@@ -3451,19 +3451,30 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
 
     # 🟡 Get pitch map data (valid pitch points only)
     cursor.execute("""
-        SELECT pitch_x, pitch_y
+        SELECT 
+            be.pitch_x, 
+            be.pitch_y, 
+            be.runs, 
+            CASE 
+                WHEN LOWER(be.dismissal_type) IN ('bowled', 'caught', 'lbw', 'stumped', 'hit wicket') 
+                THEN be.dismissal_type
+                ELSE NULL
+            END AS dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE be.bowler_id = ? AND i.match_id = ?
-          AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+        WHERE be.bowler_id = ? 
+        AND i.match_id = ?
+        AND be.pitch_x IS NOT NULL 
+        AND be.pitch_y IS NOT NULL
     """, (playerId, matchId))
+
     pitch_map = [dict(row) for row in cursor.fetchall()]
 
     # 🔢 Summary metrics (exclude run outs and similar)
     cursor.execute("""
         SELECT
-            SUM(be.runs) AS runs,
-            SUM(be.expected_runs) AS expected_runs,
+            SUM(be.runs + be.wides + be.no_balls) AS runs,
+            SUM(be.expected_runs + be.wides + be.no_balls) AS expected_runs,
             COUNT(*) FILTER (
                 WHERE be.dismissal_type IS NOT NULL
                 AND LOWER(be.dismissal_type) NOT IN ('run out', 'obstructing the field', 'retired', 'retired out', 'timed out', 'handled the ball')

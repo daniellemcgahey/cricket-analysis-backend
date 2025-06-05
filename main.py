@@ -3303,19 +3303,19 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
             "Yorker": (0.03636, 0.1636),
             "Full": (0.1636, 0.31818),
             "Good": (0.31818, 0.545454),
-            "Short": (0.545454, 1.0)
+            "Short of a": (0.545454, 1.0)
         }
         zones = {}
         for length_label in zone_maps:
-            for line_label in ["Wide Outside Off", "Outside Off", "Straight", "Leg"]:
+            for line_label in ["Wide Outside Off", "Outside Off", "Off", "Middle/Leg"]:
                 zones[(length_label, line_label)] = {"balls": 0, "runs": 0, "outs": 0}
 
         for b in balls:
             py, px = b["pitch_y"], b["pitch_x"]
             if px > 0.55:
-                line_label = "Leg"
+                line_label = "Middle/Leg"
             elif 0.44 < px <= 0.55:
-                line_label = "Straight"
+                line_label = "Off"
             elif 0.26 < px <= 0.44:
                 line_label = "Outside Off"
             else:
@@ -3346,10 +3346,10 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
 
         # 🟩 Output lines with formatting
         summary_line = f"<b>{batter_name}</b>: Use {recommended_type} bowlers, target {best_length} length and {best_line} line."
-        bowlers_line = f"Recommended bowlers: {bowler_names}"
+        #bowlers_line = f"Recommended bowlers: {bowler_names}"
 
         elements.append(Paragraph(summary_line, normal))
-        elements.append(Paragraph(bowlers_line, indent))
+        #elements.append(Paragraph(bowlers_line, indent))
         elements.append(Spacer(1, 15))  # larger gap
 
     conn.close()

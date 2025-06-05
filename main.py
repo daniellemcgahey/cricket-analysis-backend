@@ -1815,9 +1815,18 @@ def get_match_scorecard(payload: MatchScorecardPayload):
         """, (innings_id,))
         batting_data = cursor.fetchall()
 
+        # Load non-ball dismissals first
+        cursor.execute("""
+            SELECT player_id, dismissal_type
+            FROM non_ball_dismissals
+            WHERE innings_id = ?
+        """, (innings_id,))
+        non_ball_dismissals = {row["player_id"]: row["dismissal_type"] for row in cursor.fetchall()}
+
+        # Now load regular dismissals (excluding 'not out' and blanks)
         cursor.execute("""
             SELECT 
-                be.batter_id,
+                be.dismissed_player_id,
                 be.dismissal_type,
                 fp.player_name AS fielder,
                 bp.player_name AS bowler
@@ -1825,18 +1834,27 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             LEFT JOIN players fp ON be.fielder_id = fp.player_id
             LEFT JOIN players bp ON be.bowler_id = bp.player_id
             WHERE be.innings_id = ?
-              AND be.dismissal_type IS NOT NULL
-              AND LOWER(be.dismissal_type) != 'not out'
+            AND TRIM(LOWER(be.dismissal_type)) NOT IN ('', 'not out')
         """, (innings_id,))
         dismissal_map = {}
+
         for row in cursor.fetchall():
-            pid = row["batter_id"]
-            if pid not in dismissal_map:
+            pid = row["dismissed_player_id"]
+            if pid and pid not in non_ball_dismissals and pid not in dismissal_map:
                 dismissal_map[pid] = {
                     "dismissal_type": row["dismissal_type"],
                     "fielder": row["fielder"] or "",
                     "bowler": row["bowler"] or ""
                 }
+
+        # Merge in the non-ball dismissals with a simplified label
+        for pid, dismissal_type in non_ball_dismissals.items():
+            dismissal_map[pid] = {
+                "dismissal_type": dismissal_type,
+                "fielder": "",
+                "bowler": ""
+            }
+
 
         cursor.execute("SELECT country_id FROM countries WHERE country_name = ?", (innings["batting_team"],))
         batting_team_id = cursor.fetchone()["country_id"]

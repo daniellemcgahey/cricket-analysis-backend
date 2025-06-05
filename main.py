@@ -1910,6 +1910,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                     bowler_text = f"{dismissal_type.title()}. {bowler}"
 
             batting_card.append({
+                "player_id": pid,
                 "player": player_name_map.get(pid, "Unknown"),
                 "runs": stats["runs"],
                 "balls": stats["balls"],
@@ -1927,6 +1928,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             pid = player["player_id"]
             if pid not in all_seen_ids:
                 batting_card.append({
+                    "player_id": pid,
                     "player": player["player_name"],
                     "runs": "-",
                     "balls": "-",
@@ -1943,6 +1945,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
         # Bowling Card ordered by appearance
         cursor.execute("""
             SELECT 
+                be.bowler_id,
                 p.player_name,
                 MIN(be.ball_id) AS first_ball_id,
                 SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
@@ -1968,6 +1971,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             economy = round(row["runs"] / (legal_balls / 6), 2) if legal_balls else 0
 
             bowling_card.append({
+                "player_id": row["bowler_id"],
                 "bowler": row["player_name"],
                 "overs": overs,
                 "dots": row["dots"],

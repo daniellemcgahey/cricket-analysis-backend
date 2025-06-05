@@ -3373,7 +3373,6 @@ def generate_game_plan_pdf(payload: GamePlanPayload):
         "Content-Disposition": "inline; filename=game_plan_sheet.pdf"
     })
 
-
 @app.get("/scorecard-player-detail")
 def scorecard_player_detail(matchId: int, playerId: int):
     import sqlite3
@@ -3382,9 +3381,18 @@ def scorecard_player_detail(matchId: int, playerId: int):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # 🧭 Shot locations for wagon wheel
+    # 🧭 Shot locations for wagon wheel WITH dismissal info
     cursor.execute("""
-        SELECT be.shot_x, be.shot_y, be.runs
+        SELECT
+            be.shot_x,
+            be.shot_y,
+            be.runs,
+            CASE
+                WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out')
+                THEN be.dismissal_type
+                ELSE NULL
+            END AS dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.batter_id = ?
@@ -3434,8 +3442,6 @@ def scorecard_player_detail(matchId: int, playerId: int):
         "scoring_pct": scoring_pct,
         "avg_intent": row["avg_intent"] or 0.0
     }
-
-
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):

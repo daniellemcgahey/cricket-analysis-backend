@@ -1774,7 +1774,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
     cursor = conn.cursor()
 
     match_id = payload.match_id
-    print(f"📥 Requested scorecard for match_id = {match_id}")
+    print(f"📅 Requested scorecard for match_id = {match_id}")
 
     # Match metadata
     cursor.execute("""
@@ -1797,11 +1797,12 @@ def get_match_scorecard(payload: MatchScorecardPayload):
     for innings in innings_list:
         innings_id = innings["innings_id"]
 
-        # Batting stats for players who faced a ball
+        # Batting data ordered by first appearance
         cursor.execute("""
             SELECT 
                 p.player_id,
                 p.player_name,
+                MIN(be.ball_id) AS first_ball_id,
                 SUM(be.runs) AS runs,
                 COUNT(*) AS balls,
                 SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
@@ -1810,10 +1811,10 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             JOIN players p ON be.batter_id = p.player_id
             WHERE be.innings_id = ?
             GROUP BY be.batter_id
+            ORDER BY first_ball_id ASC
         """, (innings_id,))
         batting_data = cursor.fetchall()
 
-        # Per-batter dismissal info
         cursor.execute("""
             SELECT 
                 be.batter_id,
@@ -1824,8 +1825,8 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             LEFT JOIN players fp ON be.fielder_id = fp.player_id
             LEFT JOIN players bp ON be.bowler_id = bp.player_id
             WHERE be.innings_id = ?
-            AND be.dismissal_type IS NOT NULL
-            AND LOWER(be.dismissal_type) != 'not out'
+              AND be.dismissal_type IS NOT NULL
+              AND LOWER(be.dismissal_type) != 'not out'
         """, (innings_id,))
         dismissal_map = {}
         for row in cursor.fetchall():
@@ -1837,7 +1838,6 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                     "bowler": row["bowler"] or ""
                 }
 
-        # Get playing XI
         cursor.execute("SELECT country_id FROM countries WHERE country_name = ?", (innings["batting_team"],))
         batting_team_id = cursor.fetchone()["country_id"]
 
@@ -1846,16 +1846,10 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             FROM players p
             JOIN player_match_roles pmr ON pmr.player_id = p.player_id
             WHERE pmr.match_id = ? AND pmr.team_id = ?
-            ORDER BY pmr.batting_position ASC
         """, (match_id, batting_team_id))
         playing_xi = cursor.fetchall()
+        role_map = {p["player_id"]: {"is_captain": p["is_captain"], "is_keeper": p["is_keeper"]} for p in playing_xi}
 
-        role_map = {
-            p["player_id"]: {"is_captain": p["is_captain"], "is_keeper": p["is_keeper"]}
-            for p in playing_xi
-        }
-
-        # Active batters from partnership
         cursor.execute("""
             SELECT batter1_id, batter2_id
             FROM partnerships
@@ -1867,16 +1861,13 @@ def get_match_scorecard(payload: MatchScorecardPayload):
         if partnership_row:
             active_batters = {partnership_row["batter1_id"], partnership_row["batter2_id"]}
 
-        # IDs of players who batted
         batted_ids = {row["player_id"] for row in batting_data}
         batting_card = []
 
-        # Add batters who faced a ball
         for row in batting_data:
             pid = row["player_id"]
             dismissal = dismissal_map.get(pid, {})
             dismissal_type = (dismissal.get("dismissal_type") or "").lower()
-
             fielder_text = ""
             bowler_text = ""
 
@@ -1910,7 +1901,6 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                 "is_keeper": role_map.get(pid, {}).get("is_keeper", 0)
             })
 
-        # Add players who have not batted
         for player in playing_xi:
             pid = player["player_id"]
             if pid not in batted_ids:
@@ -1928,32 +1918,29 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                     "is_keeper": player["is_keeper"]
                 })
 
-
-
-        # Bowling Card
+        # Bowling Card ordered by appearance
         cursor.execute("""
             SELECT 
                 p.player_name,
+                MIN(be.ball_id) AS first_ball_id,
                 SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
                 SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dots,
-                SUM(
-                    be.runs + 
-                    IFNULL(be.wides, 0) + 
-                    IFNULL(be.no_balls, 0)
-                ) AS runs,
-                SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+                SUM(be.runs + IFNULL(be.wides, 0) + IFNULL(be.no_balls, 0)) AS runs,
+                SUM(CASE 
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(be.dismissal_type) NOT IN ('not out', 'run out', 'retired hurt', 'retired out')
+                    THEN 1 ELSE 0 END) AS wickets,
                 SUM(be.wides) AS wides,
                 SUM(be.no_balls) AS no_balls
             FROM ball_events be
             JOIN players p ON be.bowler_id = p.player_id
             WHERE be.innings_id = ?
             GROUP BY be.bowler_id
-
+            ORDER BY first_ball_id ASC
         """, (innings_id,))
 
         bowling_card = []
         for row in cursor.fetchall():
-            row = dict(row)
             legal_balls = row["legal_balls"]
             overs = f"{legal_balls // 6}.{legal_balls % 6}"
             economy = round(row["runs"] / (legal_balls / 6), 2) if legal_balls else 0

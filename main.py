@@ -3499,6 +3499,7 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
 
     # ✅ Final chance = expected wicket events + real dismissals
     chances_made = chances_from_expected + wickets
+    real_wickets = expected_wickets + wickets
 
     real_econ = (expected_runs / (balls / 6)) if balls else 0
     real_sr = (balls / expected_wickets) if expected_wickets else None
@@ -3510,7 +3511,7 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
             "real_runs_conceded": round(expected_runs, 2),
             "chances_made": round(chances_made, 2),
             "wickets": wickets,
-            "real_wickets": round(expected_wickets, 2),
+            "real_wickets": real_wickets,
             "real_economy": round(real_econ, 2) if balls else "–",
             "real_strike_rate": round(real_sr, 2) if real_sr else "–"
         }

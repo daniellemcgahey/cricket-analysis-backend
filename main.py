@@ -3502,7 +3502,7 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
     real_wickets = expected_wickets + wickets
 
     real_econ = (expected_runs / (balls / 6)) if balls else 0
-    real_sr = (balls / expected_wickets) if expected_wickets else None
+    real_sr = (balls / real_wickets) if real_wickets else None
 
     return {
         "pitch_map": pitch_map,

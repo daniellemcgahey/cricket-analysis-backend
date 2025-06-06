@@ -1817,7 +1817,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
             SELECT 
                 be.batter_id,
                 SUM(be.runs) AS runs,
-                COUNT(*) AS balls,
+                COUNT(CASE WHEN be.wide = 0 THEN 1 END) AS balls,
                 SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
                 SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes
             FROM ball_events be

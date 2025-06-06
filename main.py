@@ -3888,12 +3888,12 @@ async def tournament_stats(request: Request):
     query = """
         SELECT 
             m.venue,
-            AVG(CASE WHEN i.innings_number = 1 THEN i.total_runs END) AS avg_score,
+            AVG(CASE WHEN i.innings = 1 THEN i.total_runs END) AS avg_score,
             SUM(CASE 
-                WHEN i.innings_number = 1 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
+                WHEN i.innings = 1 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
                 THEN 1 ELSE 0 END) AS bat1_wins,
             SUM(CASE 
-                WHEN i.innings_number = 2 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
+                WHEN i.innings = 2 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
                 THEN 1 ELSE 0 END) AS bat2_wins,
             COUNT(DISTINCT m.match_id) AS total_matches
         FROM matches m

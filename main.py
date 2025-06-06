@@ -3566,11 +3566,15 @@ def get_batting_leaderboards(payload: dict):
         return {"leaderboards": {}}
 
 
+    # Most Runs
     cursor.execute(f"""
         SELECT 
             p.player_name AS name,
             COUNT(DISTINCT i.match_id) AS matches,
-            COUNT(DISTINCT CASE WHEN be.batter_id = p.player_id OR be.non_striker_id = p.player_id THEN i.innings_id END) AS innings,
+            COUNT(DISTINCT CASE 
+                WHEN be.batter_id = p.player_id OR be.non_striker_id = p.player_id 
+                THEN i.innings_id 
+            END) AS innings,
             SUM(CASE WHEN be.batter_id = p.player_id THEN be.runs ELSE 0 END) AS runs
         FROM players p
         JOIN ball_events be ON p.player_id IN (be.batter_id, be.non_striker_id)
@@ -3583,34 +3587,80 @@ def get_batting_leaderboards(payload: dict):
     """, [tournament_id] + country_names)
     leaderboards["Most Runs"] = [dict(row) for row in cursor.fetchall()]
 
-    # High Scores
-    cursor.execute(f"""
-        SELECT p.player_name AS name, MAX(be.runs) AS high_score
-        FROM ball_events be
-        JOIN players p ON be.batter_id = p.player_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
-        GROUP BY be.batter_id
-        ORDER BY high_score DESC LIMIT 10
-    """, [tournament_id] + country_names)
-    leaderboards["High Scores"] = [dict(row) for row in cursor.fetchall()]
 
-    # Highest Averages (min 3 innings)
+    # High Scores (allow repeated players, include not out status)
     cursor.execute(f"""
-        SELECT p.player_name AS name,
-            COUNT(*) AS innings,
-            SUM(be.runs)*1.0 / NULLIF(SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END), 0) AS average
+        SELECT 
+            p.player_name AS name,
+            SUM(be.runs) AS runs,
+            CASE 
+                WHEN dismissed.dismissed_player_id IS NULL 
+                    AND COALESCE(nbd_outs.out_type, '') IS NULL 
+                THEN 1 ELSE 0 
+            END AS not_out
         FROM ball_events be
-        JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.batter_id = p.player_id
+        LEFT JOIN (
+            SELECT innings_id, dismissed_player_id
+            FROM ball_events
+            WHERE dismissed_player_id IS NOT NULL
+        ) AS dismissed
+        ON dismissed.dismissed_player_id = be.batter_id AND dismissed.innings_id = i.innings_id
+        LEFT JOIN (
+            SELECT innings_id, player_id, dismissal_type AS out_type
+            FROM non_ball_dismissals
+            WHERE LOWER(dismissal_type) != 'retired not out'
+        ) AS nbd_outs
+        ON nbd_outs.player_id = be.batter_id AND nbd_outs.innings_id = i.innings_id
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
+        GROUP BY be.batter_id, i.match_id
+        ORDER BY runs DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+    leaderboards["High Scores"] = [
+        {
+            "name": row["name"] + ("*" if row["not_out"] else ""),
+            "high_score": row["runs"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+    # Highest Averages
+    cursor.execute(f"""
+        SELECT 
+            p.player_name AS name,
+            SUM(be.runs) AS total_runs,
+            COUNT(DISTINCT CASE 
+                WHEN be.dismissed_player_id = p.player_id THEN i.innings_id
+                WHEN nbd.player_id IS NOT NULL THEN nbd.innings_id
+            END) AS dismissals,
+            ROUND(
+                1.0 * SUM(be.runs) / 
+                NULLIF(COUNT(DISTINCT CASE 
+                    WHEN be.dismissed_player_id = p.player_id THEN i.innings_id
+                    WHEN nbd.player_id IS NOT NULL THEN nbd.innings_id
+                END), 0), 
+                2
+            ) AS average
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.batter_id = p.player_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
+        LEFT JOIN (
+            SELECT innings_id, player_id
+            FROM non_ball_dismissals
+            WHERE LOWER(dismissal_type) != 'retired not out'
+        ) AS nbd ON nbd.innings_id = i.innings_id AND nbd.player_id = p.player_id
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
         GROUP BY be.batter_id
-        HAVING COUNT(*) >= 3 AND average IS NOT NULL
-        ORDER BY average DESC LIMIT 10
+        HAVING dismissals > 0
+        ORDER BY average DESC
+        LIMIT 10
     """, [tournament_id] + country_names)
     leaderboards["Highest Averages"] = [dict(row) for row in cursor.fetchall()]
+
 
 
     # Highest Strike Rates (min 30 balls faced, excluding wides)
@@ -3633,33 +3683,64 @@ def get_batting_leaderboards(payload: dict):
     cursor.execute(f"""
         SELECT p.player_name AS name, COUNT(*) AS fifties
         FROM (
-        SELECT be.batter_id, i.match_id, SUM(be.runs) AS runs
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
-        GROUP BY be.batter_id, i.match_id
-        HAVING runs >= 50
+            SELECT 
+                be.batter_id,
+                i.match_id,
+                SUM(be.runs) AS runs
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
+            GROUP BY be.batter_id, i.match_id
+            HAVING SUM(be.runs) >= 50
         ) AS sub
         JOIN players p ON sub.batter_id = p.player_id
         GROUP BY sub.batter_id
-        ORDER BY fifties DESC LIMIT 10
+        ORDER BY fifties DESC
+        LIMIT 10
     """, [tournament_id] + country_names)
     leaderboards["Most Fifties and Over"] = [dict(row) for row in cursor.fetchall()]
 
+
     # Most Ducks
     cursor.execute(f"""
-        SELECT p.player_name AS name, COUNT(*) AS ducks
-        FROM ball_events be
-        JOIN players p ON be.batter_id = p.player_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        WHERE be.runs = 0 AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
-            AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
-        GROUP BY be.batter_id
+        SELECT 
+            p.player_name AS name,
+            COUNT(*) AS ducks
+        FROM (
+            SELECT 
+                be.batter_id,
+                i.innings_id
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            LEFT JOIN non_ball_dismissals nbd 
+                ON nbd.innings_id = i.innings_id AND nbd.player_id = be.batter_id
+            WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
+            GROUP BY be.batter_id, i.innings_id
+            HAVING 
+                SUM(CASE WHEN be.batter_id = be.batter_id THEN be.runs ELSE 0 END) = 0
+                AND (
+                    MAX(CASE 
+                        WHEN be.dismissed_player_id = be.batter_id 
+                            AND be.dismissal_type IS NOT NULL 
+                            AND LOWER(be.dismissal_type) != 'not out'
+                        THEN 1 ELSE 0 END) = 1
+                    OR (
+                        MAX(CASE 
+                            WHEN nbd.dismissal_type IS NOT NULL 
+                                AND LOWER(nbd.dismissal_type) NOT IN ('retired not out') 
+                            THEN 1 ELSE 0 END) = 1
+                    )
+                )
+        ) AS sub
+        JOIN players p ON sub.batter_id = p.player_id
+        GROUP BY sub.batter_id
         ORDER BY ducks DESC LIMIT 10
     """, [tournament_id] + country_names)
+
     leaderboards["Most Ducks"] = [dict(row) for row in cursor.fetchall()]
+
 
     # Most Fours
     cursor.execute(f"""
@@ -3687,35 +3768,49 @@ def get_batting_leaderboards(payload: dict):
     """, [tournament_id] + country_names)
     leaderboards["Most Sixes"] = [dict(row) for row in cursor.fetchall()]
 
-    # Average Intent
+    # Highest Average Intent (Min 30 Balls Faced)
     cursor.execute(f"""
-        SELECT p.player_name AS name, ROUND(AVG(be.batting_intent_score), 2) AS average_intent
+        SELECT 
+            p.player_name AS name,
+            ROUND(AVG(be.batting_intent_score), 2) AS average_intent,
+            COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls_faced
         FROM ball_events be
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.batting_intent_score IS NOT NULL AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
+        WHERE 
+            be.batting_intent_score IS NOT NULL 
+            AND m.tournament_id = ?
+            AND i.batting_team IN ({','.join('?' * len(country_names))})
         GROUP BY be.batter_id
+        HAVING balls_faced >= 30
         ORDER BY average_intent DESC LIMIT 10
     """, [tournament_id] + country_names)
+
     leaderboards["Highest Average Intent"] = [dict(row) for row in cursor.fetchall()]
 
-    # Scoring Shot % (excluding wides)
+
+    # Scoring Shot % (Min 30 Balls Faced, excluding wides)
     cursor.execute(f"""
-        SELECT p.player_name AS name,
+        SELECT 
+            p.player_name AS name,
             ROUND(
                 100.0 * SUM(CASE WHEN be.runs > 0 AND be.wides = 0 THEN 1 ELSE 0 END) /
                 NULLIF(SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END), 0), 2
-            ) AS scoring_shot_percentage
+            ) AS scoring_shot_percentage,
+            SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END) AS balls_faced
         FROM ball_events be
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
         GROUP BY be.batter_id
+        HAVING balls_faced >= 30
         ORDER BY scoring_shot_percentage DESC LIMIT 10
     """, [tournament_id] + country_names)
+
     leaderboards["Highest Scoring Shot %"] = [dict(row) for row in cursor.fetchall()]
+
 
 
 

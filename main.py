@@ -3590,10 +3590,11 @@ def get_batting_leaderboards(payload: dict):
         JOIN matches m ON i.match_id = m.match_id
         WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
         GROUP BY be.batter_id
-        HAVING innings >= 3 AND average IS NOT NULL
+        HAVING COUNT(*) >= 3 AND average IS NOT NULL
         ORDER BY average DESC LIMIT 10
     """, [tournament_id] + country_ids)
     leaderboards["Highest Averages"] = [dict(row) for row in cursor.fetchall()]
+
 
     # Highest Strike Rates (min 30 balls faced, excluding wides)
     cursor.execute(f"""

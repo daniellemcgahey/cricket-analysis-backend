@@ -3594,30 +3594,29 @@ def get_batting_leaderboards(payload: dict):
             p.player_name AS name,
             SUM(be.runs) AS runs,
             CASE 
-                WHEN dismissed.dismissed_player_id IS NULL 
-                    AND COALESCE(nbd_outs.out_type, '') IS NULL 
-                THEN 1 ELSE 0 
+                WHEN bd.dismissed_player_id IS NULL AND nbd.dismissal_type IS NULL
+                THEN 1 ELSE 0
             END AS not_out
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
         JOIN players p ON be.batter_id = p.player_id
         LEFT JOIN (
             SELECT innings_id, dismissed_player_id
             FROM ball_events
             WHERE dismissed_player_id IS NOT NULL
-        ) AS dismissed
-        ON dismissed.dismissed_player_id = be.batter_id AND dismissed.innings_id = i.innings_id
+        ) bd ON bd.dismissed_player_id = be.batter_id AND bd.innings_id = i.innings_id
         LEFT JOIN (
-            SELECT innings_id, player_id, dismissal_type AS out_type
+            SELECT innings_id, player_id, dismissal_type
             FROM non_ball_dismissals
             WHERE LOWER(dismissal_type) != 'retired not out'
-        ) AS nbd_outs
-        ON nbd_outs.player_id = be.batter_id AND nbd_outs.innings_id = i.innings_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?' * len(country_names))})
+        ) nbd ON nbd.player_id = be.batter_id AND nbd.innings_id = i.innings_id
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join(['?'] * len(country_names))})
         GROUP BY be.batter_id, i.match_id
         ORDER BY runs DESC
         LIMIT 10
     """, [tournament_id] + country_names)
+
     leaderboards["High Scores"] = [
         {
             "name": row["name"] + ("*" if row["not_out"] else ""),

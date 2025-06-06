@@ -3566,16 +3566,18 @@ def get_batting_leaderboards(payload: dict):
         return {"leaderboards": {}}
 
 
-    # Most Runs
     cursor.execute(f"""
-        SELECT p.player_name AS name, COUNT(DISTINCT i.match_id) AS matches,
-            COUNT(*) AS innings, SUM(be.runs) AS runs
-        FROM ball_events be
-        JOIN players p ON be.batter_id = p.player_id
+        SELECT 
+            p.player_name AS name,
+            COUNT(DISTINCT i.match_id) AS matches,
+            COUNT(DISTINCT CASE WHEN be.batter_id = p.player_id OR be.non_striker_id = p.player_id THEN i.innings_id END) AS innings,
+            SUM(CASE WHEN be.batter_id = p.player_id THEN be.runs ELSE 0 END) AS runs
+        FROM players p
+        JOIN ball_events be ON p.player_id IN (be.batter_id, be.non_striker_id)
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
-        GROUP BY be.batter_id
+        GROUP BY p.player_id
         HAVING runs > 0
         ORDER BY runs DESC LIMIT 10
     """, [tournament_id] + country_names)

@@ -3517,6 +3517,183 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
         }
     }
 
+@app.post("/tournament-leaders/batting")
+def get_batting_leaderboards(payload: dict):
+
+    team_category = payload.get("team_category")
+    tournament = payload.get("tournament")
+    countries = payload.get("countries", [])
+
+    if not team_category or not tournament or not countries:
+        raise HTTPException(status_code=400, detail="Missing team_category, tournament, or countries.")
+
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Resolve tournament ID
+    cursor.execute("SELECT tournament_id FROM tournaments WHERE tournament_name = ?", (tournament,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Tournament not found.")
+    tournament_id = row["tournament_id"]
+
+    # Resolve country IDs
+    placeholders = ','.join('?' for _ in countries)
+    cursor.execute(f"SELECT country_id, country_name FROM countries WHERE country_name IN ({placeholders})", countries)
+    country_rows = cursor.fetchall()
+    country_id_map = {r["country_id"]: r["country_name"] for r in country_rows}
+    if not country_id_map:
+        raise HTTPException(status_code=404, detail="Countries not found.")
+
+    country_ids = list(country_id_map.keys())
+
+    leaderboards = {}
+
+    # Most Runs
+    cursor.execute(f"""
+        SELECT p.player_name AS name, COUNT(DISTINCT i.match_id) AS matches,
+               COUNT(*) AS innings, SUM(be.runs) AS runs
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        HAVING runs > 0
+        ORDER BY runs DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Most Runs"] = [dict(row) for row in cursor.fetchall()]
+
+    # High Scores
+    cursor.execute(f"""
+        SELECT p.player_name AS name, MAX(be.runs) AS high_score
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY high_score DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["High Scores"] = [dict(row) for row in cursor.fetchall()]
+
+    # Highest Averages (min 3 innings)
+    cursor.execute(f"""
+        SELECT p.player_name AS name,
+               COUNT(*) AS innings,
+               SUM(be.runs)*1.0 / NULLIF(SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END), 0) AS average
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        HAVING innings >= 3 AND average IS NOT NULL
+        ORDER BY average DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Highest Averages"] = [dict(row) for row in cursor.fetchall()]
+
+    # Highest Strike Rates (min 30 balls faced, excluding wides)
+    cursor.execute(f"""
+        SELECT p.player_name AS name,
+            SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END) AS balls_faced,
+            ROUND(SUM(be.runs)*100.0 / NULLIF(SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END), 0), 2) AS strike_rate
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        HAVING balls_faced >= 30
+        ORDER BY strike_rate DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Highest Strike Rates"] = [dict(row) for row in cursor.fetchall()]
+
+    # Most Fifties and Over (50+ runs in an innings)
+    cursor.execute(f"""
+        SELECT p.player_name AS name, COUNT(*) AS fifties
+        FROM (
+          SELECT be.batter_id, i.match_id, SUM(be.runs) AS runs
+          FROM ball_events be
+          JOIN innings i ON be.innings_id = i.innings_id
+          WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+          GROUP BY be.batter_id, i.match_id
+          HAVING runs >= 50
+        ) AS sub
+        JOIN players p ON sub.batter_id = p.player_id
+        GROUP BY sub.batter_id
+        ORDER BY fifties DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Most Fifties and Over"] = [dict(row) for row in cursor.fetchall()]
+
+    # Most Ducks
+    cursor.execute(f"""
+        SELECT p.player_name AS name, COUNT(*) AS ducks
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.runs = 0 AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
+              AND i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY ducks DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Most Ducks"] = [dict(row) for row in cursor.fetchall()]
+
+    # Most Fours
+    cursor.execute(f"""
+        SELECT p.player_name AS name, COUNT(*) AS fours
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.runs = 4 AND i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY fours DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Most Fours"] = [dict(row) for row in cursor.fetchall()]
+
+    # Most Sixes
+    cursor.execute(f"""
+        SELECT p.player_name AS name, COUNT(*) AS sixes
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.runs = 6 AND i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY sixes DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Most Sixes"] = [dict(row) for row in cursor.fetchall()]
+
+    # Average Intent
+    cursor.execute(f"""
+        SELECT p.player_name AS name, ROUND(AVG(be.batting_intent_score), 2) AS average_intent
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE be.batting_intent_score IS NOT NULL AND i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY average_intent DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Highest Average Intent"] = [dict(row) for row in cursor.fetchall()]
+
+    # Scoring Shot % (excluding wides)
+    cursor.execute(f"""
+        SELECT p.player_name AS name,
+            ROUND(
+                100.0 * SUM(CASE WHEN be.runs > 0 AND be.wides = 0 THEN 1 ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN be.wides = 0 THEN 1 ELSE 0 END), 0), 2
+            ) AS scoring_shot_percentage
+        FROM ball_events be
+        JOIN players p ON be.batter_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        GROUP BY be.batter_id
+        ORDER BY scoring_shot_percentage DESC LIMIT 10
+    """, [tournament_id] + country_ids)
+    leaderboards["Highest Scoring Shot %"] = [dict(row) for row in cursor.fetchall()]
+
+
+    conn.close()
+    return leaderboards
+
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

@@ -3551,6 +3551,21 @@ def get_batting_leaderboards(payload: dict):
 
     leaderboards = {}
 
+    # Convert country_ids to country_names
+    if country_ids:
+        placeholders = ",".join("?" * len(country_ids))
+        cursor.execute(f"""
+            SELECT country_name FROM countries
+            WHERE country_id IN ({placeholders})
+        """, country_ids)
+        country_names = [row["country_name"] for row in cursor.fetchall()]
+    else:
+        country_names = []
+
+    if not country_names:
+        return {"leaderboards": {}}
+
+
     # Most Runs
     cursor.execute(f"""
         SELECT p.player_name AS name, COUNT(DISTINCT i.match_id) AS matches,
@@ -3559,11 +3574,11 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         HAVING runs > 0
         ORDER BY runs DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Most Runs"] = [dict(row) for row in cursor.fetchall()]
 
     # High Scores
@@ -3573,10 +3588,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY high_score DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["High Scores"] = [dict(row) for row in cursor.fetchall()]
 
     # Highest Averages (min 3 innings)
@@ -3588,11 +3603,11 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         HAVING COUNT(*) >= 3 AND average IS NOT NULL
         ORDER BY average DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Highest Averages"] = [dict(row) for row in cursor.fetchall()]
 
 
@@ -3605,11 +3620,11 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         HAVING balls_faced >= 30
         ORDER BY strike_rate DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Highest Strike Rates"] = [dict(row) for row in cursor.fetchall()]
 
     # Most Fifties and Over
@@ -3620,14 +3635,14 @@ def get_batting_leaderboards(payload: dict):
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id, i.match_id
         HAVING runs >= 50
         ) AS sub
         JOIN players p ON sub.batter_id = p.player_id
         GROUP BY sub.batter_id
         ORDER BY fifties DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Most Fifties and Over"] = [dict(row) for row in cursor.fetchall()]
 
     # Most Ducks
@@ -3638,10 +3653,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE be.runs = 0 AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
-            AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+            AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY ducks DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Most Ducks"] = [dict(row) for row in cursor.fetchall()]
 
     # Most Fours
@@ -3651,10 +3666,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.runs = 4 AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE be.runs = 4 AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY fours DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Most Fours"] = [dict(row) for row in cursor.fetchall()]
 
     # Most Sixes
@@ -3664,10 +3679,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.runs = 6 AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE be.runs = 6 AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY sixes DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Most Sixes"] = [dict(row) for row in cursor.fetchall()]
 
     # Average Intent
@@ -3677,10 +3692,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.batting_intent_score IS NOT NULL AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE be.batting_intent_score IS NOT NULL AND m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY average_intent DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Highest Average Intent"] = [dict(row) for row in cursor.fetchall()]
 
     # Scoring Shot % (excluding wides)
@@ -3694,10 +3709,10 @@ def get_batting_leaderboards(payload: dict):
         JOIN players p ON be.batter_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_ids))})
+        WHERE m.tournament_id = ? AND i.batting_team IN ({','.join('?'*len(country_names))})
         GROUP BY be.batter_id
         ORDER BY scoring_shot_percentage DESC LIMIT 10
-    """, [tournament_id] + country_ids)
+    """, [tournament_id] + country_names)
     leaderboards["Highest Scoring Shot %"] = [dict(row) for row in cursor.fetchall()]
 
 

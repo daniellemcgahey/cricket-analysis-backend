@@ -3858,63 +3858,81 @@ def get_venue_options(team_category: str = None, tournament: str = None):
         "times": sorted(times)
     }
 
-@app.post("/tournament-stats")
-def tournament_stats(payload: dict):
-    import sqlite3, os
 
-    team_category = payload["team_category"]
-    tournament = payload["tournament"]
-    country = payload["country"]
-    ground = payload.get("venue", "").strip()
-    time = payload.get("time_of_day", "").strip()
+@app.post("/tournament-stats")
+async def tournament_stats(request: Request):
+    payload = await request.json()
+    tournament = payload.get("tournament")
+    team_category = payload.get("team_category")
+    countries = payload.get("country", [])         # list[str]
+    venues = payload.get("venue", [])              # list[str]
+    times = payload.get("time_of_day", [])         # list[str]
+
+    # 🧠 Combine venue and time into actual `m.venue` values
+    venue_params = []
+    if venues and times:
+        for v in venues:
+            for t in times:
+                venue_params.append(f"{v}, {t}")
+    elif venues:
+        venue_params = [v.strip() for v in venues]
+    elif times:
+        # rare fallback: we want all venues with these times (partial match)
+        pass  # optional: not supported unless needed
 
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Build venue filter logic
-    venue_filter = ""
-    venue_params = []
-
-    if ground and time:
-        venue_filter = "AND m.venue = ?"
-        venue_params = [f"{ground}, {time}"]
-    elif ground:
-        venue_filter = "AND m.venue LIKE ?"
-        venue_params = [f"{ground},%"]
-    elif time:
-        venue_filter = "AND m.venue LIKE ?"
-        venue_params = [f"%,{time}"]
-
-    # Final SQL query
-    cursor.execute(f"""
+    query = """
         SELECT 
             m.venue,
-            ROUND(AVG(CASE WHEN i.innings = 1 THEN i.total_runs END), 1) AS avg_score,
+            AVG(CASE WHEN i.innings_number = 1 THEN i.total_runs END) AS avg_score,
             SUM(CASE 
-                WHEN i.innings = 1 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
-                THEN 1 ELSE 0 END
-            ) AS bat1_wins,
+                WHEN i.innings_number = 1 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
+                THEN 1 ELSE 0 END) AS bat1_wins,
             SUM(CASE 
-                WHEN i.innings = 2 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
-                THEN 1 ELSE 0 END
-            ) AS bat2_wins,
+                WHEN i.innings_number = 2 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
+                THEN 1 ELSE 0 END) AS bat2_wins,
             COUNT(DISTINCT m.match_id) AS total_matches
         FROM matches m
         JOIN innings i ON m.match_id = i.match_id
-        JOIN countries c ON c.country_name = i.batting_team
+        JOIN countries c ON i.batting_team = c.country_name
         JOIN tournaments t ON m.tournament_id = t.tournament_id
         WHERE t.tournament_name = ?
-            AND c.team_category = ?
-            AND c.country_name = ?
-            {venue_filter}
-        GROUP BY m.venue
-        ORDER BY m.venue
-    """, [tournament, team_category, country] + venue_params)
+          AND c.team_category = ?
+    """
 
+    params = [tournament, team_category]
+
+    if countries:
+        placeholders = ",".join(["?"] * len(countries))
+        query += f" AND c.country_name IN ({placeholders})"
+        params.extend(countries)
+
+    if venue_params:
+        placeholders = ",".join(["?"] * len(venue_params))
+        query += f" AND m.venue IN ({placeholders})"
+        params.extend(venue_params)
+
+    query += " GROUP BY m.venue ORDER BY m.venue"
+
+    cursor.execute(query, params)
     rows = cursor.fetchall()
-    return [dict(row) for row in rows]
+
+    result = []
+    for row in rows:
+        result.append({
+            "venue": row["venue"],
+            "avg_score": round(row["avg_score"], 2) if row["avg_score"] is not None else None,
+            "bat1_wins": row["bat1_wins"],
+            "bat2_wins": row["bat2_wins"],
+            "total_matches": row["total_matches"]
+        })
+
+    return JSONResponse(result)
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

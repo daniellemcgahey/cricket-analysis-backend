@@ -3891,7 +3891,7 @@ def tournament_stats(payload: dict):
     cursor.execute(f"""
         SELECT 
             m.venue,
-            ROUND(AVG(CASE WHEN i.innings_number = 1 THEN i.total_runs END), 1) AS avg_score,
+            ROUND(AVG(CASE WHEN i.innings = 1 THEN i.total_runs END), 1) AS avg_score,
             SUM(CASE 
                 WHEN i.innings = 1 AND i.batting_team = c.country_name AND m.winner_id = c.country_id 
                 THEN 1 ELSE 0 END

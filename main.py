@@ -3901,10 +3901,9 @@ async def tournament_stats(request: Request):
         JOIN countries c ON i.batting_team = c.country_name
         JOIN tournaments t ON m.tournament_id = t.tournament_id
         WHERE t.tournament_name = ?
-          AND c.team_category = ?
     """
+    params = [tournament]
 
-    params = [tournament, team_category]
 
     if countries:
         placeholders = ",".join(["?"] * len(countries))

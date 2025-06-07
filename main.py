@@ -3816,7 +3816,7 @@ def get_batting_leaderboards(payload: dict):
     return leaderboards
 
 @app.get("/venue-options")
-def get_venue_options(team_category: str = None, tournament: str = None):
+def get_venue_options(tournament: str = None):
     import sqlite3, os
 
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -3830,10 +3830,6 @@ def get_venue_options(team_category: str = None, tournament: str = None):
         WHERE 1=1
     """
     params = []
-
-    if team_category:
-        query += " AND (team_a IN (SELECT country_id FROM countries WHERE team_category = ?) OR team_b IN (SELECT country_id FROM countries WHERE team_category = ?))"
-        params += [team_category, team_category]
 
     if tournament:
         query += " AND tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)"
@@ -3857,6 +3853,7 @@ def get_venue_options(team_category: str = None, tournament: str = None):
         "grounds": sorted(grounds),
         "times": sorted(times)
     }
+
 
 
 @app.post("/tournament-stats")

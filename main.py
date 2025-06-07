@@ -4512,7 +4512,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
               WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
           )
         GROUP BY fc.fielder_id
-        HAVING total_fielding_events > 0
+        HAVING total_fielding_events > 20
         ORDER BY clean_hands_pct DESC
         LIMIT 10
     """, country_names + [tournament_id])
@@ -4712,7 +4712,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
           AND i.bowling_team IN ({placeholders})
           AND m.tournament_id = ?
         GROUP BY fc.fielder_id
-        HAVING total_fielding_events > 0
+        HAVING total_fielding_events > 30
         ORDER BY wk_clean_hands_pct DESC
         LIMIT 10;
     """, country_names + [tournament_id])

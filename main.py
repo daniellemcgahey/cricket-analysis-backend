@@ -4292,8 +4292,8 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         {
             "name": row["name"],
             "false_shots": row["false_shots"],
-            "deliveries": row["total_deliveries"],
-            "false_shot_percent": round((row["false_shots"] / row["total_deliveries"]) * 100, 1)
+            "deliveries": row["total_balls"],
+            "false_shot_percent": row["false_shot_percent"]
         }
         for row in cursor.fetchall()
     ]

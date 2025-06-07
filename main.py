@@ -4247,24 +4247,35 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         SELECT 
             be.bowler_id,
             p.player_name AS name,
-            COUNT(*) AS false_shots
+            COUNT(CASE
+                WHEN (be.wides IS NULL OR be.wides = 0) AND (
+                    (be.dismissed_player_id IS NOT NULL 
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
+                    OR be.edged = 1
+                    OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
+                )
+            END) * 100.0 / COUNT(CASE WHEN be.wides IS NULL OR be.wides = 0 THEN 1 END) AS false_shot_percentage,
+            COUNT(CASE
+                WHEN (be.wides IS NULL OR be.wides = 0) AND (
+                    (be.dismissed_player_id IS NOT NULL 
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
+                    OR be.edged = 1
+                    OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
+                )
+            END) AS false_shots,
+            COUNT(CASE WHEN be.wides IS NULL OR be.wides = 0 THEN 1 END) AS legal_deliveries
         FROM ball_events be
         JOIN players p ON be.bowler_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE 
-            m.tournament_id = ?
-            AND i.bowling_team IN ({placeholders})
-            AND (be.wides IS NULL OR be.wides = 0)
-            AND (
-                (be.dismissed_player_id IS NOT NULL 
-                AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
-                OR be.edged = 1
-                OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
-            )
+            m.tournament_id = 2
+            AND i.bowling_team = 'Brasil Women'
         GROUP BY be.bowler_id
-        ORDER BY false_shots DESC
-        LIMIT 10
+        HAVING legal_deliveries >= 30
+        ORDER BY false_shot_percentage DESC
+        LIMIT 10;
+
     """, [tournament_id] + country_names)
 
     leaderboards["Most False Shots"] = [

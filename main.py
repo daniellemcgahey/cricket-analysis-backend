@@ -4242,6 +4242,40 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
+    # Most False Shots
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            COUNT(*) AS false_shots
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND (be.wides IS NULL OR be.wides = 0)
+            AND (
+                (be.dismissed_player_id IS NOT NULL 
+                AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
+                OR be.edged = 1
+                OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
+            )
+        GROUP BY be.bowler_id
+        ORDER BY false_shots DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Most False Shots"] = [
+        {
+            "name": row["name"],
+            "false_shots": row["false_shots"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+
 
 
 

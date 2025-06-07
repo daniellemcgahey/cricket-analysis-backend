@@ -212,6 +212,11 @@ class TournamentBowlingLeadersPayload(BaseModel):
     tournament: str
     countries: List[str]
 
+class TournamentFieldingLeadersPayload(BaseModel):
+    team_category: str
+    tournament: str
+    countries: List[str]
+
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
     country1_stats = get_country_stats(
@@ -4305,24 +4310,424 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
 
     return leaderboards
 
-def _format_player_row(cursor, row, country_map, include_match=False):
-    player_id = row["bowler_id"]
-    cursor.execute("SELECT player_name, country_id FROM players WHERE player_id = ?", (player_id,))
-    player = cursor.fetchone()
-    name = player["player_name"] if player else "Unknown"
-    team = country_map.get(player["country_id"], "") if player else ""
-    formatted = {
-        "id": player_id,
-        "name": name,
-        "team": team
-    }
-    for key in row.keys():
-        if key not in ["bowler_id"]:
-            formatted[key] = row[key]
-    if include_match:
-        formatted["match_id"] = row["match_id"]
-    return formatted
+@app.post("/tournament-leaders/fielding")
+def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
+    # Resolve tournament_id
+    cursor.execute("SELECT tournament_id FROM tournaments WHERE tournament_name = ?", (payload.tournament,))
+    tournament_row = cursor.fetchone()
+    if not tournament_row:
+        return {}
+    tournament_id = tournament_row["tournament_id"]
+
+    # Country filter
+    country_names = payload.countries
+    placeholders = ','.join(['?'] * len(country_names))
+
+    leaderboards = {}
+
+    # 1. Most Catches (excluding wicketkeepers)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS catches
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id = 2
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+          AND fc.fielder_id NOT IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+        GROUP BY fc.fielder_id
+        ORDER BY catches DESC
+        LIMIT 10
+    """, country_names + [tournament_id])
+
+    leaderboards["Most Catches"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["catches"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 2. Most Run Outs (excluding wicketkeepers)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS run_outs
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id = 3
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+          AND fc.fielder_id NOT IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+        GROUP BY fc.fielder_id
+        ORDER BY run_outs DESC
+        LIMIT 10
+    """, country_names + [tournament_id])
+
+    leaderboards["Most Run Outs"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["run_outs"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 3. Most Dismissals (Catches + Run Outs, excluding wicketkeepers)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS dismissals
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id IN (2, 3)
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+          AND fc.fielder_id NOT IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+        GROUP BY fc.fielder_id
+        ORDER BY dismissals DESC
+        LIMIT 10
+    """, country_names + [tournament_id])
+
+    leaderboards["Most Dismissals"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["dismissals"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+        # 4. Best Conversion Rate (excluding wicketkeepers, % format)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            SUM(CASE WHEN bfe.event_id IN (2, 3) THEN 1 ELSE 0 END) AS dismissals,
+            SUM(CASE WHEN bfe.event_id IN (6, 7, 8) THEN 1 ELSE 0 END) AS misses,
+            ROUND(
+                100.0 * SUM(CASE WHEN bfe.event_id IN (2, 3) THEN 1 ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN bfe.event_id IN (2, 3, 6, 7, 8) THEN 1 ELSE 0 END), 0),
+                1
+            ) AS conversion_rate
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+          AND fc.fielder_id NOT IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+        GROUP BY fc.fielder_id
+        HAVING (dismissals + misses) > 0
+        ORDER BY conversion_rate DESC
+        LIMIT 10
+    """, country_names + [tournament_id])
+
+    leaderboards["Best Conversion Rate"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["conversion_rate"]  # % format (e.g. 87.5)
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 5. Cleanest Hands (excluding wicketkeepers)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) AS clean_pickups,
+            COUNT(*) AS total_fielding_events,
+            ROUND(
+                100.0 * SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) / COUNT(*),
+                1
+            ) AS clean_hands_pct
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+          AND fc.fielder_id NOT IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+        GROUP BY fc.fielder_id
+        HAVING total_fielding_events > 0
+        ORDER BY clean_hands_pct DESC
+        LIMIT 10
+    """, country_names + [tournament_id])
+
+    leaderboards["Cleanest Hands"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["clean_hands_pct"]  # % format
+        }
+        for row in cursor.fetchall()
+    ]
+
+        # 6. WK Catches (only 'catching' by known keepers)
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS wk_catches
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id = 2
+          AND LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
+          AND fc.fielder_id IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+        GROUP BY fc.fielder_id
+        ORDER BY wk_catches DESC
+        LIMIT 10;
+    """, country_names + [tournament_id])
+
+    leaderboards["WK Catches"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["wk_catches"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+        # 7. WK Stumpings
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS wk_stumpings
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id = 14
+          AND fc.fielder_id IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+        GROUP BY fc.fielder_id
+        ORDER BY wk_stumpings DESC
+        LIMIT 10;
+    """, country_names + [tournament_id])
+
+    leaderboards["WK Stumpings"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["wk_stumpings"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 8. WK Dismissals
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            COUNT(*) AS wk_dismissals
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE bfe.event_id IN (2, 3, 14)
+          AND LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
+          AND fc.fielder_id IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+        GROUP BY fc.fielder_id
+        ORDER BY wk_dismissals DESC
+        LIMIT 10;
+    """, country_names + [tournament_id])
+
+    leaderboards["WK Dismissals"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["wk_dismissals"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 9. Best WK Conversion Rate
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            SUM(CASE WHEN bfe.event_id IN (2, 3, 14) THEN 1 ELSE 0 END) AS wk_dismissals,
+            SUM(CASE WHEN bfe.event_id IN (6, 7, 15) THEN 1 ELSE 0 END) AS wk_misses,
+            ROUND(
+                100.0 * SUM(CASE WHEN bfe.event_id IN (2, 3, 14) THEN 1 ELSE 0 END) /
+                NULLIF(SUM(CASE WHEN bfe.event_id IN (2, 3, 14, 6, 7, 15) THEN 1 ELSE 0 END), 0),
+                1
+            ) AS wk_conversion_rate
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
+          AND fc.fielder_id IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+        GROUP BY fc.fielder_id
+        HAVING (wk_dismissals + wk_misses) > 0
+        ORDER BY wk_conversion_rate DESC
+        LIMIT 10;
+    """, country_names + [tournament_id])
+
+    leaderboards["Best WK Conversion Rate"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["wk_conversion_rate"]  # in percent format
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 10. WK Cleanest Hands
+    cursor.execute(f"""
+        SELECT 
+            fc.fielder_id,
+            p.player_name AS name,
+            c.country_name AS country,
+            SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) AS clean_pickups,
+            COUNT(*) AS total_fielding_events,
+            ROUND(
+                100.0 * SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) / COUNT(*),
+                1
+            ) AS wk_clean_hands_pct
+        FROM ball_fielding_events bfe
+        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN countries c ON p.country_id = c.country_id
+        WHERE LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
+          AND fc.fielder_id IN (
+              SELECT DISTINCT fc2.fielder_id
+              FROM fielding_contributions fc2
+              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+          )
+          AND i.bowling_team IN ({placeholders})
+          AND m.tournament_id = ?
+        GROUP BY fc.fielder_id
+        HAVING total_fielding_events > 0
+        ORDER BY wk_clean_hands_pct DESC
+        LIMIT 10;
+    """, country_names + [tournament_id])
+
+    leaderboards["WK Cleanest Hands"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["wk_clean_hands_pct"]  # % format
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+    return leaderboards
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):

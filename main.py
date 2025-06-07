@@ -207,6 +207,11 @@ class MatchupDetailPayload(BaseModel):
     player_id: int
     team_category: str
 
+class TournamentBowlingLeadersPayload(BaseModel):
+    team_category: str
+    tournament: str
+    countries: List[str]
+
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
     country1_stats = get_country_stats(
@@ -3854,8 +3859,6 @@ def get_venue_options(tournament: str = None):
         "times": sorted(times)
     }
 
-
-
 @app.post("/tournament-stats")
 async def tournament_stats(request: Request):
     payload = await request.json()
@@ -3928,6 +3931,339 @@ async def tournament_stats(request: Request):
         })
 
     return JSONResponse(result)
+
+@app.post("/tournament-leaders/bowling")
+def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Resolve tournament_id
+    cursor.execute("SELECT tournament_id FROM tournaments WHERE tournament_name = ?", (payload.tournament,))
+    tournament_row = cursor.fetchone()
+    if not tournament_row:
+        return {}
+    tournament_id = tournament_row["tournament_id"]
+
+    # Resolve country names
+    placeholders = ','.join(['?'] * len(payload.countries))
+    country_names = payload.countries
+
+    leaderboards = {}
+
+    # Most Wickets
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND be.dismissed_player_id IS NOT NULL
+            AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+        GROUP BY be.bowler_id
+        ORDER BY wickets DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Most Wickets"] = [
+        {
+            "name": row["name"],
+            "wickets": row["wickets"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Best Bowling Figures
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            i.match_id,
+            i.batting_team AS opponent,
+            SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs_conceded,
+            COUNT(CASE 
+                WHEN be.dismissed_player_id IS NOT NULL 
+                     AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                THEN 1 END) AS wickets
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+        GROUP BY be.bowler_id, i.match_id
+        HAVING wickets > 0
+        ORDER BY wickets DESC, runs_conceded ASC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Best Bowling Figures"] = [
+        {
+            "name": row["name"],
+            "wickets": row["wickets"],
+            "runs": row["runs_conceded"],
+            "opponent": row["opponent"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Best Averages
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            SUM(be.runs + be.wides + be.no_balls) * 1.0 /
+                COUNT(CASE 
+                    WHEN be.dismissed_player_id IS NOT NULL 
+                        AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                    THEN 1 END) AS avg_bowling,
+            SUM(be.runs + be.wides + be.no_balls) AS total_runs,
+            COUNT(CASE 
+                WHEN be.dismissed_player_id IS NOT NULL 
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                THEN 1 END) AS total_wickets
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+        GROUP BY be.bowler_id
+        HAVING total_wickets > 0
+        ORDER BY avg_bowling ASC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Best Averages"] = [
+        {
+            "name": row["name"],
+            "average": round(row["avg_bowling"], 2),
+            "wickets": row["total_wickets"],
+            "runs": row["total_runs"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Best Economy Rates
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            ROUND(SUM(be.runs + be.wides + be.no_balls) * 1.0 / (COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) / 6.0), 2) AS economy,
+            SUM(be.runs + be.wides + be.no_balls) AS total_runs,
+            COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_deliveries
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+        GROUP BY be.bowler_id
+        HAVING legal_deliveries >= 6
+        ORDER BY economy ASC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Best Economy Rates"] = [
+        {
+            "name": row["name"],
+            "economy": row["economy"],
+            "runs": row["total_runs"],
+            "balls": row["legal_deliveries"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Best Strike Rates
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            ROUND(COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) * 1.0 /
+                COUNT(CASE 
+                    WHEN be.dismissed_player_id IS NOT NULL 
+                        AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                    THEN 1 END), 2) AS strike_rate,
+            COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_deliveries,
+            COUNT(CASE 
+                WHEN be.dismissed_player_id IS NOT NULL 
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                THEN 1 END) AS total_wickets
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+        GROUP BY be.bowler_id
+        HAVING total_wickets > 0
+        ORDER BY strike_rate ASC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Best Strike Rates"] = [
+        {
+            "name": row["name"],
+            "strike_rate": row["strike_rate"],
+            "balls": row["legal_deliveries"],
+            "wickets": row["total_wickets"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # 3+ Wicket Hauls
+    cursor.execute(f"""
+        SELECT 
+            sub.bowler_id,
+            p.player_name AS name,
+            COUNT(*) AS three_wicket_hauls
+        FROM (
+            SELECT 
+                be.bowler_id AS bowler_id,
+                i.match_id AS match_id,
+                COUNT(*) AS wickets
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            WHERE 
+                m.tournament_id = ?
+                AND i.bowling_team IN ({placeholders})
+                AND be.dismissed_player_id IS NOT NULL
+                AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+            GROUP BY be.bowler_id, i.match_id
+            HAVING COUNT(*) >= 3
+        ) AS sub
+        JOIN players p ON sub.bowler_id = p.player_id
+        GROUP BY sub.bowler_id
+        ORDER BY three_wicket_hauls DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["3+ Wicket Hauls"] = [
+        {
+            "name": row["name"],
+            "hauls": row["three_wicket_hauls"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Most Dot Balls
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            COUNT(*) AS dot_balls
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND be.runs = 0
+            AND be.wides = 0
+            AND be.no_balls = 0
+        GROUP BY be.bowler_id
+        ORDER BY dot_balls DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Most Dot Balls"] = [
+        {
+            "name": row["name"],
+            "dots": row["dot_balls"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Most Wides
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            SUM(be.wides) AS wides
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND be.wides > 0
+        GROUP BY be.bowler_id
+        ORDER BY wides DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Most Wides"] = [
+        {
+            "name": row["name"],
+            "wides": row["wides"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+    # Most No Balls
+    cursor.execute(f"""
+        SELECT 
+            be.bowler_id,
+            p.player_name AS name,
+            SUM(be.no_balls) AS no_balls
+        FROM ball_events be
+        JOIN players p ON be.bowler_id = p.player_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE 
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND be.no_balls > 0
+        GROUP BY be.bowler_id
+        ORDER BY no_balls DESC
+        LIMIT 10
+    """, [tournament_id] + country_names)
+
+    leaderboards["Most No Balls"] = [
+        {
+            "name": row["name"],
+            "no_balls": row["no_balls"]
+        }
+        for row in cursor.fetchall()
+    ]
+
+
+
+
+    return leaderboards
+
+def _format_player_row(cursor, row, country_map, include_match=False):
+    player_id = row["bowler_id"]
+    cursor.execute("SELECT player_name, country_id FROM players WHERE player_id = ?", (player_id,))
+    player = cursor.fetchone()
+    name = player["player_name"] if player else "Unknown"
+    team = country_map.get(player["country_id"], "") if player else ""
+    formatted = {
+        "id": player_id,
+        "name": name,
+        "team": team
+    }
+    for key in row.keys():
+        if key not in ["bowler_id"]:
+            formatted[key] = row[key]
+    if include_match:
+        formatted["match_id"] = row["match_id"]
+    return formatted
+
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):

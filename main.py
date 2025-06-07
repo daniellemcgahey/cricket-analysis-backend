@@ -4242,51 +4242,44 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
-    # Most False Shots
+    # False Shot %
     cursor.execute(f"""
         SELECT 
             be.bowler_id,
             p.player_name AS name,
-            COUNT(CASE
-                WHEN (be.wides IS NULL OR be.wides = 0) AND (
+            COUNT(CASE 
+                WHEN 
                     (be.dismissed_player_id IS NOT NULL 
                     AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
                     OR be.edged = 1
                     OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
-                )
-            END) * 100.0 / COUNT(CASE WHEN be.wides IS NULL OR be.wides = 0 THEN 1 END) AS false_shot_percentage,
-            COUNT(CASE
-                WHEN (be.wides IS NULL OR be.wides = 0) AND (
-                    (be.dismissed_player_id IS NOT NULL 
-                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
-                    OR be.edged = 1
-                    OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
-                )
-            END) AS false_shots,
-            COUNT(CASE WHEN be.wides IS NULL OR be.wides = 0 THEN 1 END) AS legal_deliveries
+                THEN 1 END) AS false_shots,
+            COUNT(CASE 
+                WHEN be.wides IS NULL OR be.wides = 0
+                THEN 1 END) AS total_deliveries
         FROM ball_events be
         JOIN players p ON be.bowler_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE 
-            m.tournament_id = 2
-            AND i.bowling_team = 'Brasil Women'
+            m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING legal_deliveries >= 30
-        ORDER BY false_shot_percentage DESC
-        LIMIT 10;
-
+        HAVING total_deliveries > 30
+        ORDER BY (false_shots * 1.0 / total_deliveries) DESC
+        LIMIT 10
     """, [tournament_id] + country_names)
 
     leaderboards["False Shot %"] = [
         {
             "name": row["name"],
-            "false_shot_percent": round(row["false_shot_percentage"], 2),
             "false_shots": row["false_shots"],
-            "deliveries": row["legal_deliveries"]
+            "deliveries": row["total_deliveries"],
+            "false_shot_percent": round((row["false_shots"] / row["total_deliveries"]) * 100, 1)
         }
         for row in cursor.fetchall()
     ]
+
 
 
 

@@ -3987,10 +3987,10 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             p.player_name AS name,
             i.match_id,
             i.batting_team AS opponent,
-            SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs_conceded,
+            SUM(be.runs + be.wides + be.no_balls) AS runs_conceded,
             COUNT(CASE 
                 WHEN be.dismissed_player_id IS NOT NULL 
-                     AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'run out')
                 THEN 1 END) AS wickets
         FROM ball_events be
         JOIN players p ON be.bowler_id = p.player_id
@@ -4008,14 +4008,14 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
     leaderboards["Best Bowling Figures"] = [
         {
             "name": row["name"],
-            "wickets": row["wickets"],
-            "runs": row["runs_conceded"],
+            "figures": f"{row['wickets']}/{row['runs_conceded']}",
             "opponent": row["opponent"]
         }
         for row in cursor.fetchall()
     ]
 
-    # Best Averages
+
+    # Best Averages (min 4 wickets)
     cursor.execute(f"""
         SELECT 
             be.bowler_id,
@@ -4038,7 +4038,7 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING total_wickets > 0
+        HAVING total_wickets >= 4
         ORDER BY avg_bowling ASC
         LIMIT 10
     """, [tournament_id] + country_names)
@@ -4052,6 +4052,7 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         }
         for row in cursor.fetchall()
     ]
+
 
     # Best Economy Rates
     cursor.execute(f"""
@@ -4069,7 +4070,7 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING legal_deliveries >= 6
+        HAVING legal_deliveries >= 30
         ORDER BY economy ASC
         LIMIT 10
     """, [tournament_id] + country_names)
@@ -4107,7 +4108,7 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING total_wickets > 0
+        HAVING total_wickets > 4
         ORDER BY strike_rate ASC
         LIMIT 10
     """, [tournament_id] + country_names)

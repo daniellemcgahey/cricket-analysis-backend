@@ -4247,16 +4247,34 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
         SELECT 
             be.bowler_id,
             p.player_name AS name,
-            COUNT(CASE 
-                WHEN 
-                    (be.dismissed_player_id IS NOT NULL 
-                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
-                    OR be.edged = 1
-                    OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
-                THEN 1 END) AS false_shots,
-            COUNT(CASE 
-                WHEN be.wides IS NULL OR be.wides = 0
-                THEN 1 END) AS total_deliveries
+            COUNT(
+                CASE 
+                    WHEN (be.wides IS NULL OR be.wides = 0 AND be.no_balls IS NULL OR be.no_balls = 0)
+                    THEN 1 END
+            ) AS legal_deliveries,
+            COUNT(
+                CASE 
+                    WHEN (be.wides IS NULL OR be.wides = 0) AND (
+                        (be.dismissed_player_id IS NOT NULL 
+                        AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
+                        OR be.edged = 1
+                        OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
+                    )
+                THEN 1 END
+            ) AS false_shots,
+            COUNT(*) AS total_balls,
+            ROUND(
+                COUNT(
+                    CASE 
+                        WHEN (be.wides IS NULL OR be.wides = 0) AND (
+                            (be.dismissed_player_id IS NOT NULL 
+                            AND LOWER(be.dismissal_type) NOT IN ('not out', 'retired hurt', 'retired out', 'run out'))
+                            OR be.edged = 1
+                            OR (be.ball_missed = 1 AND LOWER(be.shot_selection) != 'leave')
+                        )
+                    THEN 1 END
+                ) * 100.0 / COUNT(*), 2
+            ) AS false_shot_percent
         FROM ball_events be
         JOIN players p ON be.bowler_id = p.player_id
         JOIN innings i ON be.innings_id = i.innings_id
@@ -4265,9 +4283,9 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING total_deliveries > 30
-        ORDER BY (false_shots * 1.0 / total_deliveries) DESC
-        LIMIT 10
+        HAVING legal_deliveries >= 30
+        ORDER BY false_shot_percent DESC
+        LIMIT 10;
     """, [tournament_id] + country_names)
 
     leaderboards["False Shot %"] = [

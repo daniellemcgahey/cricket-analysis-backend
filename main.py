@@ -4278,10 +4278,12 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
 
     """, [tournament_id] + country_names)
 
-    leaderboards["Most False Shots"] = [
+    leaderboards["False Shot %"] = [
         {
             "name": row["name"],
-            "false_shots": row["false_shots"]
+            "false_shot_percent": round(row["false_shot_percentage"], 2),
+            "false_shots": row["false_shots"],
+            "deliveries": row["legal_deliveries"]
         }
         for row in cursor.fetchall()
     ]

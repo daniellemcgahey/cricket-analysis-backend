@@ -3050,10 +3050,13 @@ def player_pitch_map_data(matchId: int, playerId: int):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"] or 0,
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
             "dismissal_type": row["dismissal_type"]
         }
         for row in cursor.fetchall()
     ]
+
 
     conn.close()
     return data

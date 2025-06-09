@@ -1959,7 +1959,7 @@ def get_match_scorecard(payload: MatchScorecardPayload):
                 p.player_name,
                 MIN(be.ball_id) AS first_ball_id,
                 SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
-                SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dots,
+                SUM(CASE WHEN be.runs = 0 AND be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS dots,
                 SUM(be.runs + IFNULL(be.wides, 0) + IFNULL(be.no_balls, 0)) AS runs,
                 SUM(CASE 
                     WHEN be.dismissed_player_id = be.batter_id

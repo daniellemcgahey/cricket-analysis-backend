@@ -2446,6 +2446,8 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             be.pitch_x,
             be.pitch_y,
             be.runs,
+            be.wides,
+            be.no_balls,       
             be.ball_id,
             CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END AS wicket,
             be.dismissal_type,
@@ -2480,6 +2482,8 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
             "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"]
@@ -2489,6 +2493,8 @@ def get_player_detailed_batting(payload: PlayerDetailedBattingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
             "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"],
@@ -2742,6 +2748,8 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             be.pitch_x,
             be.pitch_y,
             be.runs,
+            be.wides,
+            be.no_balls,       
             be.ball_id,
             CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END AS wicket,
             be.dismissal_type,
@@ -2779,6 +2787,8 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
             "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"]
@@ -2788,6 +2798,8 @@ def get_player_detailed_bowling(payload: PlayerDetailedBowlingPayload):
             "pitch_x": row["pitch_x"],
             "pitch_y": row["pitch_y"],
             "runs": row["runs"],
+            "wides": row["wides"] or 0,
+            "no_balls": row["no_balls"] or 0,
             "ball_id": row["ball_id"],
             "wicket": bool(row["wicket"]),
             "dismissal_type": row["dismissal_type"],
@@ -3027,7 +3039,7 @@ def player_pitch_map_data(matchId: int, playerId: int):
 
     # Use a more sophisticated query to get pitch map data just for this player/match
     cursor.execute("""
-        SELECT be.pitch_x, be.pitch_y, be.runs, be.dismissal_type
+        SELECT be.pitch_x, be.pitch_y, be.runs, be.wides, be.no_balls, be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND be.bowler_id = ? AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
@@ -3465,6 +3477,8 @@ def scorecard_bowler_detail(matchId: int, playerId: int):
             be.pitch_x, 
             be.pitch_y, 
             be.runs, 
+            be.wides,
+            be.no_balls,
             CASE 
                 WHEN LOWER(be.dismissal_type) IN ('bowled', 'caught', 'lbw', 'stumped', 'hit wicket') 
                 THEN be.dismissal_type
@@ -5562,6 +5576,8 @@ def get_pitch_map_data(payload: PitchMapPayload):
                 be.pitch_x,
                 be.pitch_y,
                 be.runs,
+                be.wides,
+                be.no_balls,
                 be.dismissal_type
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
@@ -5605,10 +5621,13 @@ def get_pitch_map_data(payload: PitchMapPayload):
                 "pitch_x": x,
                 "pitch_y": y,
                 "runs": r if r is not None else 0,
+                "wides": w if w is not None else 0,
+                "no_balls": nb if nb is not None else 0,
                 "dismissal_type": d
             }
-            for x, y, r, d in balls
+            for x, y, r, w, nb, d in balls
         ]
+
 
     conn.close()
     return result
@@ -6494,7 +6513,10 @@ def add_pitch_map_legend(elements):
         ("Runs (1-3)", colors.green),
         ("Boundary (4/6)", colors.blue),
         ("Wicket", colors.white),
+        ("Wide", colors.yellow),
+        ("No Ball", colors.orange),
     ]
+
 
     legend_flowables = []
     for label, color in legend_items:

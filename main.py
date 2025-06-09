@@ -6125,12 +6125,22 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Pitch map data
     cursor.execute("""
-        SELECT be.pitch_x, be.pitch_y
+        SELECT 
+            be.pitch_x, 
+            be.pitch_y,
+            be.runs,
+            be.wides,
+            be.no_balls,
+            be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND be.bowler_id = ? AND be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+        WHERE i.match_id = ? 
+        AND be.bowler_id = ? 
+        AND be.pitch_x IS NOT NULL 
+        AND be.pitch_y IS NOT NULL
     """, (match_id, player_id))
     pitch_map_data = [dict(row) for row in cursor.fetchall()]
+
 
     conn.close()
 

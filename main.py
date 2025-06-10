@@ -771,6 +771,225 @@ def simulate_match(payload: SimulateMatchPayload):
         "winner": winner
     }
 
+@app.post("/simulate-match-v2")
+def simulate_match_v2(payload: SimulateMatchPayload):
+    import sqlite3
+    import random
+    from collections import defaultdict
+    import os
+
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Map overs to phases
+    def get_phase(over, max_overs):
+        if over < max_overs * 0.3:
+            return "is_powerplay"
+        elif over < max_overs * 0.8:
+            return "is_middle_overs"
+        else:
+            return "is_death_overs"
+
+    # Get bowler weights from past overs bowled
+    def get_bowler_weights(bowler_ids):
+        weights = {}
+        for bowler_id in bowler_ids:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT i.match_id) AS games,
+                       COUNT(*) AS balls
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE be.bowler_id = ?
+            """, (bowler_id,))
+            row = cursor.fetchone()
+            if row["games"] > 0:
+                avg_overs = row["balls"] / 6 / row["games"]
+                weights[bowler_id] = avg_overs
+
+        for bowler_id in bowler_ids:
+            if bowler_id not in weights:
+                weights[bowler_id] = 1.0
+
+        return weights
+
+    def get_player_name(player_id):
+        cursor.execute("SELECT player_name FROM players WHERE player_id = ?", (player_id,))
+        row = cursor.fetchone()
+        return row["player_name"] if row else f"Player {player_id}"
+
+    # Get outcome distributions for this batter-bowler-phase combo
+    def get_outcome_distribution(batter_id, bowler_id, phase_column):
+        cursor.execute(f"""
+            SELECT
+                be.runs AS runs,
+                be.wides, be.no_balls,
+                be.dismissal_type
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.batter_id = ?
+              AND be.bowler_id = ?
+              AND be.{phase_column} = 1
+        """, (batter_id, bowler_id))
+        events = cursor.fetchall()
+
+        outcomes = []
+        for row in events:
+            if row["dismissal_type"]:
+                outcomes.append(("WICKET", 0))
+            elif row["wides"]:
+                outcomes.append(("WIDE", row["wides"]))
+            elif row["no_balls"]:
+                outcomes.append(("NO_BALL", row["no_balls"]))
+            else:
+                outcomes.append(("RUN", row["runs"]))
+
+        if len(outcomes) < 5:
+            # fallback to generic conservative distribution
+            outcomes = [("RUN", 0)] * 3 + [("RUN", 1)] * 4 + [("RUN", 2)] * 2 + [("WICKET", 0)]
+
+        return outcomes
+
+    def simulate_innings(batting_team, bowling_team, max_overs):
+        score = 0
+        wickets = 0
+        over_data = []
+
+        batters = batting_team[:]
+        striker_idx = 0
+        non_striker_idx = 1
+        dismissed = set()
+
+        bowler_overs = defaultdict(int)
+        bowler_weights = get_bowler_weights(bowling_team)
+        available_bowlers = list(bowler_weights.keys())
+        prev_bowler = None
+
+        for over in range(max_overs):
+            if wickets >= 10 or striker_idx >= len(batters):
+                break
+
+            phase_col = get_phase(over, max_overs)
+            eligible_bowlers = [b for b in available_bowlers if bowler_overs[b] < 4 and b != prev_bowler]
+            if not eligible_bowlers:
+                eligible_bowlers = [b for b in available_bowlers if bowler_overs[b] < 4]
+            if not eligible_bowlers:
+                break
+
+            weights = [bowler_weights[b] for b in eligible_bowlers]
+            bowler = random.choices(eligible_bowlers, weights=weights, k=1)[0]
+            bowler_name = get_player_name(bowler)
+            prev_bowler = bowler
+            bowler_overs[bowler] += 1
+
+            runs_this_over = 0
+            wickets_this_over = 0
+            legal_deliveries = 0
+
+            while legal_deliveries < 6:
+                if wickets >= 10 or striker_idx >= len(batters):
+                    break
+
+                striker = batters[striker_idx]
+                dist = get_outcome_distribution(striker, bowler, phase_col)
+                outcome, value = random.choice(dist)
+
+                if outcome == "WICKET":
+                    wickets += 1
+                    wickets_this_over += 1
+                    dismissed.add(striker)
+                    next_idx = max(striker_idx, non_striker_idx) + 1
+                    while next_idx < len(batters) and batters[next_idx] in dismissed:
+                        next_idx += 1
+                    striker_idx = next_idx
+                    legal_deliveries += 1
+                elif outcome == "RUN":
+                    score += value
+                    runs_this_over += value
+                    if value % 2 == 1:
+                        striker_idx, non_striker_idx = non_striker_idx, striker_idx
+                    legal_deliveries += 1
+                elif outcome == "WIDE" or outcome == "NO_BALL":
+                    score += value
+                    runs_this_over += value
+                    # no delivery counted
+
+            over_data.append({
+                "over": over + 1,
+                "bowler": bowler_name,
+                "runs": runs_this_over,
+                "wickets": wickets_this_over,
+                "total_score": score,
+                "total_wickets": wickets
+            })
+
+            striker_idx, non_striker_idx = non_striker_idx, striker_idx
+
+        return score, wickets, over_data
+
+    # Run simulations
+    sim_runs_a, sim_runs_b = [], []
+    sim_overs_a, sim_overs_b = None, None
+    sim_wkts_a, sim_wkts_b = 0, 0
+    wins_a = wins_b = 0
+    margin_runs_a = []
+    margin_wkts_b = []
+
+    for _ in range(payload.simulations):
+        runs_a, wkts_a, overs_a = simulate_innings(payload.team_a_players, payload.team_b_players, payload.max_overs)
+        runs_b, wkts_b, overs_b = simulate_innings(payload.team_b_players, payload.team_a_players, payload.max_overs)
+
+        sim_runs_a.append(runs_a)
+        sim_runs_b.append(runs_b)
+        sim_overs_a = overs_a
+        sim_overs_b = overs_b
+        sim_wkts_a += wkts_a
+        sim_wkts_b += wkts_b
+
+        if runs_a > runs_b:
+            wins_a += 1
+            margin_runs_a.append(runs_a - runs_b)
+        elif runs_b > runs_a:
+            wins_b += 1
+            margin_wkts_b.append(10 - wkts_b)
+
+    total = payload.simulations
+    avg_a = round(sum(sim_runs_a) / total, 1)
+    avg_b = round(sum(sim_runs_b) / total, 1)
+    prob_a = round((wins_a / total) * 100, 1)
+    prob_b = round((wins_b / total) * 100, 1)
+
+    margin_a = f"{round(sum(margin_runs_a)/len(margin_runs_a), 1)} runs" if margin_runs_a else "N/A"
+    margin_b = f"{round(sum(margin_wkts_b)/len(margin_wkts_b), 1)} wickets" if margin_wkts_b else "N/A"
+
+    winner = (
+        payload.team_a_name if avg_a > avg_b else
+        payload.team_b_name if avg_b > avg_a else
+        "Draw"
+    )
+
+    return {
+        "team_a": {
+            "name": payload.team_a_name,
+            "average_score": avg_a,
+            "win_probability": prob_a,
+            "expected_margin": margin_a,
+            "last_sim_overs": sim_overs_a,
+            "wickets": sim_wkts_a
+        },
+        "team_b": {
+            "name": payload.team_b_name,
+            "average_score": avg_b,
+            "win_probability": prob_b,
+            "expected_margin": margin_b,
+            "last_sim_overs": sim_overs_b,
+            "wickets": sim_wkts_b
+        },
+        "winner": winner
+    }
+
+
 @app.get("/team-players")
 def get_players_for_team(country_name: str, team_category: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

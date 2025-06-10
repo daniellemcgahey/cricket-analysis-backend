@@ -4676,20 +4676,15 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         JOIN matches m ON i.match_id = m.match_id
         JOIN players p ON fc.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
-          AND fc.fielder_id IN (
-              SELECT DISTINCT fc2.fielder_id
-              FROM fielding_contributions fc2
-              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-          )
-          AND i.bowling_team IN ({placeholders})
-          AND m.tournament_id = ?
+        WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')  -- ✅ moved here
+        AND i.bowling_team IN ({placeholders})
+        AND m.tournament_id = ?
         GROUP BY fc.fielder_id
         HAVING (wk_dismissals + wk_misses) > 0
         ORDER BY wk_conversion_rate DESC
         LIMIT 10;
     """, country_names + [tournament_id])
+
 
     leaderboards["Best WK Conversion Rate"] = [
         {

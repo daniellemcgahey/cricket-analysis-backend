@@ -783,7 +783,49 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Map overs to phases
+    # ---- Team Strength Calculation ----
+    def get_team_strengths(team_id):
+        cursor.execute("""
+            SELECT 
+                AVG(be.runs) AS rpb,
+                AVG(be.expected_runs) AS x_rpb,
+                AVG(be.batting_bpi) AS batting_bpi,
+                AVG(be.bowling_bpi) AS bowling_bpi
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.batting_team = ?
+        """, (team_id,))
+        bat_row = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT 
+                AVG(be.runs) AS rpb_conceded,
+                AVG(be.expected_runs) AS x_rpb_conceded,
+                AVG(be.bowling_bpi) AS bowling_bpi
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.bowling_team = ?
+        """, (team_id,))
+        bowl_row = cursor.fetchone()
+
+        return {
+            "batting_rpb": bat_row["rpb"] or 1.0,
+            "expected_rpb": bat_row["x_rpb"] or 1.0,
+            "batting_bpi": bat_row["batting_bpi"] or 0.0,
+            "bowling_rpb": bowl_row["rpb_conceded"] or 1.0,
+            "bowling_bpi": bowl_row["bowling_bpi"] or 0.0,
+        }
+
+    cursor.execute("SELECT AVG(runs) FROM ball_events WHERE runs IS NOT NULL")
+    global_rpb = cursor.fetchone()[0] or 1.0
+
+    team_a_id = payload.team_a_players[0]  # any player ID from the team
+    team_b_id = payload.team_b_players[0]
+
+    team_a = get_team_strengths(team_a_id)
+    team_b = get_team_strengths(team_b_id)
+
+    # ---- Supporting Utilities ----
     def get_phase(over, max_overs):
         if over < max_overs * 0.3:
             return "is_powerplay"
@@ -792,7 +834,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         else:
             return "is_death_overs"
 
-    # Get bowler weights from past overs bowled
     def get_bowler_weights(bowler_ids):
         weights = {}
         for bowler_id in bowler_ids:
@@ -805,13 +846,10 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             """, (bowler_id,))
             row = cursor.fetchone()
             if row["games"] > 0:
-                avg_overs = row["balls"] / 6 / row["games"]
-                weights[bowler_id] = avg_overs
-
+                weights[bowler_id] = row["balls"] / 6 / row["games"]
         for bowler_id in bowler_ids:
             if bowler_id not in weights:
                 weights[bowler_id] = 1.0
-
         return weights
 
     def get_player_name(player_id):
@@ -819,7 +857,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         row = cursor.fetchone()
         return row["player_name"] if row else f"Player {player_id}"
 
-    # Get outcome distributions for this batter-bowler-phase combo
     def get_outcome_distribution(batter_id, bowler_id, phase_column):
         cursor.execute(f"""
             SELECT
@@ -846,12 +883,12 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 outcomes.append(("RUN", row["runs"]))
 
         if len(outcomes) < 5:
-            # fallback to generic conservative distribution
             outcomes = [("RUN", 0)] * 3 + [("RUN", 1)] * 4 + [("RUN", 2)] * 2 + [("WICKET", 0)]
 
         return outcomes
 
-    def simulate_innings(batting_team, bowling_team, max_overs):
+    # ---- Simulation Logic ----
+    def simulate_innings(batting_team, bowling_team, batting_strength, bowling_strength, max_overs):
         score = 0
         wickets = 0
         over_data = []
@@ -865,6 +902,9 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         bowler_weights = get_bowler_weights(bowling_team)
         available_bowlers = list(bowler_weights.keys())
         prev_bowler = None
+
+        batting_multiplier = batting_strength["batting_rpb"] / global_rpb
+        bowling_multiplier = global_rpb / (bowling_strength["bowling_rpb"] or 1.0)
 
         for over in range(max_overs):
             if wickets >= 10 or striker_idx >= len(batters):
@@ -895,20 +935,24 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 dist = get_outcome_distribution(striker, bowler, phase_col)
                 outcome, value = random.choice(dist)
 
-                if outcome == "WICKET":
-                    wickets += 1
-                    wickets_this_over += 1
-                    dismissed.add(striker)
-                    next_idx = max(striker_idx, non_striker_idx) + 1
-                    while next_idx < len(batters) and batters[next_idx] in dismissed:
-                        next_idx += 1
-                    striker_idx = next_idx
-                    legal_deliveries += 1
-                elif outcome == "RUN":
-                    score += value
-                    runs_this_over += value
-                    if value % 2 == 1:
+                # Apply matchup scaling
+                if outcome == "RUN":
+                    scaled = round(value * batting_multiplier * bowling_multiplier)
+                    score += scaled
+                    runs_this_over += scaled
+                    if scaled % 2 == 1:
                         striker_idx, non_striker_idx = non_striker_idx, striker_idx
+                    legal_deliveries += 1
+                elif outcome == "WICKET":
+                    wicket_prob = 1.0 / (batting_multiplier * bowling_multiplier)
+                    if random.random() < min(wicket_prob, 0.6):
+                        wickets += 1
+                        wickets_this_over += 1
+                        dismissed.add(striker)
+                        next_idx = max(striker_idx, non_striker_idx) + 1
+                        while next_idx < len(batters) and batters[next_idx] in dismissed:
+                            next_idx += 1
+                        striker_idx = next_idx
                     legal_deliveries += 1
                 elif outcome == "WIDE" or outcome == "NO_BALL":
                     score += value
@@ -928,7 +972,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
         return score, wickets, over_data
 
-    # Run simulations
+    # ---- Run Simulations ----
     sim_runs_a, sim_runs_b = [], []
     sim_overs_a, sim_overs_b = None, None
     sim_wkts_a, sim_wkts_b = 0, 0
@@ -937,8 +981,10 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     margin_wkts_b = []
 
     for _ in range(payload.simulations):
-        runs_a, wkts_a, overs_a = simulate_innings(payload.team_a_players, payload.team_b_players, payload.max_overs)
-        runs_b, wkts_b, overs_b = simulate_innings(payload.team_b_players, payload.team_a_players, payload.max_overs)
+        runs_a, wkts_a, overs_a = simulate_innings(
+            payload.team_a_players, payload.team_b_players, team_a, team_b, payload.max_overs)
+        runs_b, wkts_b, overs_b = simulate_innings(
+            payload.team_b_players, payload.team_a_players, team_b, team_a, payload.max_overs)
 
         sim_runs_a.append(runs_a)
         sim_runs_b.append(runs_b)
@@ -988,6 +1034,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         },
         "winner": winner
     }
+
 
 
 @app.get("/team-players")

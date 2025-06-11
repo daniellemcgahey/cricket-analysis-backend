@@ -4396,7 +4396,7 @@ def get_tournament_bowling_leaders(payload: TournamentBowlingLeadersPayload):
             m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         GROUP BY be.bowler_id
-        HAVING total_wickets > 4
+        HAVING total_wickets >= 4
         ORDER BY strike_rate ASC
         LIMIT 10
     """, [tournament_id] + country_names)

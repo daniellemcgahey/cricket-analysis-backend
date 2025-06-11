@@ -1046,8 +1046,8 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
 @app.get("/team-players")
 def get_players_for_team(
-    country: str = Query(..., alias="country"),
-    teamCategory: Optional[str] = Query(None, alias="teamCategory"),
+    country: str = Query(..., alias="country_name"),
+    teamCategory: Optional[str] = Query(None, alias="team_category"),
     tournament: Optional[str] = Query(None)
 ):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

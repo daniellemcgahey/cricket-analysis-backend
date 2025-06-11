@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import io
@@ -1044,45 +1044,42 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     }
 
 
+
 @app.get("/team-players")
-def get_players_for_team(
-    country: str = Query(..., alias="country_name"),
-    teamCategory: Optional[str] = Query(None, alias="team_category"),
-    tournament: Optional[str] = Query(None)
-):
+def get_players_for_team(country_name: str, team_category: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    query = """
-        SELECT DISTINCT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
-        FROM players p
-        JOIN countries c ON p.country_id = c.country_id
-        JOIN player_match_roles pmr ON p.player_id = pmr.player_id
-        JOIN matches m ON pmr.match_id = m.match_id
-        JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE c.country_name = ?
-    """
-    params = [country]
-
-    if teamCategory:
-        if teamCategory.lower() == "training":
-            query += " AND LOWER(c.country_name) LIKE ?"
-            params.append("%training%")
+    if team_category:
+        if team_category.lower() == "training":
+            cursor.execute("""
+                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
+                FROM players p
+                JOIN countries c ON p.country_id = c.country_id
+                WHERE c.country_name = ? AND LOWER(c.country_name) LIKE ?
+                ORDER BY p.player_name
+            """, (country_name, "%training%"))
         else:
-            query += " AND LOWER(c.country_name) NOT LIKE ?"
-            params.append("%training%")
-
-    if tournament:
-        query += " AND LOWER(t.tournament_name) = ?"
-        params.append(tournament.lower())
-
-    query += " ORDER BY p.player_name"
-
-    cursor.execute(query, params)
+            cursor.execute("""
+                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
+                FROM players p
+                JOIN countries c ON p.country_id = c.country_id
+                WHERE c.country_name = ? AND LOWER(c.country_name) NOT LIKE ?
+                ORDER BY p.player_name
+            """, (country_name, "%training%"))
+    else:
+        cursor.execute("""
+            SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
+            FROM players p
+            JOIN countries c ON p.country_id = c.country_id
+            WHERE c.country_name = ?
+            ORDER BY p.player_name
+        """, (country_name,))
+    
     players = [{
-        "player_id": row[0],
-        "player_name": row[1],
+        "id": row[0],
+        "name": row[1],
         "bowling_arm": row[2],
         "bowling_style": row[3]
     } for row in cursor.fetchall()]

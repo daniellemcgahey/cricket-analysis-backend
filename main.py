@@ -4726,6 +4726,10 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
+        # 4. Best Conversion Rate (excluding wicketkeepers, % format)
+
+    params = country_names * 3 + [tournament_id] * 3
+
     cursor.execute(f"""
         WITH non_wk_fielders AS (
             SELECT DISTINCT fc.fielder_id
@@ -4793,8 +4797,17 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         AND p.player_id NOT IN (SELECT fielder_id FROM non_wk_fielders)
         ORDER BY conversion_rate DESC
         LIMIT 10
-    """, country_names + [tournament_id] * 3)
+    """, params)
 
+
+    leaderboards["Best Conversion Rate"] = [
+        {
+            "name": row["name"],
+            "country": row["country"],
+            "value": row["conversion_rate"]  # % format (e.g. 87.5)
+        }
+        for row in cursor.fetchall()
+    ]
 
     # 5. Cleanest Hands (excluding wicketkeepers)
     cursor.execute(f"""

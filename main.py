@@ -343,28 +343,36 @@ def get_matches(teamCategory: Optional[str] = None):
     return matches
 
 @app.get("/countries")
-def get_countries(teamCategory: Optional[str] = None):
+def get_countries(teamCategory: Optional[str] = None, tournament: Optional[str] = None):
+    import sqlite3, os
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
 
+    query = """
+        SELECT DISTINCT c.country_name
+        FROM countries c
+        JOIN matches m ON c.country_id = m.team_a OR c.country_id = m.team_b
+        JOIN tournaments t ON m.tournament_id = t.tournament_id
+        WHERE 1 = 1
+    """
+    params = []
+
     if teamCategory:
         if teamCategory.lower() == "training":
-            c.execute("""
-                SELECT country_name FROM countries 
-                WHERE LOWER(country_name) LIKE ? 
-                ORDER BY country_name ASC
-            """, ("%training%",))
+            query += " AND LOWER(c.country_name) LIKE ?"
+            params.append("%training%")
         else:
-            c.execute("""
-                SELECT country_name FROM countries 
-                WHERE country_name LIKE ? 
-                  AND LOWER(country_name) NOT LIKE ? 
-                ORDER BY country_name ASC
-            """, (f"%{teamCategory}", "%training%"))
-    else:
-        c.execute("SELECT country_name FROM countries ORDER BY country_name ASC")
+            query += " AND c.country_name LIKE ? AND LOWER(c.country_name) NOT LIKE ?"
+            params.extend([f"%{teamCategory}", "%training%"])
 
+    if tournament:
+        query += " AND LOWER(t.tournament_name) = ?"
+        params.append(tournament.lower())
+
+    query += " ORDER BY c.country_name ASC"
+
+    c.execute(query, params)
     countries = [row[0] for row in c.fetchall()]
     conn.close()
     return countries
@@ -1038,45 +1046,47 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
 
 @app.get("/team-players")
-def get_players_for_team(country_name: str, team_category: Optional[str] = None):
+def get_players_for_team(country_name: str, team_category: Optional[str] = None, tournament: Optional[str] = None):
+    import sqlite3, os
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    query = """
+        SELECT DISTINCT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
+        FROM players p
+        JOIN countries c ON p.country_id = c.country_id
+        JOIN player_match_roles pmr ON p.player_id = pmr.player_id
+        JOIN matches m ON pmr.match_id = m.match_id
+        JOIN tournaments t ON m.tournament_id = t.tournament_id
+        WHERE c.country_name = ?
+    """
+    params = [country_name]
+
     if team_category:
         if team_category.lower() == "training":
-            cursor.execute("""
-                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
-                FROM players p
-                JOIN countries c ON p.country_id = c.country_id
-                WHERE c.country_name = ? AND LOWER(c.country_name) LIKE ?
-                ORDER BY p.player_name
-            """, (country_name, "%training%"))
+            query += " AND LOWER(c.country_name) LIKE ?"
+            params.append("%training%")
         else:
-            cursor.execute("""
-                SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
-                FROM players p
-                JOIN countries c ON p.country_id = c.country_id
-                WHERE c.country_name = ? AND LOWER(c.country_name) NOT LIKE ?
-                ORDER BY p.player_name
-            """, (country_name, "%training%"))
-    else:
-        cursor.execute("""
-            SELECT p.player_id, p.player_name, p.bowling_arm, p.bowling_style
-            FROM players p
-            JOIN countries c ON p.country_id = c.country_id
-            WHERE c.country_name = ?
-            ORDER BY p.player_name
-        """, (country_name,))
-    
+            query += " AND LOWER(c.country_name) NOT LIKE ?"
+            params.append("%training%")
+
+    if tournament:
+        query += " AND LOWER(t.tournament_name) = ?"
+        params.append(tournament.lower())
+
+    query += " ORDER BY p.player_name"
+
+    cursor.execute(query, params)
     players = [{
-        "id": row[0],
-        "name": row[1],
+        "player_id": row[0],
+        "player_name": row[1],
         "bowling_arm": row[2],
         "bowling_style": row[3]
     } for row in cursor.fetchall()]
     conn.close()
     return players
+
 
 @app.get("/players")
 def get_players_by_team_category(team_category: str):

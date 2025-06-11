@@ -4615,31 +4615,32 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
 
     # 1. Most Catches (excluding wicketkeepers)
     cursor.execute(f"""
+        WITH non_wk_fielders AS (
+            SELECT DISTINCT fc.fielder_id
+            FROM fielding_contributions fc
+            JOIN ball_events be ON fc.ball_id = be.ball_id
+            WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+        )
         SELECT 
-            fc.fielder_id,
+            be.fielder_id,
             p.player_name AS name,
             c.country_name AS country,
             COUNT(*) AS catches
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE bfe.event_id = 2
-          AND i.bowling_team IN ({placeholders})
-          AND m.tournament_id = ?
-          AND fc.fielder_id NOT IN (
-              SELECT DISTINCT fc2.fielder_id
-              FROM fielding_contributions fc2
-              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-          )
-        GROUP BY fc.fielder_id
+        WHERE LOWER(be.dismissal_type) = 'caught'
+        AND be.fielder_id IS NOT NULL
+        AND i.bowling_team IN ({placeholders})
+        AND m.tournament_id = ?
+        AND be.fielder_id NOT IN (SELECT fielder_id FROM non_wk_fielders)
+        GROUP BY be.fielder_id
         ORDER BY catches DESC
         LIMIT 10
     """, country_names + [tournament_id])
+
 
     leaderboards["Most Catches"] = [
         {

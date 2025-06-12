@@ -4970,12 +4970,12 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
     # Wicket Keeper Conversion
     cursor.execute(f"""
         WITH keepers AS (
-            SELECT DISTINCT fc.fielder_id
-            FROM fielding_contributions fc
-            JOIN ball_events be ON fc.ball_id = be.ball_id
+            SELECT DISTINCT be.fielder_id
+            FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+            AND be.fielder_id IS NOT NULL
             AND m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
         ),
@@ -4985,9 +4985,9 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumped')
+            AND be.fielder_id IN (SELECT fielder_id FROM keepers)
             AND m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
-            AND be.fielder_id IN (SELECT fielder_id FROM keepers)
             GROUP BY be.fielder_id
         ),
         wk_misses AS (
@@ -4999,6 +4999,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             JOIN matches m ON i.match_id = m.match_id
             WHERE bfe.event_id IN (6, 7, 8, 15)
             AND LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+            AND fc.fielder_id IN (SELECT fielder_id FROM keepers)
             AND m.tournament_id = ?
             AND i.bowling_team IN ({placeholders})
             GROUP BY fc.fielder_id

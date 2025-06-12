@@ -4735,48 +4735,40 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
     ]
 
         # 4. Best Conversion Rate (excluding wicketkeepers, % format)
-
-    params = country_names * 3 + [tournament_id] * 3
-
     cursor.execute(f"""
-        WITH non_wk_fielders AS (
-            SELECT DISTINCT fc.fielder_id
-            FROM fielding_contributions fc
-            JOIN ball_events be ON fc.ball_id = be.ball_id
-            WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+        WITH non_keepers AS (
+            SELECT p.player_id
+            FROM players p
+            WHERE p.player_id NOT IN (
+                SELECT DISTINCT be.fielder_id
+                FROM ball_events be
+                WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+                AND be.fielder_id IS NOT NULL
+            )
         ),
-        dismissals_all AS (
-            SELECT fc.fielder_id
-            FROM ball_fielding_events bfe
-            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-            JOIN ball_events be ON be.ball_id = bfe.ball_id
-            JOIN innings i ON be.innings_id = i.innings_id
-            JOIN matches m ON i.match_id = m.match_id
-            WHERE bfe.event_id IN (2, 3)
-            AND i.bowling_team IN ({placeholders})
-            AND m.tournament_id = ?
-
-            UNION ALL
-
-            SELECT be.fielder_id
+        non_wk_dismissals AS (
+            SELECT be.fielder_id, COUNT(*) AS dismissals
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             WHERE LOWER(be.dismissal_type) IN ('caught', 'run out')
-            AND be.fielder_id IS NOT NULL
-            AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND be.fielder_id IN (SELECT player_id FROM non_keepers)
+            GROUP BY be.fielder_id
         ),
-        misses_all AS (
-            SELECT fc.fielder_id
+        non_wk_misses AS (
+            SELECT fc.fielder_id, COUNT(*) AS misses
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
             JOIN ball_events be ON be.ball_id = bfe.ball_id
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             WHERE bfe.event_id IN (6, 7, 8)
-            AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            AND fc.fielder_id IN (SELECT player_id FROM non_keepers)
+            GROUP BY fc.fielder_id
         )
         SELECT 
             p.player_id AS fielder_id,
@@ -4784,28 +4776,21 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             c.country_name AS country,
             COALESCE(d.dismissals, 0) AS dismissals,
             COALESCE(m.misses, 0) AS misses,
+            COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0) AS total_chances,
             ROUND(
                 100.0 * COALESCE(d.dismissals, 0) /
-                NULLIF(COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0), 0),
-                1
+                NULLIF(COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0), 0), 1
             ) AS conversion_rate
         FROM players p
         JOIN countries c ON p.country_id = c.country_id
-        LEFT JOIN (
-            SELECT fielder_id, COUNT(*) AS dismissals
-            FROM dismissals_all
-            GROUP BY fielder_id
-        ) d ON p.player_id = d.fielder_id
-        LEFT JOIN (
-            SELECT fielder_id, COUNT(*) AS misses
-            FROM misses_all
-            GROUP BY fielder_id
-        ) m ON p.player_id = m.fielder_id
+        JOIN non_keepers nk ON p.player_id = nk.player_id
+        LEFT JOIN non_wk_dismissals d ON p.player_id = d.fielder_id
+        LEFT JOIN non_wk_misses m ON p.player_id = m.fielder_id
         WHERE (COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0)) > 0
-        AND p.player_id NOT IN (SELECT fielder_id FROM non_wk_fielders)
         ORDER BY conversion_rate DESC
-        LIMIT 10
-    """, params)
+        LIMIT 10;
+    """, [tournament_id] + country_names + [tournament_id] + country_names)
+
 
 
     leaderboards["Best Conversion Rate"] = [

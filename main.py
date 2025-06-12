@@ -5118,7 +5118,12 @@ def get_tournament_standings(payload: dict):
         lost_while_chasing = is_chasing and winner_name and winner_name != team
         was_all_out = wickets >= 10
 
-        if was_all_out or lost_while_chasing:
+        # Determine correct overs faced for this innings
+        if innings == 1 and overs_bowled > adjusted_overs:
+            # Rain came after full first innings; use what was actually bowled
+            overs_faced = overs_bowled
+        elif was_all_out or lost_while_chasing:
+            # Use adjusted overs for second innings loss or all out
             overs_faced = adjusted_overs
         else:
             overs_faced = overs_bowled

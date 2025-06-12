@@ -4967,34 +4967,41 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
+    # Wicket Keeper Conversion
     cursor.execute(f"""
         WITH keepers AS (
             SELECT DISTINCT fc.fielder_id
             FROM fielding_contributions fc
             JOIN ball_events be ON fc.ball_id = be.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
             WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+            AND m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
         ),
         wk_dismissals AS (
-            SELECT be.fielder_id AS fielder_id
+            SELECT be.fielder_id, COUNT(*) AS dismissals
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumped')
-            AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
             AND be.fielder_id IN (SELECT fielder_id FROM keepers)
+            GROUP BY be.fielder_id
         ),
         wk_misses AS (
-            SELECT fc.fielder_id
+            SELECT fc.fielder_id, COUNT(*) AS misses
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
             JOIN ball_events be ON be.ball_id = bfe.ball_id
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
-            WHERE bfe.event_id IN (6, 7, 15)
+            WHERE bfe.event_id IN (6, 7, 8, 15)
             AND LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
-            AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
+            AND i.bowling_team IN ({placeholders})
+            GROUP BY fc.fielder_id
         )
         SELECT 
             p.player_id AS fielder_id,
@@ -5010,21 +5017,12 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         FROM players p
         JOIN countries c ON p.country_id = c.country_id
         JOIN keepers k ON p.player_id = k.fielder_id
-        LEFT JOIN (
-            SELECT fielder_id, COUNT(*) AS dismissals
-            FROM wk_dismissals
-            GROUP BY fielder_id
-        ) d ON p.player_id = d.fielder_id
-        LEFT JOIN (
-            SELECT fielder_id, COUNT(*) AS misses
-            FROM wk_misses
-            GROUP BY fielder_id
-        ) m ON p.player_id = m.fielder_id
+        LEFT JOIN wk_dismissals d ON p.player_id = d.fielder_id
+        LEFT JOIN wk_misses m ON p.player_id = m.fielder_id
         WHERE (COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0)) > 0
         ORDER BY wk_conversion_rate DESC
         LIMIT 10
-    """, country_names * 2 + [tournament_id] * 2)
-
+    """, [tournament_id] + country_names + [tournament_id] + country_names + [tournament_id] + country_names)
 
 
     leaderboards["Best WK Conversion Rate"] = [

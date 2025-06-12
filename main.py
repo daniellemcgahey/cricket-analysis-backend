@@ -4967,9 +4967,14 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
-    # 9. Best WK Conversion Rate
     cursor.execute(f"""
-        WITH wk_dismissals AS (
+        WITH keepers AS (
+            SELECT DISTINCT fc.fielder_id
+            FROM fielding_contributions fc
+            JOIN ball_events be ON fc.ball_id = be.ball_id
+            WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+        ),
+        wk_dismissals AS (
             SELECT be.fielder_id AS fielder_id
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
@@ -4977,6 +4982,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumped')
             AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
+            AND be.fielder_id IN (SELECT fielder_id FROM keepers)
         ),
         wk_misses AS (
             SELECT fc.fielder_id AS fielder_id
@@ -5002,6 +5008,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             ) AS wk_conversion_rate
         FROM players p
         JOIN countries c ON p.country_id = c.country_id
+        JOIN keepers k ON p.player_id = k.fielder_id
         LEFT JOIN (
             SELECT fielder_id, COUNT(*) AS dismissals
             FROM wk_dismissals
@@ -5013,16 +5020,9 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             GROUP BY fielder_id
         ) m ON p.player_id = m.fielder_id
         WHERE (COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0)) > 0
-        AND p.player_id IN (
-            SELECT DISTINCT fc2.fielder_id
-            FROM fielding_contributions fc2
-            JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-            WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-        )
         ORDER BY wk_conversion_rate DESC
         LIMIT 10
     """, country_names * 2 + [tournament_id] * 2)
-
 
 
     leaderboards["Best WK Conversion Rate"] = [

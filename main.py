@@ -4985,7 +4985,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             AND be.fielder_id IN (SELECT fielder_id FROM keepers)
         ),
         wk_misses AS (
-            SELECT fc.fielder_id AS fielder_id
+            SELECT fc.fielder_id
             FROM ball_fielding_events bfe
             JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
             JOIN ball_events be ON be.ball_id = bfe.ball_id
@@ -5002,6 +5002,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             c.country_name AS country,
             COALESCE(d.dismissals, 0) AS wk_dismissals,
             COALESCE(m.misses, 0) AS wk_misses,
+            COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0) AS total_chances,
             ROUND(
                 100.0 * COALESCE(d.dismissals, 0) /
                 NULLIF(COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0), 0), 1
@@ -5023,6 +5024,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         ORDER BY wk_conversion_rate DESC
         LIMIT 10
     """, country_names * 2 + [tournament_id] * 2)
+
 
 
     leaderboards["Best WK Conversion Rate"] = [

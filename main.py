@@ -1897,19 +1897,38 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
 
     # Bowler History (with opponent and no econ)
     cursor.execute(f"""
-        SELECT m.match_id, m.match_date, t.tournament_name, i.batting_team AS opponent,
-            SUM(be.runs) AS runs,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out' THEN 1 ELSE 0 END) AS wickets,
+        SELECT 
+            m.match_id, 
+            m.match_date, 
+            t.tournament_name, 
+            i.batting_team AS opponent,
+            SUM(be.runs + be.wides + be.no_balls) AS runs,
+            SUM(
+                CASE 
+                    WHEN be.dismissal_type IS NOT NULL 
+                    AND LOWER(be.dismissal_type) NOT IN ('not out', 'run out', 'obstructing the field', 'retired out', 'handled the ball')
+                    AND be.dismissed_player_id = be.batter_id
+                    THEN 1 
+                    ELSE 0 
+                END
+            ) AS wickets,
+
+            -- Intent conceded
             ROUND(AVG(be.batting_intent_score), 2) AS intent_conceded
+
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         JOIN tournaments t ON m.tournament_id = t.tournament_id
-        WHERE be.bowler_id = ?
-        AND i.bowling_team = ?
-        {tournament_filter}
+
+        WHERE 
+            be.bowler_id = ?
+            AND i.bowling_team = ?
+            {tournament_filter}
+
         GROUP BY m.match_id
         ORDER BY m.match_date
+
     """, query_args)
 
     history = [dict(row) for row in cursor.fetchall()]

@@ -5096,6 +5096,7 @@ def get_tournament_standings(payload: dict):
         WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
     """, (tournament,))
 
+
     innings_data = cur.fetchall()
 
     team_stats = {}
@@ -5109,12 +5110,12 @@ def get_tournament_standings(payload: dict):
         innings = row["innings"]
         overs_bowled = row["overs_bowled"]
         result = row["result"]
-        winner = row["winner_id"]
+        winner_name = row["winner_name"]
         adjusted_overs = row["adjusted_overs"] or 20.0  # default to 20 if not set
 
         # Determine overs faced using proper NRR logic
         is_chasing = innings == 2
-        lost_while_chasing = is_chasing and winner and winner != team
+        lost_while_chasing = is_chasing and winner_name and winner_name != team
         was_all_out = wickets >= 10
 
         if was_all_out or lost_while_chasing:
@@ -5136,10 +5137,10 @@ def get_tournament_standings(payload: dict):
         if result == "no result":
             team_stats[team]["no_results"] += 1
             team_stats[team]["points"] += 1
-        elif winner == team:
+        elif winner_name == team:
             team_stats[team]["wins"] += 1
             team_stats[team]["points"] += 2
-        elif winner and winner != team:
+        elif winner_name and winner_name != team:
             team_stats[team]["losses"] += 1
 
         # Batting stats

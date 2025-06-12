@@ -1043,8 +1043,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         "winner": winner
     }
 
-
-
 @app.get("/team-players")
 def get_players_for_team(country_name: str, team_category: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -1808,7 +1806,7 @@ def player_trend_analysis(payload: TrendAnalysisPayload):
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        WHERE be.batter_id = ?
+        WHERE be.dismissed_player_id = ?
         AND i.batting_team = ?
         AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
         {tournament_filter}
@@ -1952,19 +1950,27 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
             "extras": row["extras"],
             "false_pct": round(false_pct, 2)
         })
-
-    # Dismissals
+    
+    # Step 1: Fetch all dismissals where this bowler was involved
     cursor.execute(f"""
         SELECT LOWER(be.dismissal_type) AS type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         WHERE be.bowler_id = ? AND i.bowling_team = ? {tournament_filter}
-          AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
+        AND be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) != 'not out'
     """, query_args)
+
+    # Step 2: Filter for dismissals that count towards the bowler
     dismissals = defaultdict(int)
+    credited_dismissals = {
+        "bowled", "caught", "lbw", "stumped", "hit wicket", "caught and bowled", "hit the ball twice"
+    }
     for row in cursor.fetchall():
-        dismissals[row["type"]] += 1
+        dtype = row["type"]
+        if dtype in credited_dismissals:
+            dismissals[dtype] += 1
+
     
     print("📤 Returning Bowling Trend Response:", {
         "bowler_history": history,
@@ -2013,13 +2019,18 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
         style = (row["bowling_style"] or "").lower()
         zone_map = zone_maps["spin"] if "spin" in style else zone_maps["pace"]
 
-        total_runs = (row["runs"] or 0) + (row["wides"] or 0) + (row["no_balls"] or 0)
+        wides = row["wides"] or 0
+        no_balls = row["no_balls"] or 0
+        legal_delivery = (wides == 0 and no_balls == 0)
+
+        total_runs = (row["runs"] or 0) + wides + no_balls
 
         for zone, (start, end) in zone_map.items():
             if start <= pitch_y < end:
-                zone_stats[zone]["balls"] += 1
+                if legal_delivery:
+                    zone_stats[zone]["balls"] += 1
+                    zone_stats[zone]["dots"] += row["dot_balls"] or 0
                 zone_stats[zone]["runs"] += total_runs
-                zone_stats[zone]["dots"] += row["dot_balls"] or 0
                 if row["dismissal_type"] and row["dismissal_type"].lower() != "not out":
                     zone_stats[zone]["wickets"] += 1
                 if (row["edged"] or row["ball_missed"]) and row["shot_type"] and row["shot_type"].lower() != "leave":

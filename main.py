@@ -4862,31 +4862,29 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         # 6. WK Catches (only 'catching' by known keepers)
     cursor.execute(f"""
         SELECT 
-            fc.fielder_id,
+            be.fielder_id,
             p.player_name AS name,
             c.country_name AS country,
             COUNT(*) AS wk_catches
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE bfe.event_id = 2
-          AND LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
-          AND fc.fielder_id IN (
-              SELECT DISTINCT fc2.fielder_id
-              FROM fielding_contributions fc2
-              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-          )
-          AND i.bowling_team IN ({placeholders})
-          AND m.tournament_id = ?
-        GROUP BY fc.fielder_id
+        WHERE LOWER(be.dismissal_type) = 'caught'
+        AND be.fielder_id IN (
+            SELECT DISTINCT fc.fielder_id
+            FROM fielding_contributions fc
+            JOIN ball_events be2 ON fc.ball_id = be2.ball_id
+            WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+        )
+        AND i.bowling_team IN ({placeholders})
+        AND m.tournament_id = ?
+        GROUP BY be.fielder_id
         ORDER BY wk_catches DESC
-        LIMIT 10;
+        LIMIT 10
     """, country_names + [tournament_id])
+
 
     leaderboards["WK Catches"] = [
         {
@@ -4900,30 +4898,29 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         # 7. WK Stumpings
     cursor.execute(f"""
         SELECT 
-            fc.fielder_id,
+            be.fielder_id,
             p.player_name AS name,
             c.country_name AS country,
             COUNT(*) AS wk_stumpings
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE bfe.event_id = 14
-          AND fc.fielder_id IN (
-              SELECT DISTINCT fc2.fielder_id
-              FROM fielding_contributions fc2
-              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-          )
-          AND i.bowling_team IN ({placeholders})
-          AND m.tournament_id = ?
-        GROUP BY fc.fielder_id
+        WHERE LOWER(be.dismissal_type) = 'stumping'
+        AND be.fielder_id IN (
+            SELECT DISTINCT fc.fielder_id
+            FROM fielding_contributions fc
+            JOIN ball_events be2 ON fc.ball_id = be2.ball_id
+            WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+        )
+        AND i.bowling_team IN ({placeholders})
+        AND m.tournament_id = ?
+        GROUP BY be.fielder_id
         ORDER BY wk_stumpings DESC
-        LIMIT 10;
+        LIMIT 10
     """, country_names + [tournament_id])
+
 
     leaderboards["WK Stumpings"] = [
         {
@@ -4934,34 +4931,32 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         for row in cursor.fetchall()
     ]
 
-    # 8. WK Dismissals
+        # 8. WK Dismissals
     cursor.execute(f"""
         SELECT 
-            fc.fielder_id,
+            be.fielder_id,
             p.player_name AS name,
             c.country_name AS country,
             COUNT(*) AS wk_dismissals
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON be.ball_id = bfe.ball_id
+        FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
-        JOIN players p ON fc.fielder_id = p.player_id
+        JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE bfe.event_id IN (2, 3, 14)
-          AND LOWER(be.fielding_style) IN ('catching', 'wk normal', 'wk dive')
-          AND fc.fielder_id IN (
-              SELECT DISTINCT fc2.fielder_id
-              FROM fielding_contributions fc2
-              JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
-              WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
-          )
-          AND i.bowling_team IN ({placeholders})
-          AND m.tournament_id = ?
-        GROUP BY fc.fielder_id
+        WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumping')
+        AND be.fielder_id IN (
+            SELECT DISTINCT fc.fielder_id
+            FROM fielding_contributions fc
+            JOIN ball_events be2 ON fc.ball_id = be2.ball_id
+            WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+        )
+        AND i.bowling_team IN ({placeholders})
+        AND m.tournament_id = ?
+        GROUP BY be.fielder_id
         ORDER BY wk_dismissals DESC
-        LIMIT 10;
+        LIMIT 10
     """, country_names + [tournament_id])
+
 
     leaderboards["WK Dismissals"] = [
         {
@@ -4974,32 +4969,60 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
 
     # 9. Best WK Conversion Rate
     cursor.execute(f"""
+        WITH wk_dismissals AS (
+            SELECT be.fielder_id AS fielder_id
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumping')
+            AND i.bowling_team IN ({placeholders})
+            AND m.tournament_id = ?
+        ),
+        wk_misses AS (
+            SELECT fc.fielder_id AS fielder_id
+            FROM ball_fielding_events bfe
+            JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
+            JOIN ball_events be ON be.ball_id = bfe.ball_id
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            WHERE bfe.event_id IN (6, 7, 15)
+            AND LOWER(be.fielding_style) IN ('wk normal', 'wk dive')
+            AND i.bowling_team IN ({placeholders})
+            AND m.tournament_id = ?
+        )
         SELECT 
-            fc.fielder_id,
+            p.player_id AS fielder_id,
             p.player_name AS name,
             c.country_name AS country,
-            SUM(CASE WHEN bfe.event_id IN (2, 3, 14) THEN 1 ELSE 0 END) AS wk_dismissals,
-            SUM(CASE WHEN bfe.event_id IN (6, 7, 15) THEN 1 ELSE 0 END) AS wk_misses,
+            COALESCE(d.dismissals, 0) AS wk_dismissals,
+            COALESCE(m.misses, 0) AS wk_misses,
             ROUND(
-                100.0 * SUM(CASE WHEN bfe.event_id IN (2, 3, 14) THEN 1 ELSE 0 END) /
-                NULLIF(SUM(CASE WHEN bfe.event_id IN (2, 3, 14, 6, 7, 15) THEN 1 ELSE 0 END), 0),
-                1
+                100.0 * COALESCE(d.dismissals, 0) /
+                NULLIF(COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0), 0), 1
             ) AS wk_conversion_rate
-        FROM ball_fielding_events bfe
-        JOIN fielding_contributions fc ON bfe.ball_id = fc.ball_id
-        JOIN ball_events be ON be.ball_id = bfe.ball_id
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        JOIN players p ON fc.fielder_id = p.player_id
+        FROM players p
         JOIN countries c ON p.country_id = c.country_id
-        WHERE LOWER(be.fielding_style) IN ('wk normal', 'wk dive')  -- ✅ moved here
-        AND i.bowling_team IN ({placeholders})
-        AND m.tournament_id = ?
-        GROUP BY fc.fielder_id
-        HAVING (wk_dismissals + wk_misses) > 0
+        LEFT JOIN (
+            SELECT fielder_id, COUNT(*) AS dismissals
+            FROM wk_dismissals
+            GROUP BY fielder_id
+        ) d ON p.player_id = d.fielder_id
+        LEFT JOIN (
+            SELECT fielder_id, COUNT(*) AS misses
+            FROM wk_misses
+            GROUP BY fielder_id
+        ) m ON p.player_id = m.fielder_id
+        WHERE (COALESCE(d.dismissals, 0) + COALESCE(m.misses, 0)) > 0
+        AND p.player_id IN (
+            SELECT DISTINCT fc2.fielder_id
+            FROM fielding_contributions fc2
+            JOIN ball_events be2 ON fc2.ball_id = be2.ball_id
+            WHERE LOWER(be2.fielding_style) IN ('wk normal', 'wk dive')
+        )
         ORDER BY wk_conversion_rate DESC
-        LIMIT 10;
-    """, country_names + [tournament_id])
+        LIMIT 10
+    """, country_names * 2 + [tournament_id] * 2)
+
 
 
     leaderboards["Best WK Conversion Rate"] = [

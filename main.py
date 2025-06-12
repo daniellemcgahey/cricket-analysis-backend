@@ -2050,7 +2050,8 @@ def player_bowling_trend_analysis(payload: TrendAnalysisBowlingPayload):
                     zone_stats[zone]["balls"] += 1
                     zone_stats[zone]["dots"] += row["dot_balls"] or 0
                 zone_stats[zone]["runs"] += total_runs
-                if row["dismissal_type"] and row["dismissal_type"].lower() != "not out":
+                if row["dismissal_type"] and row["dismissal_type"].lower() in (
+                    "bowled", "caught", "lbw", "stumped", "hit wicket"):
                     zone_stats[zone]["wickets"] += 1
                 if legal_delivery and (row["edged"] or row["ball_missed"]) and row["shot_type"] and row["shot_type"].lower() != "leave":
                     zone_stats[zone]["false_shots"] += 1

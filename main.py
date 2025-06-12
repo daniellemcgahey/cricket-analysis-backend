@@ -4907,7 +4907,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         JOIN matches m ON i.match_id = m.match_id
         JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE LOWER(be.dismissal_type) = 'stumping'
+        WHERE LOWER(be.dismissal_type) = 'stumped'
         AND be.fielder_id IN (
             SELECT DISTINCT fc.fielder_id
             FROM fielding_contributions fc
@@ -4943,7 +4943,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
         JOIN matches m ON i.match_id = m.match_id
         JOIN players p ON be.fielder_id = p.player_id
         JOIN countries c ON p.country_id = c.country_id
-        WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumping')
+        WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumped')
         AND be.fielder_id IN (
             SELECT DISTINCT fc.fielder_id
             FROM fielding_contributions fc
@@ -4974,7 +4974,7 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
-            WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumping')
+            WHERE LOWER(be.dismissal_type) IN ('caught', 'run out', 'stumped')
             AND i.bowling_team IN ({placeholders})
             AND m.tournament_id = ?
         ),

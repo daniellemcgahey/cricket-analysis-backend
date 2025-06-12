@@ -5075,7 +5075,7 @@ def get_tournament_standings(payload: dict):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # Pull innings + ball summary
+    # Query includes adjusted_overs from the matches table
     cur.execute("""
         SELECT 
             i.innings_id,
@@ -5088,13 +5088,11 @@ def get_tournament_standings(payload: dict):
             m.match_id,
             m.result,
             m.winner_id,
+            m.adjusted_overs
         FROM innings i
         JOIN matches m ON i.match_id = m.match_id
-        JOIN countries c1 ON i.batting_team = c1.country_name
-    WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
-
+        WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
     """, (tournament,))
-
     innings_data = cur.fetchall()
 
     team_stats = {}
@@ -5109,11 +5107,19 @@ def get_tournament_standings(payload: dict):
         overs_bowled = row["overs_bowled"]
         result = row["result"]
         winner = row["winner_id"]
+        adjusted_overs = row["adjusted_overs"] or 20.0  # default to 20 if not set
 
-        # Overs faced logic
-        dismissed = wickets >= 10
-        overs_faced = 20.0 if dismissed else overs_bowled
+        # Determine overs faced using proper NRR logic
+        is_chasing = innings == 2
+        lost_while_chasing = is_chasing and winner and winner != team
+        was_all_out = wickets >= 10
 
+        if was_all_out or lost_while_chasing:
+            overs_faced = adjusted_overs
+        else:
+            overs_faced = overs_bowled
+
+        # Initialize team if needed
         if team not in team_stats:
             team_stats[team] = {
                 "played": 0, "wins": 0, "losses": 0, "no_results": 0,
@@ -5122,7 +5128,7 @@ def get_tournament_standings(payload: dict):
                 "runs_conceded": 0, "overs_bowled": 0.0
             }
 
-        # Match result stats
+        # Update match result
         team_stats[team]["played"] += 1
         if result == "no result":
             team_stats[team]["no_results"] += 1
@@ -5130,14 +5136,14 @@ def get_tournament_standings(payload: dict):
         elif winner == team:
             team_stats[team]["wins"] += 1
             team_stats[team]["points"] += 2
-        elif winner is not None:
+        elif winner and winner != team:
             team_stats[team]["losses"] += 1
 
         # Batting stats
         team_stats[team]["runs_scored"] += runs
         team_stats[team]["overs_faced"] += overs_faced
 
-        # Bowling perspective for opposition
+        # Bowling stats for opponent
         if opp not in team_stats:
             team_stats[opp] = {
                 "played": 0, "wins": 0, "losses": 0, "no_results": 0,
@@ -5149,15 +5155,13 @@ def get_tournament_standings(payload: dict):
         team_stats[opp]["runs_conceded"] += runs
         team_stats[opp]["overs_bowled"] += overs_faced
 
-    # Final table formatting
+    # Final formatting
     table = []
     for team, data in team_stats.items():
         if data["overs_faced"] == 0 or data["overs_bowled"] == 0:
             nrr = 0.0
         else:
-            run_rate_for = data["runs_scored"] / data["overs_faced"]
-            run_rate_against = data["runs_conceded"] / data["overs_bowled"]
-            nrr = run_rate_for - run_rate_against
+            nrr = (data["runs_scored"] / data["overs_faced"]) - (data["runs_conceded"] / data["overs_bowled"])
 
         table.append({
             "team": team,
@@ -5169,7 +5173,7 @@ def get_tournament_standings(payload: dict):
             "nrr": round(nrr, 2)
         })
 
-    # Sort: points > NRR > team name
+    # Sort table: Points ↓, NRR ↓, Team Name A–Z
     table.sort(key=lambda x: (-x["points"], -x["nrr"], x["team"].lower()))
     return table
 

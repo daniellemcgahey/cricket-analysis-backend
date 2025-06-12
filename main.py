@@ -5066,6 +5066,116 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
 
     return leaderboards
 
+@app.post("/tournament-standings")
+def get_tournament_standings(payload: dict):
+    team_category = payload["team_category"]
+    tournament = payload["tournament"]
+
+    conn = sqlite3.connect("cricket_analysis.db")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    # Pull innings + ball summary
+    cur.execute("""
+        SELECT 
+            i.innings_id,
+            i.batting_team,
+            i.bowling_team,
+            i.overs_bowled,
+            i.wickets,
+            i.total_runs,
+            i.innings,
+            m.match_id,
+            m.result,
+            m.winner_id,
+            c1.team_category
+        FROM innings i
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN countries c1 ON i.batting_team = c1.country_name
+        WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
+          AND c1.team_category = ?
+    """, (tournament, team_category))
+
+    innings_data = cur.fetchall()
+
+    team_stats = {}
+
+    for row in innings_data:
+        team = row["batting_team"]
+        opp = row["bowling_team"]
+        match_id = row["match_id"]
+        runs = row["total_runs"]
+        wickets = row["wickets"]
+        innings = row["innings"]
+        overs_bowled = row["overs_bowled"]
+        result = row["result"]
+        winner = row["winner_id"]
+
+        # Overs faced logic
+        dismissed = wickets >= 10
+        overs_faced = 20.0 if dismissed else overs_bowled
+
+        if team not in team_stats:
+            team_stats[team] = {
+                "played": 0, "wins": 0, "losses": 0, "no_results": 0,
+                "points": 0,
+                "runs_scored": 0, "overs_faced": 0.0,
+                "runs_conceded": 0, "overs_bowled": 0.0
+            }
+
+        # Match result stats
+        team_stats[team]["played"] += 1
+        if result == "no result":
+            team_stats[team]["no_results"] += 1
+            team_stats[team]["points"] += 1
+        elif winner == team:
+            team_stats[team]["wins"] += 1
+            team_stats[team]["points"] += 2
+        elif winner is not None:
+            team_stats[team]["losses"] += 1
+
+        # Batting stats
+        team_stats[team]["runs_scored"] += runs
+        team_stats[team]["overs_faced"] += overs_faced
+
+        # Bowling perspective for opposition
+        if opp not in team_stats:
+            team_stats[opp] = {
+                "played": 0, "wins": 0, "losses": 0, "no_results": 0,
+                "points": 0,
+                "runs_scored": 0, "overs_faced": 0.0,
+                "runs_conceded": 0, "overs_bowled": 0.0
+            }
+
+        team_stats[opp]["runs_conceded"] += runs
+        team_stats[opp]["overs_bowled"] += overs_faced
+
+    # Final table formatting
+    table = []
+    for team, data in team_stats.items():
+        if data["overs_faced"] == 0 or data["overs_bowled"] == 0:
+            nrr = 0.0
+        else:
+            run_rate_for = data["runs_scored"] / data["overs_faced"]
+            run_rate_against = data["runs_conceded"] / data["overs_bowled"]
+            nrr = run_rate_for - run_rate_against
+
+        table.append({
+            "team": team,
+            "played": data["played"],
+            "wins": data["wins"],
+            "losses": data["losses"],
+            "no_results": data["no_results"],
+            "points": data["points"],
+            "nrr": round(nrr, 2)
+        })
+
+    # Sort: points > NRR > team name
+    table.sort(key=lambda x: (-x["points"], -x["nrr"], x["team"].lower()))
+    return table
+
+
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

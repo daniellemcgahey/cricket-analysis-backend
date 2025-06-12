@@ -5088,11 +5088,14 @@ def get_tournament_standings(payload: dict):
             m.match_id,
             m.result,
             m.winner_id,
+            cw.country_name AS winner_name,
             m.adjusted_overs
         FROM innings i
         JOIN matches m ON i.match_id = m.match_id
+        LEFT JOIN countries cw ON m.winner_id = cw.country_id
         WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
     """, (tournament,))
+
     innings_data = cur.fetchall()
 
     team_stats = {}
@@ -5170,7 +5173,7 @@ def get_tournament_standings(payload: dict):
             "losses": data["losses"],
             "no_results": data["no_results"],
             "points": data["points"],
-            "nrr": round(nrr, 2)
+            "nrr": round(nrr, 3)
         })
 
     # Sort table: Points ↓, NRR ↓, Team Name A–Z

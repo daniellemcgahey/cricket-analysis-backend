@@ -5088,13 +5088,12 @@ def get_tournament_standings(payload: dict):
             m.match_id,
             m.result,
             m.winner_id,
-            c1.team_category
         FROM innings i
         JOIN matches m ON i.match_id = m.match_id
         JOIN countries c1 ON i.batting_team = c1.country_name
-        WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
-          AND c1.team_category = ?
-    """, (tournament, team_category))
+    WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
+
+    """, (tournament))
 
     innings_data = cur.fetchall()
 

@@ -5068,6 +5068,8 @@ def get_tournament_fielding_leaders(payload: TournamentFieldingLeadersPayload):
 
 @app.post("/tournament-standings")
 def get_tournament_standings(payload: dict):
+    import sqlite3
+
     team_category = payload["team_category"]
     tournament = payload["tournament"]
 
@@ -5075,7 +5077,7 @@ def get_tournament_standings(payload: dict):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # Query includes adjusted_overs from the matches table
+    # Query with winner name and adjusted overs
     cur.execute("""
         SELECT 
             i.innings_id,
@@ -5096,9 +5098,7 @@ def get_tournament_standings(payload: dict):
         WHERE m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)
     """, (tournament,))
 
-
     innings_data = cur.fetchall()
-
     team_stats = {}
 
     for row in innings_data:
@@ -5111,9 +5111,9 @@ def get_tournament_standings(payload: dict):
         overs_bowled = row["overs_bowled"]
         result = row["result"]
         winner_name = row["winner_name"]
-        adjusted_overs = row["adjusted_overs"] or 20.0  # default to 20 if not set
+        adjusted_overs = row["adjusted_overs"] or 20.0
 
-        # Determine overs faced using proper NRR logic
+        # NRR-safe overs faced logic
         is_chasing = innings == 2
         lost_while_chasing = is_chasing and winner_name and winner_name != team
         was_all_out = wickets >= 10
@@ -5123,43 +5123,39 @@ def get_tournament_standings(payload: dict):
         else:
             overs_faced = overs_bowled
 
-        # Initialize team if needed
+        # Init batting team
         if team not in team_stats:
             team_stats[team] = {
-                "played": 0, "wins": 0, "losses": 0, "no_results": 0,
-                "points": 0,
+                "played": 0, "wins": 0, "no_results": 0, "points": 0,
                 "runs_scored": 0, "overs_faced": 0.0,
                 "runs_conceded": 0, "overs_bowled": 0.0
             }
 
-        # Update match result
         team_stats[team]["played"] += 1
+
         if result == "no result":
             team_stats[team]["no_results"] += 1
             team_stats[team]["points"] += 1
         elif winner_name == team:
             team_stats[team]["wins"] += 1
             team_stats[team]["points"] += 2
-        elif winner_name and winner_name != team:
-            team_stats[team]["losses"] += 1
+        # ❌ no manual losses += 1 here
 
-        # Batting stats
         team_stats[team]["runs_scored"] += runs
         team_stats[team]["overs_faced"] += overs_faced
 
-        # Bowling stats for opponent
+        # Init bowling team
         if opp not in team_stats:
             team_stats[opp] = {
-                "played": 0, "wins": 0, "losses": 0, "no_results": 0,
-                "points": 0,
+                "played": 0, "wins": 0, "no_results": 0, "points": 0,
                 "runs_scored": 0, "overs_faced": 0.0,
                 "runs_conceded": 0, "overs_bowled": 0.0
             }
 
         team_stats[opp]["runs_conceded"] += runs
-        team_stats[opp]["overs_bowled"] += overs_faced
+        team_stats[opp]["overs_bowled"] += overs_faced  # key: same overs as batting team faced
 
-    # Final formatting
+    # Format final table
     table = []
     for team, data in team_stats.items():
         if data["overs_faced"] == 0 or data["overs_bowled"] == 0:
@@ -5167,19 +5163,21 @@ def get_tournament_standings(payload: dict):
         else:
             nrr = (data["runs_scored"] / data["overs_faced"]) - (data["runs_conceded"] / data["overs_bowled"])
 
+        losses = data["played"] - data["wins"] - data["no_results"]
+
         table.append({
             "team": team,
             "played": data["played"],
             "wins": data["wins"],
-            "losses": data["losses"],
+            "losses": losses,
             "no_results": data["no_results"],
             "points": data["points"],
             "nrr": round(nrr, 3)
         })
 
-    # Sort table: Points ↓, NRR ↓, Team Name A–Z
     table.sort(key=lambda x: (-x["points"], -x["nrr"], x["team"].lower()))
     return table
+
 
 
 

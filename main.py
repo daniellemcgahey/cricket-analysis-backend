@@ -5365,7 +5365,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         stats['batting']['Innings'] = batting_data[0] or 0
         stats['batting']['Runs Off Bat'] = batting_data[1] or 0
         stats['batting']['Batting Extras'] = batting_data[2] or 0
-        stats['batting']['Total Runs'] = stats['batting']['Runs Off Bat'] + stats['batting']['Extras']
+        stats['batting']['Total Runs'] = stats['batting']['Runs Off Bat'] + stats['batting']['Batting Extras']
         stats['batting']['Balls Faced'] = batting_data[3] or 0
         stats['batting']['Dot Balls Faced'] = batting_data[4] or 0
         stats['batting']['1s'] = batting_data[5] or 0

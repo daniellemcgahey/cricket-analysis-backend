@@ -5334,64 +5334,75 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     # Batting query
     batting_query = f"""
         SELECT
-            COUNT(DISTINCT be.batter_id),
-            SUM(be.runs),
-            SUM(CASE WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0 END),
+            COUNT(DISTINCT be.batter_id || '-' || be.innings_id) AS batting_innings,
+            SUM(be.runs) AS runs_off_bat,
+            SUM(CAST(json_extract(be.extras, '$.wides') AS INTEGER)) +
+            SUM(CAST(json_extract(be.extras, '$.no_balls') AS INTEGER)) +
+            SUM(CAST(json_extract(be.extras, '$.byes') AS INTEGER)) +
+            SUM(CAST(json_extract(be.extras, '$.leg_byes') AS INTEGER)) AS extras,
             SUM(CASE 
-                WHEN be.runs = 0 
+                WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0
+            END) AS balls_faced,
+            SUM(CASE 
+                WHEN be.runs = 0
                 AND json_extract(be.extras, '$.wides') = 0
-                AND json_extract(be.extras, '$.no_balls') = 0
-                AND json_extract(be.extras, '$.byes') = 0
-                AND json_extract(be.extras, '$.leg_byes') = 0
-                AND json_extract(be.extras, '$.penalty') = 0
+                AND json_extract(be.extras, '$.no_balls') IS NULL
+                AND json_extract(be.extras, '$.byes') IS NULL
+                AND json_extract(be.extras, '$.leg_byes') IS NULL
+                AND json_extract(be.extras, '$.penalty') IS NULL
                 THEN 1 ELSE 0
             END) AS dot_balls,
-            SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END),
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END),
-            SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END),
-            AVG(be.batting_intent_score)
+            SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
+            SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
+            SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
+            SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
+            SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS dismissals,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END) AS attacking,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END) AS defensive,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END) AS rotation,
+            AVG(be.batting_intent_score) AS avg_intent
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE {global_batting_conditions}
     """
+
 
     stats = defaultdict(lambda: defaultdict(float))
     c.execute(batting_query, match_ids + [country_id])
     batting_data = c.fetchone()
     if batting_data:
         stats['batting']['Innings'] = batting_data[0] or 0
-        stats['batting']['Runs Scored'] = batting_data[1] or 0
-        stats['batting']['Balls Faced'] = batting_data[2] or 0
-        stats['batting']['Dot Balls Faced'] = batting_data[3] or 0
-        stats['batting']['1s'] = batting_data[4] or 0
-        stats['batting']['2s'] = batting_data[5] or 0
-        stats['batting']['3s'] = batting_data[6] or 0
-        stats['batting']['4s'] = batting_data[7] or 0
-        stats['batting']['6s'] = batting_data[8] or 0
-        stats['batting']['Dismissals'] = batting_data[9] or 0
+        stats['batting']['Runs Off Bat'] = batting_data[1] or 0
+        stats['batting']['Extras'] = batting_data[2] or 0
+        stats['batting']['Total Runs'] = stats['batting']['Runs Off Bat'] + stats['batting']['Extras']
+        stats['batting']['Balls Faced'] = batting_data[3] or 0
+        stats['batting']['Dot Balls Faced'] = batting_data[4] or 0
+        stats['batting']['1s'] = batting_data[5] or 0
+        stats['batting']['2s'] = batting_data[6] or 0
+        stats['batting']['3s'] = batting_data[7] or 0
+        stats['batting']['4s'] = batting_data[8] or 0
+        stats['batting']['6s'] = batting_data[9] or 0
+        stats['batting']['Dismissals'] = batting_data[10] or 0
 
         if stats['batting']['Balls Faced'] > 0:
-            stats['batting']['Strike Rate'] = round((batting_data[1] * 100 / (batting_data[2])), 2) 
-            stats['batting']['Scoring Shot %'] = round((( 1 - (stats['batting']['Dot Balls Faced'] / stats['batting']['Balls Faced'])) * 100), 2)
+            stats['batting']['Strike Rate'] = round(
+                (stats['batting']['Runs Off Bat'] * 100 / stats['batting']['Balls Faced']), 2)
+            stats['batting']['Scoring Shot %'] = round(
+                (1 - (stats['batting']['Dot Balls Faced'] / stats['batting']['Balls Faced'])) * 100, 2)
 
         if stats['batting']['Dismissals'] > 0:
-            stats['batting']['Batters Average'] = round((batting_data[1] / (batting_data[9])), 2) 
+            stats['batting']['Batters Average'] = round(
+                stats['batting']['Runs Off Bat'] / stats['batting']['Dismissals'], 2)
 
-        total_intent = sum(filter(None, [batting_data[10], batting_data[11], batting_data[12]]))
+        total_intent = sum(filter(None, [batting_data[11], batting_data[12], batting_data[13]]))
         if total_intent > 0:
-            stats['batting']['Attacking Shot %'] = round(((batting_data[10] / total_intent) * 100), 2)
-            stats['batting']['Defensive Shot %'] = round(((batting_data[11] / total_intent) * 100), 2)
-            stats['batting']['Rotation Shot %'] = round(((batting_data[12] / total_intent) * 100), 2)
-        # batting_data[13] = AVG(batting_intent_score)
-        if batting_data[13] is not None:
-            stats['batting']['Avg Intent Score'] = round(batting_data[13], 2)
+            stats['batting']['Attacking Shot %'] = round((batting_data[11] / total_intent) * 100, 2)
+            stats['batting']['Defensive Shot %'] = round((batting_data[12] / total_intent) * 100, 2)
+            stats['batting']['Rotation Shot %'] = round((batting_data[13] / total_intent) * 100, 2)
 
+        if batting_data[14] is not None:
+            stats['batting']['Avg Intent Score'] = round(batting_data[14], 2)
 
 
 # Bowling

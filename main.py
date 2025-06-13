@@ -5398,7 +5398,8 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
 # Bowling
     bowling_query = f"""
     SELECT
-        COUNT(*) AS balls,
+        COUNT(*) AS total_balls,
+        SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
         SUM(be.runs) AS runs_conceded,
         SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
         SUM(be.dot_balls) AS dot_balls,
@@ -5412,18 +5413,21 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     bowling_data = c.fetchone()
 
     if bowling_data:
-        stats['bowling']['Overs'] = f"{bowling_data[0]//6}.{bowling_data[0]%6}"
-        stats['bowling']['Runs Conceded'] = bowling_data[1]
-        stats['bowling']['Wickets'] = bowling_data[2]
-        stats['bowling']['Dot Balls Bowled'] = bowling_data[3]
-        stats['bowling']['Extras'] = bowling_data[4]
-        stats['bowling']['Boundaries Conceded'] = bowling_data[5]
+        total_balls = bowling_data[0]
+        legal_balls = bowling_data[1]
+
+        stats['bowling']['Overs'] = f"{legal_balls // 6}.{legal_balls % 6}"
+        stats['bowling']['Runs Conceded'] = bowling_data[2]
+        stats['bowling']['Wickets'] = bowling_data[3]
+        stats['bowling']['Dot Balls Bowled'] = bowling_data[4]
+        stats['bowling']['Extras'] = bowling_data[5]
+        stats['bowling']['Boundaries Conceded'] = bowling_data[6]
 
         if bowling_data[0] > 0:
-            stats['bowling']['Economy'] = round((bowling_data[1] / (bowling_data[0] / 6)), 2)
-            stats['bowling']['Dot Ball %'] = round(((bowling_data[3] / bowling_data[0]) * 100), 2)
-            if bowling_data[2] > 0:
-                stats['bowling']['Bowlers Average'] = round((bowling_data[1] / bowling_data[2]), 2)
+            stats['bowling']['Economy'] = round((bowling_data[2] / (legal_balls / 6)), 2)
+            stats['bowling']['Dot Ball %'] = round(((bowling_data[4] / total_balls) * 100), 2)
+            if bowling_data[3] > 0:
+                stats['bowling']['Bowlers Average'] = round((bowling_data[2] / bowling_data[3]), 2)
 
     #Fielding
 

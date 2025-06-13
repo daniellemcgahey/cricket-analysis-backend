@@ -5336,22 +5336,11 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         SELECT
             COUNT(DISTINCT be.batter_id || '-' || be.innings_id) AS batting_innings,
             SUM(be.runs) AS runs_off_bat,
-            SUM(CAST(json_extract(be.extras, '$.wides') AS INTEGER)) +
-            SUM(CAST(json_extract(be.extras, '$.no_balls') AS INTEGER)) +
-            SUM(CAST(json_extract(be.extras, '$.byes') AS INTEGER)) +
-            SUM(CAST(json_extract(be.extras, '$.leg_byes') AS INTEGER)) AS extras,
+            SUM(be.wides) + SUM(be.no_balls) + SUM(be.byes) + SUM(be.leg_byes) AS extras,
             SUM(CASE 
-                WHEN json_extract(be.extras, '$.wides') = 0 THEN 1 ELSE 0
+                WHEN be.wides = 0 THEN 1 ELSE 0
             END) AS balls_faced,
-            SUM(CASE 
-                WHEN be.runs = 0
-                AND json_extract(be.extras, '$.wides') = 0
-                AND json_extract(be.extras, '$.no_balls') IS NULL
-                AND json_extract(be.extras, '$.byes') IS NULL
-                AND json_extract(be.extras, '$.leg_byes') IS NULL
-                AND json_extract(be.extras, '$.penalty') IS NULL
-                THEN 1 ELSE 0
-            END) AS dot_balls,
+            SUM(be.dot_balls) AS dot_balls,
             SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
             SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
             SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
@@ -5366,6 +5355,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE {global_batting_conditions}
     """
+
 
 
     stats = defaultdict(lambda: defaultdict(float))

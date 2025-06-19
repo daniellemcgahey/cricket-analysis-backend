@@ -5536,6 +5536,15 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     stats['fielding']['Conversion Rate'] = round(((successful / opportunities) * 100 if opportunities > 0 else 0), 2)
     stats['fielding']['Pressure Score'] = dh_ + cs_ + b_ - o_ - mf_ - f_
     stats['fielding']['Fielding Impact Rating'] = total_ir
+    
+    total_balls_fielded = stats['fielding']['Total Balls Fielded']
+    clean_pickups = stats['fielding']['Clean Stop/Pick Up']
+
+    stats['fielding']['Clean Hands %'] = round(
+        (clean_pickups / total_balls_fielded) * 100 if total_balls_fielded > 0 else 0,
+        1
+    )
+
 
 
     conn.close()

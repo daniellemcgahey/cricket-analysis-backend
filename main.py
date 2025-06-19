@@ -5502,7 +5502,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     expected_actual_query = f"""
     SELECT 
         COALESCE(SUM(be.expected_runs), 0),
-        COALESCE(SUM(be.runs + be.extras + be.wides + be.no_balls + be.byes + be.leg_byes + be.penalty_runs), 0)
+        COALESCE(SUM(be.runs + be.byes), 0)
     FROM ball_fielding_events bfe
     JOIN ball_events be ON bfe.ball_id = be.ball_id
     JOIN innings i ON be.innings_id = i.innings_id

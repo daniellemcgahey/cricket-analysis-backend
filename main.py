@@ -5455,8 +5455,8 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     bowling_data = c.fetchone()
 
     if bowling_data:
-        total_balls = bowling_data[0]
-        legal_balls = bowling_data[1]
+        total_balls = bowling_data[0] or 0
+        legal_balls = bowling_data[1] or 0
 
         stats['bowling']['Overs'] = f"{legal_balls // 6}.{legal_balls % 6}"
         stats['bowling']['Runs Conceded'] = bowling_data[2]
@@ -5758,8 +5758,8 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
     bowling_data = c.fetchone()
 
     if bowling_data:
-        total_balls = bowling_data[0]
-        legal_balls = bowling_data[1]
+        total_balls = bowling_data[0] or 0
+        legal_balls = bowling_data[1] or 0
         stats['bowling']['Overs'] = f"{legal_balls // 6}.{legal_balls % 6}"
         stats['bowling']['Runs Conceded'] = bowling_data[2]
         stats['bowling']['Wickets'] = bowling_data[3]

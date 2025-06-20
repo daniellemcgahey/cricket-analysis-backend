@@ -73,6 +73,16 @@ class CompareOverTournamentPayload(BaseModel):
     teamCategory: str
     selectedMatches: List[int]
 
+class ComparePlayerOverTournamentPayload(BaseModel):
+    player_id: int
+    tournaments: List[str]
+    selected_stats: List[str]
+    selected_phases: List[str]
+    bowler_type: List[str]
+    bowling_arm: List[str]
+    teamCategory: str
+    selectedMatches: List[int]
+
 class PressurePayload(BaseModel):
     country1: str
     country2: str
@@ -274,6 +284,30 @@ def compare_over_tournament(payload: CompareOverTournamentPayload):
         "tournaments": payload.tournaments,
         "stats_by_tournament": result
     }
+
+@app.post("/compare_player_over_tournament")
+def compare_player_over_tournament(payload: ComparePlayerOverTournamentPayload):
+    result = {}
+
+    for tournament in payload.tournaments:
+        stats = get_player_stats(
+            player_id=payload.player_id,
+            tournaments=[tournament],  # one at a time
+            selected_stats=payload.selected_stats,
+            selected_phases=payload.selected_phases,
+            bowler_type=payload.bowler_type,
+            bowling_arm=payload.bowling_arm,
+            team_category=payload.teamCategory,
+            selected_matches=payload.selectedMatches
+        )
+        result[tournament] = stats
+
+    return {
+        "player_id": payload.player_id,
+        "tournaments": payload.tournaments,
+        "stats_by_tournament": result
+    }
+
 
 @app.post("/wagon-wheel-comparison")
 def wagon_wheel_comparison(payload: WagonWheelPayload):
@@ -5536,7 +5570,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     stats['fielding']['Conversion Rate'] = round(((successful / opportunities) * 100 if opportunities > 0 else 0), 2)
     stats['fielding']['Pressure Score'] = dh_ + cs_ + b_ - o_ - mf_ - f_
     stats['fielding']['Fielding Impact Rating'] = total_ir
-    
+
     total_balls_fielded = stats['fielding']['Total Balls Fielded']
     clean_pickups = stats['fielding']['Clean Stop/Pick Up']
 
@@ -5554,6 +5588,288 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     pprint.pprint(stats)
 
     return stats
+
+
+def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+
+    # ✅ Get tournament IDs
+    c.execute(f"SELECT tournament_id FROM tournaments WHERE tournament_name IN ({','.join(['?']*len(tournaments))})", tournaments)
+    tournament_ids = [row[0] for row in c.fetchall()]
+    if not tournament_ids:
+        return defaultdict(lambda: defaultdict(float))
+
+    # ✅ Get matches for those tournaments
+    c.execute(f"""
+        SELECT m.match_id
+        FROM matches m
+        JOIN countries c1 ON m.team_a = c1.country_id
+        JOIN countries c2 ON m.team_b = c2.country_id
+        WHERE m.tournament_id IN ({','.join(['?'] * len(tournament_ids))})
+    """, tournament_ids)
+
+    match_ids = [row[0] for row in c.fetchall()]
+    if not match_ids:
+        print(f"❌ No matches found for player {player_id}")
+        return defaultdict(lambda: defaultdict(float))
+
+    # Apply frontend match filter here if provided
+    if selected_matches:
+        filtered_match_ids = [m for m in match_ids if m in selected_matches]
+        if not filtered_match_ids:
+            print("❌ No matches after applying selectedMatches filter")
+            return defaultdict(lambda: defaultdict(float))
+        match_ids = filtered_match_ids
+
+    match_filter = f"i.match_id IN ({','.join(['?'] * len(match_ids))})"
+
+    # Phase filter
+    phase_conditions = {
+        'Powerplay': 'be.is_powerplay = 1',
+        'Middle Overs': 'be.is_middle_overs = 1',
+        'Death Overs': 'be.is_death_overs = 1'
+    }
+    phase_clauses = [phase_conditions[p] for p in selected_phases if p in phase_conditions]
+    phase_filter = f"({' OR '.join(phase_clauses)})" if phase_clauses else "1=1"
+
+    # Bowler filters
+    bowler_type_conditions = {
+        "Pace": "p.bowling_style = 'Pace'",
+        "Medium": "p.bowling_style = 'Medium'",
+        "Leg Spin": "p.bowling_style = 'Leg Spin'",
+        "Off Spin": "p.bowling_style = 'Off Spin'"
+    }
+    bowling_arm_conditions = {
+        "Left": "p.bowling_arm = 'Left'",
+        "Right": "p.bowling_arm = 'Right'"
+    }
+
+    type_clauses = [bowler_type_conditions[bt] for bt in bowler_type if bt in bowler_type_conditions]
+    arm_clauses = [bowling_arm_conditions[arm] for arm in bowling_arm if arm in bowling_arm_conditions]
+    combined_filter_parts = []
+    if type_clauses:
+        combined_filter_parts.append("(" + " OR ".join(type_clauses) + ")")
+    if arm_clauses:
+        combined_filter_parts.append("(" + " OR ".join(arm_clauses) + ")")
+    combined_filter = " AND ".join(combined_filter_parts)
+
+    # Global filters
+    global_batting_conditions = f"{match_filter} AND be.batter_id = ? AND {phase_filter}"
+    global_bowling_conditions = f"{match_filter} AND be.bowler_id = ? AND {phase_filter}"
+    global_fielding_conditions = f"{match_filter} AND p.player_id = ? AND {phase_filter}"
+
+    stats = defaultdict(lambda: defaultdict(float))
+
+    ### Batting Query
+    batting_query = f"""
+        SELECT
+            COUNT(DISTINCT be.batter_id || '-' || be.innings_id) AS batting_innings,
+            SUM(be.runs) AS runs_off_bat,
+            SUM(be.wides) + SUM(be.no_balls) + SUM(be.byes) + SUM(be.leg_byes) AS extras,
+            SUM(CASE 
+                WHEN be.wides = 0 THEN 1 ELSE 0
+            END) AS balls_faced,
+            SUM(be.dot_balls) AS dot_balls,
+            SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
+            SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
+            SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
+            SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
+            SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS dismissals,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END) AS attacking,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END) AS defensive,
+            SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END) AS rotation,
+            AVG(be.batting_intent_score) AS avg_intent
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE {global_batting_conditions}
+    """
+
+    c.execute(batting_query, match_ids + [player_id])
+    batting_data = c.fetchone()
+    if batting_data:
+        stats['batting']['Innings'] = batting_data[0] or 0
+        stats['batting']['Runs Off Bat'] = batting_data[1] or 0
+        stats['batting']['Batting Extras'] = batting_data[2] or 0
+        stats['batting']['Total Runs'] = stats['batting']['Runs Off Bat'] + stats['batting']['Batting Extras']
+        stats['batting']['Balls Faced'] = batting_data[3] or 0
+        stats['batting']['Dot Balls Faced'] = batting_data[4] or 0
+        stats['batting']['1s'] = batting_data[5] or 0
+        stats['batting']['2s'] = batting_data[6] or 0
+        stats['batting']['3s'] = batting_data[7] or 0
+        stats['batting']['4s'] = batting_data[8] or 0
+        stats['batting']['6s'] = batting_data[9] or 0
+        stats['batting']['Dismissals'] = batting_data[10] or 0
+
+        if stats['batting']['Balls Faced'] > 0:
+            stats['batting']['Strike Rate'] = round(
+                (stats['batting']['Runs Off Bat'] * 100 / stats['batting']['Balls Faced']), 2)
+            stats['batting']['Scoring Shot %'] = round(
+                (1 - (stats['batting']['Dot Balls Faced'] / stats['batting']['Balls Faced'])) * 100, 2)
+
+        if stats['batting']['Dismissals'] > 0:
+            stats['batting']['Batters Average'] = round(
+                stats['batting']['Runs Off Bat'] / stats['batting']['Dismissals'], 2)
+
+        total_intent = sum(filter(None, [batting_data[11], batting_data[12], batting_data[13]]))
+        if total_intent > 0:
+            stats['batting']['Attacking Shot %'] = round((batting_data[11] / total_intent) * 100, 2)
+            stats['batting']['Defensive Shot %'] = round((batting_data[12] / total_intent) * 100, 2)
+            stats['batting']['Rotation Shot %'] = round((batting_data[13] / total_intent) * 100, 2)
+
+        if batting_data[14] is not None:
+            stats['batting']['Avg Intent Score'] = round(batting_data[14], 2)
+
+
+    ### Bowling Query
+    bowling_query = f"""
+        SELECT
+            COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
+            SUM(be.runs) AS runs_conceded,
+            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
+            SUM(be.dot_balls) AS dot_balls,
+            SUM(be.wides + be.no_balls) AS extras
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.bowler_id = p.player_id
+        WHERE {global_bowling_conditions} {f' AND {combined_filter}' if combined_filter else ''}
+    """
+    c.execute(bowling_query, match_ids + [player_id])
+    bowling_data = c.fetchone()
+
+    if bowling_data:
+        total_balls = bowling_data[0]
+        legal_balls = bowling_data[1]
+        stats['bowling']['Overs'] = f"{legal_balls // 6}.{legal_balls % 6}"
+        stats['bowling']['Runs Conceded'] = bowling_data[2]
+        stats['bowling']['Wickets'] = bowling_data[3]
+        stats['bowling']['Dot Balls'] = bowling_data[4]
+        stats['bowling']['Extras'] = bowling_data[5]
+
+        if legal_balls > 0:
+            stats['bowling']['Economy'] = round(bowling_data[2] / (legal_balls / 6), 2)
+            stats['bowling']['Dot Ball %'] = round((bowling_data[4] / total_balls) * 100, 2)
+            if bowling_data[3] > 0:
+                stats['bowling']['Bowlers Average'] = round(bowling_data[2] / bowling_data[3], 2)
+
+    ### Fielding Query
+    fielding_weights = {
+        'Taken Half Chance': 5,
+        'Catch': 3,
+        'Run Out': 3,
+        'Direct Hit': 2,
+        'Clean Stop/Pick Up': 1,
+        'Boundary Save': 2,
+        'Drop Catch': -3,
+        'Missed Run Out': -2,
+        'Missed Catch': -2,
+        'Missed Fielding': -1,
+        'Missed Half Chance': -0.5,
+        'Fumble': -1,
+        'Overthrow': -2
+    }
+
+    fielding_query = f"""
+        SELECT
+            SUM(CASE WHEN fe.event_name = 'Catch' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Run Out' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Drop Catch' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Boundary Save' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Clean Stop/Pick Up' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Direct Hit' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Missed Catch' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Missed Run Out' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Fumble' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Missed Fielding' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Overthrow' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Taken Half Chance' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN fe.event_name = 'Missed Half Chance' THEN 1 ELSE 0 END)
+        FROM ball_fielding_events bfe
+        JOIN fielding_events fe ON bfe.event_id = fe.event_id
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.fielder_id = p.player_id
+        WHERE {global_fielding_conditions}
+    """
+    c.execute(fielding_query, match_ids + [player_id])
+    fielding_data = c.fetchone()
+
+    fielding_labels = [
+        'Catch', 'Run Out', 'Drop Catch', 'Boundary Save',
+        'Clean Stop/Pick Up', 'Direct Hit', 'Missed Catch', 'Missed Run Out',
+        'Fumble', 'Missed Fielding', 'Overthrow', 'Taken Half Chance', 'Missed Half Chance'
+    ]
+
+    total_ir = 0
+    for label, count in zip(fielding_labels, fielding_data):
+        stats['fielding'][label] = count or 0
+        total_ir += (count or 0) * fielding_weights.get(label, 0)
+
+    # Total Balls Fielded
+    balls_fielded_query = f"""
+        SELECT COUNT(DISTINCT bfe.ball_id)
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.fielder_id = p.player_id
+        WHERE {global_fielding_conditions}
+    """
+    c.execute(balls_fielded_query, match_ids + [player_id])
+    stats['fielding']['Total Balls Fielded'] = c.fetchone()[0] or 0
+
+    # Expected vs Actual Runs
+    expected_actual_query = f"""
+        SELECT 
+            COALESCE(SUM(be.expected_runs), 0),
+            COALESCE(SUM(be.runs + be.byes), 0)
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN players p ON be.fielder_id = p.player_id
+        WHERE {global_fielding_conditions}
+    """
+    c.execute(expected_actual_query, match_ids + [player_id])
+    expected_runs, actual_runs = c.fetchone()
+    stats['fielding']['Expected Runs'] = expected_runs or 0
+    stats['fielding']['Actual Runs'] = actual_runs or 0
+    stats['fielding']['Runs Saved/Allowed'] = expected_runs - actual_runs
+
+    # Conversion Rate and Pressure Score
+    c_ = stats['fielding']['Catch']
+    r_ = stats['fielding']['Run Out']
+    d_ = stats['fielding']['Drop Catch']
+    b_ = stats['fielding']['Boundary Save']
+    cs_ = stats['fielding']['Clean Stop/Pick Up']
+    dh_ = stats['fielding']['Direct Hit']
+    mc_ = stats['fielding']['Missed Catch']
+    mru_ = stats['fielding']['Missed Run Out']
+    f_ = stats['fielding']['Fumble']
+    mf_ = stats['fielding']['Missed Fielding']
+    o_ = stats['fielding']['Overthrow']
+    thc_ = stats['fielding']['Taken Half Chance']
+    mhc_ = stats['fielding']['Missed Half Chance']
+
+    opportunities = c_ + d_ + mc_ + r_ + mru_ + 0.5 * thc_ + 0.5 * mhc_
+    successful = c_ + r_ + thc_
+    stats['fielding']['Conversion Rate'] = round(((successful / opportunities) * 100 if opportunities > 0 else 0), 2)
+    stats['fielding']['Pressure Score'] = dh_ + cs_ + b_ - o_ - mf_ - f_
+    stats['fielding']['Fielding Impact Rating'] = total_ir
+
+    total_balls_fielded = stats['fielding']['Total Balls Fielded']
+    clean_pickups = stats['fielding']['Clean Stop/Pick Up']
+
+    stats['fielding']['Clean Hands %'] = round(
+        (clean_pickups / total_balls_fielded) * 100 if total_balls_fielded > 0 else 0,
+        1
+    )
+
+    conn.close()
+
+    return stats
+
 
 def fetch_over_pressure(conn, team_names, match_ids, selected_phases):
     print("✅ fetch_over_pressure called with:", team_names, match_ids, selected_phases)

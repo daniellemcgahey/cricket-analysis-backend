@@ -5728,9 +5728,12 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
         SELECT
             COUNT(*) AS total_balls,
             SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
-            SUM(be.runs) AS runs_conceded,
+            SUM(be.runs) + SUM(be.wides) + SUM(be.no_balls) AS runs_conceded,
             SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
-            SUM(be.dot_balls) AS dot_balls,
+            SUM(CASE 
+                WHEN be.runs = 0 AND be.wides = 0 AND be.no_balls = 0 
+                THEN 1 ELSE 0 
+            END) AS dot_balls,
             SUM(be.wides + be.no_balls) AS extras,
             SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundaries
         FROM ball_events be

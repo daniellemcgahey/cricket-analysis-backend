@@ -5731,7 +5731,8 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
             SUM(be.runs) AS runs_conceded,
             SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
             SUM(be.dot_balls) AS dot_balls,
-            SUM(be.wides + be.no_balls) AS extras
+            SUM(be.wides + be.no_balls) AS extras,
+            SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundaries
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN players p ON be.bowler_id = p.player_id
@@ -5746,8 +5747,9 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
         stats['bowling']['Overs'] = f"{legal_balls // 6}.{legal_balls % 6}"
         stats['bowling']['Runs Conceded'] = bowling_data[2]
         stats['bowling']['Wickets'] = bowling_data[3]
-        stats['bowling']['Dot Balls'] = bowling_data[4]
+        stats['bowling']['Dot Balls Bowled'] = bowling_data[4]
         stats['bowling']['Extras'] = bowling_data[5]
+        stats['bowling']['Boundaries Conceded'] = bowling_data[6]
 
         if legal_balls > 0:
             stats['bowling']['Economy'] = round(bowling_data[2] / (legal_balls / 6), 2)

@@ -5434,9 +5434,17 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
     SELECT
         COUNT(*) AS total_balls,
         SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
-        SUM(be.runs) AS runs_conceded,
-        SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
-        SUM(be.dot_balls) AS dot_balls,
+        SUM(be.runs) + SUM(be.wides) + SUM(be.no_balls) AS runs_conceded,
+        SUM(CASE 
+            WHEN be.dismissal_type IS NOT NULL 
+            AND LOWER(be.dismissal_type) NOT IN ('run out', 'retired out', 'obstructing the field', 'retired not out') 
+            AND be.dismissed_player_id = be.batter_id
+            THEN 1 ELSE 0 
+        END) AS wickets,
+        SUM(CASE 
+            WHEN be.runs = 0 AND be.wides = 0 AND be.no_balls = 0 
+            THEN 1 ELSE 0 
+        END) AS dot_balls,
         SUM(be.wides + be.no_balls) AS extras,
         SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundaries
     FROM ball_events be
@@ -5729,7 +5737,12 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
             COUNT(*) AS total_balls,
             SUM(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 ELSE 0 END) AS legal_balls,
             SUM(be.runs) + SUM(be.wides) + SUM(be.no_balls) AS runs_conceded,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS wickets,
+            SUM(CASE 
+                WHEN be.dismissal_type IS NOT NULL 
+                AND LOWER(be.dismissal_type) NOT IN ('run out', 'retired out', 'obstructing the field', 'retired not out') 
+                AND be.dismissed_player_id = be.batter_id
+                THEN 1 ELSE 0 
+            END) AS wickets,
             SUM(CASE 
                 WHEN be.runs = 0 AND be.wides = 0 AND be.no_balls = 0 
                 THEN 1 ELSE 0 

@@ -2782,7 +2782,6 @@ class BallByBallInterface:
         popup = tk.Toplevel(self.window)
         popup.title("Change Bowler")
         popup.geometry("300x300")
-        popup.grab_set()
 
         # 🔒 Prevent closing the window with the "X" button
         popup.protocol("WM_DELETE_WINDOW", lambda: messagebox.showwarning("Required", "Please select a new bowler before continuing."))
@@ -3135,7 +3134,6 @@ class BallByBallInterface:
         selector = ttkb.Toplevel(self.window)
         selector.title("Select Opening Bowler")
         selector.geometry("400x400")
-        selector.grab_set()
 
         # 🔒 Prevent closing the window with the "X" button
         selector.protocol("WM_DELETE_WINDOW", lambda: messagebox.showwarning("Required", "You must select an opening bowler to begin."))
@@ -3281,7 +3279,6 @@ class BallByBallInterface:
             # Show dismissal dialog first
             self.handle_dismissal(ball_data)
             # Assign dismissal data
-            ball_data['dismissed_player_id'] = self.dismissed_batter.get()
             ball_data['dismissal_type'] = self.dismissal_combo.get()
 
         else:
@@ -3312,19 +3309,6 @@ class BallByBallInterface:
         max_balls = self.match_data.total_overs * 6
         ball_data["ball_number"] = total_balls
 
-        # Check for innings completion
-        if self.match_data.wickets >= 10 or total_balls >= max_balls:
-            self.end_innings()
-            return
-        
-        # ✅ Check if delivery was legal (not wide or no ball)
-        if extras.get("wides", 0) == 0 and extras.get("no_balls", 0) == 0:
-
-            # ✅ Check for end of over
-            if self.match_data.balls_this_over >= 6:
-                self.match_data.current_over += 1
-                self.match_data.balls_this_over = 0
-                self.select_new_bowler()
         
         # Get fielding data
         ball_data['fielding_events'] = [event for event, var in self.fielding_vars.items() if var.get()]
@@ -3360,16 +3344,16 @@ class BallByBallInterface:
             ball_data['required_run_rate'] = 0
 
         # Determine phase for current ball
-        current_over_ph = self.match_data.current_over + 1  # 1-based indexing for display logic
+        current_over_display = self.match_data.current_over + (self.match_data.balls_this_over / 6)
 
         phases = self.match_data.overs_phases
         pp_start, pp_end = phases['Powerplay']
         mo_start, mo_end = phases['Middle Overs']
         do_start, do_end = phases['Death Overs']
 
-        ball_data['is_powerplay'] = pp_start <= current_over_ph <= pp_end
-        ball_data['is_middle_overs'] = mo_start <= current_over_ph <= mo_end
-        ball_data['is_death_overs'] = do_start <= current_over_ph <= do_end
+        ball_data['is_powerplay'] = int(pp_start <= current_over_display < pp_end + 1)
+        ball_data['is_middle_overs'] = int(mo_start <= current_over_display < mo_end + 1)
+        ball_data['is_death_overs'] = int(do_start <= current_over_display < do_end + 1)
 
         # Retrieve previous ball events and calculate BPI
         ball_events = self.get_previous_ball_events()
@@ -3423,6 +3407,22 @@ class BallByBallInterface:
 
         ball_data['ball_id'] = ball_id  # ✅ Pass ball_id forward
         self.save_individual_pressure_impact(ball_events, ball_data)
+
+        # Check for innings completion
+        if self.match_data.wickets >= 10 or total_balls >= max_balls:
+            self.end_innings()
+            return
+        
+        # ✅ Check if delivery was legal (not wide or no ball)
+        if extras.get("wides", 0) == 0 and extras.get("no_balls", 0) == 0:
+            # ✅ Check for end of over
+            if self.match_data.balls_this_over >= 6:
+                self.match_data.current_over += 1
+                self.match_data.balls_this_over = 0
+
+                # 🛑 But only select new bowler if innings is NOT ending
+                if self.match_data.current_over < self.match_data.total_overs:
+                    self.select_new_bowler()
 
         
          # === Striker Swap Logic (run/extras triggered) ===
@@ -3726,18 +3726,38 @@ class BallByBallInterface:
         striker_name = self.get_player_name(self.match_data.striker)
         non_striker_name = self.get_player_name(self.match_data.non_striker)
         
-        # Radio buttons for batter selection
-        self.dismissed_batter = tk.IntVar(value=self.match_data.striker)
-        ttkb.Radiobutton(dismiss_window, text=f"Striker: {striker_name}", 
-                    variable=self.dismissed_batter, 
-                    value=self.match_data.striker).pack(anchor=tk.W)
-        ttkb.Radiobutton(dismiss_window, text=f"Non-Striker: {non_striker_name}", 
-                    variable=self.dismissed_batter, 
-                    value=self.match_data.non_striker).pack(anchor=tk.W)
+        # Set correct default — if "Run Out", show non-striker as default if user wants
+        default_batter = self.match_data.striker
         
-        ttkb.Button(dismiss_window, text="Confirm Dismissal", 
-                command=lambda: self.process_dismissal(dismiss_window, current_ball),
-                bootstyle=DANGER).pack(pady=10) 
+        # If dismissal type is "Run Out", let user select — but default to striker unless you prefer to auto-detect
+        if (current_ball.get("dismissal_type") or "").lower() == "run out":
+            # Could optionally detect from UI if needed
+            pass  # default stays striker unless you want to auto-suggest non-striker
+        
+        # Radio buttons for batter selection
+        self.dismissed_batter = tk.IntVar(value=default_batter)
+        
+        ttkb.Radiobutton(
+            dismiss_window, 
+            text=f"Striker: {striker_name}", 
+            variable=self.dismissed_batter, 
+            value=self.match_data.striker
+        ).pack(anchor=tk.W)
+        
+        ttkb.Radiobutton(
+            dismiss_window, 
+            text=f"Non-Striker: {non_striker_name}", 
+            variable=self.dismissed_batter, 
+            value=self.match_data.non_striker
+        ).pack(anchor=tk.W)
+        
+        # Confirm button — process_dismissal will now update current_ball['dismissed_player_id']
+        ttkb.Button(
+            dismiss_window, 
+            text="Confirm Dismissal", 
+            command=lambda: self.process_dismissal(dismiss_window, current_ball), 
+            bootstyle=DANGER
+        ).pack(pady=10)
 
     def calculate_bpi(self, ball_events, current_ball):
         batting_pressure = 0.00
@@ -4441,6 +4461,9 @@ class BallByBallInterface:
         # Update match data
         self.match_data.wickets += 1
 
+        # Now assign the correct dismissed_player_id to current_ball
+        current_ball['dismissed_player_id'] = dismissed_id
+
         # Only credit bowler if it’s a valid dismissal
         bowler_credit_dismissals = {
             'bowled', 'caught', 'lbw', 'stumped', 'hit wicket', 'hit the ball twice'
@@ -4578,7 +4601,6 @@ class BallByBallInterface:
         selector = ttkb.Toplevel(self.window)
         selector.title("Select Next Bowler")
         selector.geometry("400x400")
-        selector.grab_set()
 
         # 🔒 Prevent closing the window without selection
         selector.protocol("WM_DELETE_WINDOW", lambda: messagebox.showwarning(
@@ -5095,7 +5117,7 @@ class BallByBallInterface:
 
             # === Dynamic Game Phase Tagging ===
             # Note: Use 1-based over for phase logic (0.3 → 1st over)
-            current_over_display = self.match_data.current_over + 1
+            current_over_display = self.match_data.current_over + (self.match_data.balls_this_over / 6)
             batter_blind_turn = int(self.batter_blind_turn_var.get())
             non_striker_blind_turn = int(self.non_striker_blind_turn_var.get()) 
             phases = self.match_data.overs_phases
@@ -5103,16 +5125,17 @@ class BallByBallInterface:
             mo_start, mo_end = phases['Middle Overs']
             do_start, do_end = phases['Death Overs']
 
-            ball_data['is_powerplay'] = int(pp_start <= current_over_display <= pp_end)
-            ball_data['is_middle_overs'] = int(mo_start <= current_over_display <= mo_end)
-            ball_data['is_death_overs'] = int(do_start <= current_over_display <= do_end)
+            ball_data['is_powerplay'] = int(pp_start <= current_over_display <= pp_end + 1)
+            ball_data['is_middle_overs'] = int(mo_start <= current_over_display <= mo_end + 1)
+            ball_data['is_death_overs'] = int(do_start <= current_over_display <= do_end + 1)
 
             over_number = self.match_data.current_over
             ball_number = self.match_data.balls_this_over
 
-            if ball_number == 0:
+            if ball_number == 0 and ball_data.get('wides', 0) == 0 and ball_data.get('no_balls', 0) == 0:
                 ball_number = 6
                 over_number -= 1
+
 
             #print(f"[DEBUG] Saving expected_wicket: {ball_data.get('expected_wicket')}")
             print(f"💾 Final Intent Score to DB: {ball_data['intent_score']}")
@@ -5426,9 +5449,14 @@ class BallByBallInterface:
         try:
             self.match_data.innings_ended = True
 
+
+            # Determine if innings ended by 10 wickets
+            was_all_out = (self.match_data.wickets >= 10)
+
             # Finalize current partnership if it has any balls
             if self.match_data.current_partnership and self.match_data.current_partnership['balls'] > 0:
-                self._finalize_partnership(unbeaten=True)
+                self._finalize_partnership(unbeaten=not was_all_out)
+
 
             # Mark innings as completed in the DB
             conn = sqlite3.connect(r"C:\Users\Danielle\Desktop\Cricket Analysis Program\cricket_analysis.db")
@@ -5436,6 +5464,13 @@ class BallByBallInterface:
             c.execute("UPDATE innings SET completed = 1 WHERE innings_id = ?", (self.match_data.innings_id,))
             conn.commit()
             conn.close()
+
+            # 🛠️ CLEAR WICKET STATE TO PREVENT CARRY-OVER
+            self.match_data.wickets = 0
+            self.match_data.dismissed_players = set()
+            self.match_data.current_partnership = {
+                'runs': 0, 'balls': 0, 'dots': 0, 'ones': 0, 'twos': 0, 'threes': 0, 'fours': 0, 'sixes': 0, 'last_milestone': 0
+            }
 
             # Display summary
             messagebox.showinfo(

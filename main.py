@@ -5705,7 +5705,7 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
         WHERE {global_batting_conditions}
     """
 
-    c.execute(batting_query, match_ids + [player_id])
+    c.execute(batting_query, match_ids + [player_id, player_id])
     batting_data = c.fetchone()
     if batting_data:
         stats['batting']['Innings'] = batting_data[0] or 0

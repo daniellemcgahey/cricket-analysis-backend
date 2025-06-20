@@ -5380,7 +5380,12 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
             SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
             SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
             SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS dismissals,
+            SUM(CASE 
+                WHEN be.dismissed_player_id IN (SELECT player_id FROM players WHERE country_id = ?) 
+                AND be.dismissal_type IS NOT NULL 
+                AND LOWER(be.dismissal_type) != 'not out'
+                THEN 1 ELSE 0 
+            END) AS dismissals,
             SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END) AS attacking,
             SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END) AS defensive,
             SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END) AS rotation,
@@ -5685,7 +5690,12 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
             SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
             SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
             SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
-            SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS dismissals,
+            SUM(CASE 
+                WHEN be.dismissed_player_id = ? 
+                AND be.dismissal_type IS NOT NULL 
+                AND LOWER(be.dismissal_type) != 'not out'
+                THEN 1 ELSE 0 
+            END) AS dismissals,
             SUM(CASE WHEN LOWER(be.shot_type) = 'attacking' THEN 1 ELSE 0 END) AS attacking,
             SUM(CASE WHEN LOWER(be.shot_type) = 'defensive' THEN 1 ELSE 0 END) AS defensive,
             SUM(CASE WHEN LOWER(be.shot_type) = 'rotation' THEN 1 ELSE 0 END) AS rotation,

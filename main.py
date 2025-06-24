@@ -5398,7 +5398,7 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
 
 
     stats = defaultdict(lambda: defaultdict(float))
-    c.execute(batting_query, match_ids + [country_id])
+    c.execute(batting_query, match_ids + [country_id, country_id])
     batting_data = c.fetchone()
     if batting_data:
         stats['batting']['Innings'] = batting_data[0] or 0

@@ -1493,6 +1493,7 @@ class MatchData:
         if saved_state_json:
             state = json.loads(saved_state_json)
 
+            match_data.innings = state.get("innings", innings_num)
             match_data.total_runs = state.get("total_runs", 0)
             match_data.wickets = state.get("wickets", 0)
             match_data.current_over = state.get("current_over", 0)
@@ -1526,6 +1527,9 @@ class MatchData:
                 team1_name: [int(pid) for pid in selected.get(team1_name, [])],
                 team2_name: [int(pid) for pid in selected.get(team2_name, [])]
             }
+
+            match_data.target_runs = state.get("target_runs", None)
+            match_data.adjusted_target = state.get("adjusted_target", None)
 
             match_data.team1_twelfth = state.get("team1_twelfth", [])
             match_data.team2_twelfth = state.get("team2_twelfth", [])
@@ -1738,7 +1742,7 @@ class BallByBallInterface:
                 'wides': 0, 'no_balls': 0
             }
 
-        self.match_data.innings = 1
+        self.innings = self.match_data.innings
 
         self.update_stats_trees()
         self.update_display()
@@ -1748,6 +1752,10 @@ class BallByBallInterface:
 
         # === Start first partnership at innings start ===
         self.match_data.new_batter = self.match_data.non_striker  # Needed for correct partnership creation
+
+        # ✅ If this is loaded into 2nd innings, force display of Target + RRR
+        if self.match_data.innings == 2 and self.match_data.target_runs:
+            self.update_display()
 
         #("✅ Striker:", self.match_data.striker)
         #print("✅ Non-striker:", self.match_data.non_striker)
@@ -3278,9 +3286,9 @@ class BallByBallInterface:
         if ball_data['dismissal']:
             # Show dismissal dialog first
             self.handle_dismissal(ball_data)
-            # Assign dismissal data
-            ball_data['dismissal_type'] = self.dismissal_combo.get()
 
+            # 🛑 Do not continue the process yet — wait for dismissal confirm
+            return  # This is SAFE — your match loop will continue after confirm!
         else:
             ball_data['dismissed_player_id'] = None
             ball_data['dismissal_type'] = None
@@ -3343,17 +3351,28 @@ class BallByBallInterface:
         else:
             ball_data['required_run_rate'] = 0
 
-        # Determine phase for current ball
-        current_over_display = self.match_data.current_over + (self.match_data.balls_this_over / 6)
+        # Compute balls bowled so far
+        balls_bowled = (self.match_data.current_over * 6) + self.match_data.balls_this_over
+        current_ball_number = balls_bowled + 1  # 1-based ball number
 
+        # Get phase ranges
         phases = self.match_data.overs_phases
         pp_start, pp_end = phases['Powerplay']
         mo_start, mo_end = phases['Middle Overs']
         do_start, do_end = phases['Death Overs']
 
-        ball_data['is_powerplay'] = int(pp_start <= current_over_display < pp_end + 1)
-        ball_data['is_middle_overs'] = int(mo_start <= current_over_display < mo_end + 1)
-        ball_data['is_death_overs'] = int(do_start <= current_over_display < do_end + 1)
+        # Phase ranges in balls:
+        pp_start_ball = (pp_start - 1) * 6 + 1
+        pp_end_ball = pp_end * 6
+        mo_start_ball = (mo_start - 1) * 6 + 1
+        mo_end_ball = mo_end * 6
+        do_start_ball = (do_start - 1) * 6 + 1
+        do_end_ball = do_end * 6
+
+        # Set flags
+        ball_data['is_powerplay'] = int(pp_start_ball <= current_ball_number <= pp_end_ball)
+        ball_data['is_middle_overs'] = int(mo_start_ball <= current_ball_number <= mo_end_ball)
+        ball_data['is_death_overs'] = int(do_start_ball <= current_ball_number <= do_end_ball)
 
         # Retrieve previous ball events and calculate BPI
         ball_events = self.get_previous_ball_events()
@@ -3419,6 +3438,7 @@ class BallByBallInterface:
             if self.match_data.balls_this_over >= 6:
                 self.match_data.current_over += 1
                 self.match_data.balls_this_over = 0
+                self.pending_swap_end_of_over = True
 
                 # 🛑 But only select new bowler if innings is NOT ending
                 if self.match_data.current_over < self.match_data.total_overs:
@@ -3440,8 +3460,9 @@ class BallByBallInterface:
         elif extras.get("wides", 0) in [2, 4, 6]:
             swap = True
         
-        if self.match_data.balls_this_over == 6:
-            swap = True
+        elif hasattr(self, 'pending_swap_end_of_over') and self.pending_swap_end_of_over:
+            self.swap_batters()
+            self.pending_swap_end_of_over = False
 
 
         if swap:
@@ -4461,18 +4482,21 @@ class BallByBallInterface:
         # Update match data
         self.match_data.wickets += 1
 
-        # Now assign the correct dismissed_player_id to current_ball
+        # Assign both fields!
         current_ball['dismissed_player_id'] = dismissed_id
+        current_ball['dismissal_type'] = (current_ball.get("dismissal_type") or "").lower()
+
+        # ✅ Store current_ball for later save
+        self.last_dismissal_ball_data = current_ball
 
         # Only credit bowler if it’s a valid dismissal
         bowler_credit_dismissals = {
             'bowled', 'caught', 'lbw', 'stumped', 'hit wicket', 'hit the ball twice'
         }
-        dismissal_type = (current_ball.get("dismissal_type") or "").lower()
 
-        if dismissal_type in bowler_credit_dismissals:
+        if current_ball['dismissal_type'] in bowler_credit_dismissals:
             self.match_data.bowlers[self.match_data.current_bowler]['wickets'] += 1
-            
+                
         self.match_data.batters[dismissed_id]['status'] = 'out'
         self.match_data.dismissed_players.add(dismissed_id)
 
@@ -4562,12 +4586,11 @@ class BallByBallInterface:
     def finalize_batter_change(self, window, surviving_batter):
         window.destroy()
         
-        # Get selected player ID directly from the radio button value
+        # Get selected player ID
         new_batter_id = self.new_batter.get()
 
-        # Update match data directly with the ID
         self.match_data.new_batter = new_batter_id
-        
+
         # Update striker/non-striker based on who was dismissed
         if self.match_data.dismissed_batter == self.match_data.non_striker:
             self.match_data.striker = surviving_batter
@@ -4589,13 +4612,16 @@ class BallByBallInterface:
             'status': 'not out'
         }
 
-
         # Start new partnership using current striker/non-striker
         ball_data = {'dismissed_player_id': self.match_data.dismissed_batter}
         self._start_new_partnership(ball_data)
 
-        self.update_display()      
+        # ✅ Save the ball now — dismissal is confirmed
+        self.save_ball_event(self.last_dismissal_ball_data)
 
+        # Update display
+        self.update_display()
+   
     def select_new_bowler(self):
         """Show bowler selection with proper stats handling"""
         selector = ttkb.Toplevel(self.window)
@@ -5116,34 +5142,51 @@ class BallByBallInterface:
             ball_data['fielding_events'] = ball_data.get('fielding_events', [])
 
             # === Dynamic Game Phase Tagging ===
-            # Note: Use 1-based over for phase logic (0.3 → 1st over)
-            current_over_display = self.match_data.current_over + (self.match_data.balls_this_over / 6)
-            batter_blind_turn = int(self.batter_blind_turn_var.get())
-            non_striker_blind_turn = int(self.non_striker_blind_turn_var.get()) 
+            # Compute balls bowled so far
+            balls_bowled = (self.match_data.current_over * 6) + self.match_data.balls_this_over
+            current_ball_number = balls_bowled + 1
+
+            # Phase ranges
             phases = self.match_data.overs_phases
             pp_start, pp_end = phases['Powerplay']
             mo_start, mo_end = phases['Middle Overs']
             do_start, do_end = phases['Death Overs']
 
-            ball_data['is_powerplay'] = int(pp_start <= current_over_display <= pp_end + 1)
-            ball_data['is_middle_overs'] = int(mo_start <= current_over_display <= mo_end + 1)
-            ball_data['is_death_overs'] = int(do_start <= current_over_display <= do_end + 1)
+            pp_start_ball = (pp_start - 1) * 6 + 1
+            pp_end_ball = pp_end * 6
+            mo_start_ball = (mo_start - 1) * 6 + 1
+            mo_end_ball = mo_end * 6
+            do_start_ball = (do_start - 1) * 6 + 1
+            do_end_ball = do_end * 6
 
+            ball_data['is_powerplay'] = int(pp_start_ball <= current_ball_number <= pp_end_ball)
+            ball_data['is_middle_overs'] = int(mo_start_ball <= current_ball_number <= mo_end_ball)
+            ball_data['is_death_overs'] = int(do_start_ball <= current_ball_number <= do_end_ball)
+
+            # === Ball number in over (fix "ball 0" bug) ===
+            ball_number_in_over = self.match_data.balls_this_over + 1
+
+            if ball_data.get('wides', 0) > 0 or ball_data.get('no_balls', 0) > 0:
+                if self.match_data.balls_this_over == 0:
+                    ball_number_in_over = 1
+            else:
+                if ball_number_in_over > 6:
+                    ball_number_in_over = 6
+
+            # Set for DB:
             over_number = self.match_data.current_over
-            ball_number = self.match_data.balls_this_over
+            balls_this_over = ball_number_in_over
 
-            if ball_number == 0 and ball_data.get('wides', 0) == 0 and ball_data.get('no_balls', 0) == 0:
-                ball_number = 6
-                over_number -= 1
+            batter_blind_turn = int(self.batter_blind_turn_var.get())
+            non_striker_blind_turn = int(self.non_striker_blind_turn_var.get()) 
 
-
-            #print(f"[DEBUG] Saving expected_wicket: {ball_data.get('expected_wicket')}")
+            # === Insert Ball Event ===
             print(f"💾 Final Intent Score to DB: {ball_data['intent_score']}")
             params = (
                 self.match_data.innings_id,
                 over_number,
                 self.match_data.innings,
-                ball_number,
+                balls_this_over,
                 int(ball_data.get('ball_number', 0)),
                 self.match_data.striker,
                 self.match_data.non_striker,
@@ -5189,7 +5232,6 @@ class BallByBallInterface:
                 int(ball_data.get('is_death_overs', 0))
             )
 
-            # === Insert Ball Event ===
             c.execute('''INSERT INTO ball_events (
                 innings_id, over_number, innings, balls_this_over, ball_number,
                 batter_id, non_striker_id, bowler_id, fielder_id, runs, extras,
@@ -5332,6 +5374,7 @@ class BallByBallInterface:
     def save_match_state_to_db(self):
         state = {
             # your existing saved keys...
+            "innings": self.match_data.innings,
             "total_runs": self.match_data.total_runs,
             "wickets": self.match_data.wickets,
             "current_over": self.match_data.current_over,
@@ -5351,7 +5394,9 @@ class BallByBallInterface:
             # Add these lines explicitly
             "batting_team": self.match_data.batting_team,
             "bowling_team": self.match_data.bowling_team,
-            "selected_players": self.match_data.selected_players
+            "selected_players": self.match_data.selected_players,
+            "target_runs": self.match_data.target_runs,
+            "adjusted_target": self.match_data.adjusted_target
         }
 
         json_state = json.dumps(state)

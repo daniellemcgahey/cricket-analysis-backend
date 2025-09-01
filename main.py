@@ -6639,7 +6639,15 @@ def fetch_player_match_stats(match_id: int, player_id: int):
         SELECT
             COUNT(*) AS total_balls,  -- includes wides and no balls
             COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
-            SUM(CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dot_balls,
+            SUM(CASE
+              WHEN be.wides = 0
+               AND be.no_balls = 0
+               AND COALESCE(be.runs,0) = 0
+               AND COALESCE(be.byes,0) = 0
+               AND COALESCE(be.leg_byes,0) = 0
+               AND COALESCE(be.penalty_runs,0) = 0
+                THEN 1 ELSE 0
+            END) AS dot_balls,
             SUM(be.runs + be.wides + be.no_balls) AS runs_conceded,
             SUM(
                 CASE
@@ -6698,19 +6706,26 @@ def fetch_player_match_stats(match_id: int, player_id: int):
     cursor.execute("""
         SELECT 
             COALESCE(SUM(be.expected_runs), 0) AS expected_runs,
-            COALESCE(SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes + be.penalty_runs), 0) AS actual_runs
+            COALESCE(SUM(
+                COALESCE(be.runs,0)
+            + CASE WHEN COALESCE(be.wides,0)    > 0 THEN COALESCE(be.wides,0)    - 1 ELSE 0 END
+            + CASE WHEN COALESCE(be.no_balls,0) > 0 THEN COALESCE(be.no_balls,0) - 1 ELSE 0 END
+            + COALESCE(be.byes,0)
+            + COALESCE(be.leg_byes,0)
+            + COALESCE(be.penalty_runs,0)
+            ), 0) AS adjusted_actual_runs
         FROM ball_fielding_events bfe
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? 
+        WHERE i.match_id = ?
         AND EXISTS (
             SELECT 1 FROM fielding_contributions fc 
             WHERE fc.ball_id = be.ball_id AND fc.fielder_id = ?
         )
     """, (match_id, player_id))
 
-    expected_runs, actual_runs = cursor.fetchone()
-    runs_saved_allowed = (expected_runs or 0) - (actual_runs or 0)
+    expected_runs, adjusted_actual_runs = cursor.fetchone()
+    runs_saved_allowed = (expected_runs or 0) - (adjusted_actual_runs or 0)
 
     if fielding_row["total_fielding_events"]:
         clean_pickup_pct = round(fielding_row["clean_pickups"] * 100.0 / fielding_row["total_fielding_events"], 2)
@@ -6869,9 +6884,25 @@ def fetch_player_match_stats(match_id: int, player_id: int):
 
     # Compute Zone Effectiveness
     cursor.execute("""
-        SELECT be.pitch_y, bw.bowling_style, be.runs, be.wides, be.no_balls, 
-            (CASE WHEN be.runs = 0 THEN 1 ELSE 0 END) AS dot_balls,
-            be.edged, be.ball_missed, be.shot_type, be.dismissal_type
+        SELECT
+            be.pitch_y,
+            bw.bowling_style,
+            be.runs,
+            be.wides,
+            be.no_balls,
+            CASE
+            WHEN be.wides = 0
+            AND be.no_balls = 0
+            AND COALESCE(be.runs,0) = 0
+            AND COALESCE(be.byes,0) = 0
+            AND COALESCE(be.leg_byes,0) = 0
+            AND COALESCE(be.penalty_runs,0) = 0
+            THEN 1 ELSE 0
+            END AS dot_balls,
+            be.edged,
+            be.ball_missed,
+            be.shot_type,
+            be.dismissal_type
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN players bw ON be.bowler_id = bw.player_id

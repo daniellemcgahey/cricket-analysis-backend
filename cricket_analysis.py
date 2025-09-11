@@ -929,13 +929,24 @@ class MatchSetup:
             variable=self.is_training_var
         )
         self.training_check.grid(row=6, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W)
-
+        
+        
+        # Scorecard-only (Lite) Toggle
+        self.is_lite_var = tk.BooleanVar(value=False)
+        self.lite_check = ttkb.Checkbutton(
+            main_frame,
+            text="Scorecard-only (Lite)",
+            variable=self.is_lite_var
+        )
+        self.lite_check.grid(row=7, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W)
 
         # Continue Button
-        ttkb.Button(main_frame, 
-                   text="Continue to Team Selection", 
-                   command=self.validate_and_proceed, 
-                   bootstyle=SUCCESS).grid(row=7, column=0, columnspan=2, pady=15, sticky=tk.EW)
+        ttkb.Button(
+            main_frame, 
+            text="Continue to Team Selection", 
+            command=self.validate_and_proceed, 
+            bootstyle=SUCCESS
+        ).grid(row=8, column=0, columnspan=2, pady=15, sticky=tk.EW)
 
         # Configure grid weights
         main_frame.columnconfigure(1, weight=1)
@@ -987,6 +998,7 @@ class MatchSetup:
         is_training = self.is_training_var.get()
         new_tournament = self.new_tournament_entry.get()
         overs = int(self.overs_entry.get())
+        is_lite = bool(self.is_lite_var.get())
 
 
         # Validate teams
@@ -1058,7 +1070,8 @@ class MatchSetup:
             'date': date,
             'tournament':c.execute("SELECT tournament_id FROM tournaments WHERE tournament_name = ?", 
                                      (tournament,)).fetchone()[0],
-            'overs_per_innings': overs
+            'overs_per_innings': overs,
+            'lite_mode': is_lite,
         }
 
         match_info['overs_phases'] = define_game_phases(overs)
@@ -1084,6 +1097,7 @@ class MatchSetup:
         TeamSelector(self.parent, self.app, self.app.match_data)
 
 class TeamSelector:
+
     def __init__(self, parent, app, match_data):
         self.parent = parent
         self.app = app
@@ -1349,6 +1363,7 @@ class MatchData:
         self.date = match_data['date']
         self.tournament = match_data['tournament']
         self.is_training = match_data.get('is_training', False)
+        self.lite_mode = bool(match_data.get('lite_mode', False))
 
         self.overs_per_innings = match_data.get('overs_per_innings', 20)
         self.adjusted_overs = match_data.get('adjusted_overs')
@@ -2159,6 +2174,9 @@ class BallByBallInterface:
         self.wagon_canvas.pack(fill=tk.BOTH, expand=True)
         self.wagon_canvas.bind("<Button-1>", self.record_shot_location)
         self.wagon_canvas.bind("<Configure>", self.draw_detailed_wagon)
+
+    def is_lite(self) -> bool:
+        return bool(getattr(self, "match_data", None) and getattr(self.match_data, "lite_mode", False))
 
     def on_expected_runs_change(self, *args):
         self.expected_manually_changed = True
@@ -3008,28 +3026,81 @@ class BallByBallInterface:
             var.set(False)
 
     def record_ball(self):
-        #print("🚨 record_ball() called")
-        if not self.missed_var.get():  # Only validate for non-missed balls
+        # --- Lite mode: minimal validation + payload, no advanced UI deps ---
+        if hasattr(self, "is_lite") and self.is_lite():
+            # Validate runs (numeric)
+            try:
+                runs = int(self.runs_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Runs must be a number!")
+                return
+
+            # Gather extras safely (numeric)
+            extras = {}
+            for key, var in self.extras_vars.items():
+                try:
+                    extras[key] = int(var.get() or 0)
+                except ValueError:
+                    messagebox.showerror("Error", f"{key} must be a number!")
+                    return
+
+            # Build minimal payload (skip pitch/shot/intent/fielding/etc.)
+            ball_data = {
+                'runs': runs,
+                'extras': extras,
+                'dismissal': self.dismissal_var.get(),
+                'dismissal_type': self.dismissal_combo.get() if self.dismissal_var.get() else None,
+
+                # explicitly neutralize advanced fields so downstream skips them
+                'shot_coords': (None, None),
+                'pitch_coords': (None, None),
+                'aerial': False,
+                'edged': False,
+                'clean_hit': False,
+                'footwork': None,
+                'shot_type': None,
+                'shot_selection': None,
+                'delivery_type': None,
+                'fielding_events': [],
+                'fielding_style': None,
+                'expected_runs': 0,
+                'over_the_wicket': 0,
+                'around_the_wicket': 0,
+                'missed': 0,
+            }
+
+            # Keep your numbering behavior
+            ball_data['ball_number'] = self.match_data.total_balls
+
+            # Hand off
+            self.process_ball(ball_data)
+            self.clear_inputs()
+            return
+
+        # --- FULL mode (existing behavior) ---
+
+        # Only validate for non-missed balls
+        if not self.missed_var.get():
             if not self.validate_non_missed_ball():
                 return
-        
-        # Collect all extras data
+
+        # Collect all extras data (raw)
         extras = {key: var.get() for key, var in self.extras_vars.items()}
 
         # Get selected fielding events
         fielding_events = [event for event, var in self.fielding_events.items() if var.get()]
 
-        """Modified to include coordinates validation"""
+        # Require pitch selection in FULL mode
         if not self.current_pitch_location:
             messagebox.showerror("Error", "Please select pitch location")
             return
-        # Check for missed/dismissal first
+
+        # Missed or immediate-dismissal types bypass shot validation
         if self.missed_var.get() or self.dismissal_combo.get() in ['Bowled', 'LBW', 'Stumped']:
             # Force clear shot data
             self.current_shot_location = None
             self.wagon_canvas.delete("shot_line")
-            
-            # Bypass shot validation
+
             ball_data = {
                 'shot_coords': (None, None),
                 'aerial': False,
@@ -3048,20 +3119,23 @@ class BallByBallInterface:
                 'fielding_style': self.fielding_style_combo.get(),
                 'expected_runs': int(self.expected_runs_var.get() or 0),
                 'over_the_wicket': self.over_var.get(),
-                'around_the_wicket': self.around_var.get()
+                'around_the_wicket': self.around_var.get(),
+                'missed': 1 if self.missed_var.get() else 0,
             }
+
+            # Assign ball_number from match data
+            ball_data['ball_number'] = self.match_data.total_balls
+
             self.process_ball(ball_data)
             self.clear_inputs()
             return
-        
-        # Existing validation for non-missed balls
+
+        # For non-missed, non-immediate-dismissal balls: require shot location
         if not self.current_shot_location:
             messagebox.showerror("Error", "Please select shot location")
             return
 
-
-
- 
+        # Build FULL-mode payload
         ball_data = {
             'runs': self.runs_var.get(),
             'aerial': self.aerial_var.get(),
@@ -3081,42 +3155,86 @@ class BallByBallInterface:
             'fielding_style': self.fielding_style_combo.get(),
             'expected_runs': int(self.expected_runs_var.get() or 0),
             'over_the_wicket': self.over_var.get(),
-            'around_the_wicket': self.around_var.get()
+            'around_the_wicket': self.around_var.get(),
         }
 
-
-                # Validate runs input
+        # Validate runs numeric
         try:
             runs = int(self.runs_var.get())
         except ValueError:
             messagebox.showerror("Error", "Runs must be a number!")
             return
-
         ball_data['runs'] = runs
 
-        # Validate extras
-        extras = {}
+        # Validate extras numeric
+        extras_checked = {}
         for key, var in self.extras_vars.items():
             try:
                 value = int(var.get())
             except ValueError:
                 messagebox.showerror("Error", f"{key} must be a number!")
                 return
-            extras[key] = value
-
-        ball_data['extras'] = extras
+            extras_checked[key] = value
+        ball_data['extras'] = extras_checked
 
         # Assign ball_number from match data
         ball_data['ball_number'] = self.match_data.total_balls
 
-        # Convert expected_runs safely
+        # Convert expected_runs safely (already int() above, but keep guard)
         try:
-            ball_data['expected_runs'] = self.expected_runs_var.get()
+            ball_data['expected_runs'] = int(self.expected_runs_var.get() or 0)
         except ValueError:
             ball_data['expected_runs'] = 0
 
+        # Hand off
         self.process_ball(ball_data)
         self.clear_inputs()
+
+    def _lite_symbol(self, ball_data: dict) -> str:
+        """
+        Generate a compact symbol for Lite mode that works with update_display().
+        Covers W, Wd, Nb(+runs), LB, B, penalty, runs, dot.
+        Examples: "W", "Wd", "Wd2", "Nb", "Nb+1", "LB", "2LB", "B", "3B", "P5", "4", "."
+        """
+        ex = (ball_data.get('extras') or {})
+        runs = int(ball_data.get('runs', 0))
+
+        w  = int(ex.get('wides', 0) or 0)
+        nb = int(ex.get('no_balls', 0) or 0)
+        b  = int(ex.get('byes', 0) or 0)
+        lb = int(ex.get('leg_byes', 0) or 0)
+        pen = int(ex.get('penalty_runs', ex.get('penalty', 0)) or 0)
+
+        # Wicket first
+        if ball_data.get('dismissal') or (ball_data.get('dismissal_type') or '').strip():
+            return "W"
+
+        # Wides
+        if w > 0:
+            return f"Wd{w}" if w > 1 else "Wd"
+
+        # No-ball (show off-bat runs if any, e.g., Nb+1)
+        if nb > 0:
+            return f"Nb+{runs}" if runs > 0 else "Nb"
+
+        # Leg byes (prefer LB notation when runs_off_bat == 0)
+        if lb > 0 and runs == 0:
+            return f"{lb}LB" if lb > 1 else "LB"
+
+        # Byes
+        if b > 0 and runs == 0:
+            return f"{b}B" if b > 1 else "B"
+
+        # Penalty runs (rare)
+        if pen > 0 and runs == 0:
+            return f"P{pen}"
+
+        # Plain dot or runs-off-the-bat
+        if runs == 0:
+            # if we reached here, there were no extras either
+            return "."
+        return str(runs)
+
 
     def validate_non_missed_ball(self):
         """Validate required fields for normal balls"""
@@ -3185,28 +3303,45 @@ class BallByBallInterface:
         self.update_display()
 
     def process_ball(self, ball_data):
-        #print("🚨 process_ball() called")
-        #import traceback; traceback.print_stack()
+        # --- mode guard (works even if is_lite() helper isn't present) ---
+        lite = bool(getattr(self.match_data, "lite_mode", False))
+
         self.save_state()
 
-                # Calculate total extras
-        extras = {
-            'wides': self.extras_vars['wides'].get(),
-            'no_balls': self.extras_vars['no_balls'].get(),
-            'byes': self.extras_vars['byes'].get(),
-            'leg_byes': self.extras_vars['leg_byes'].get(),
-            'penalty_runs': self.extras_vars['penalty'].get()
-        }
-        
-        ball_data['fielder'] = self.get_fielder_id()
+        # === EXTRAS: in Lite prefer payload; in Full read UI vars (keeps old behavior) ===
+        if lite:
+            bx = ball_data.get('extras', {}) or {}
+            extras = {
+                'wides': int(bx.get('wides', 0)),
+                'no_balls': int(bx.get('no_balls', 0)),
+                'byes': int(bx.get('byes', 0)),
+                'leg_byes': int(bx.get('leg_byes', 0)),
+                'penalty_runs': int(bx.get('penalty_runs', bx.get('penalty', 0))),
+            }
+        else:
+            extras = {
+                'wides': int(self.extras_vars['wides'].get() or 0),
+                'no_balls': int(self.extras_vars['no_balls'].get() or 0),
+                'byes': int(self.extras_vars['byes'].get() or 0),
+                'leg_byes': int(self.extras_vars['leg_byes'].get() or 0),
+                'penalty_runs': int(self.extras_vars['penalty'].get() or 0),
+            }
 
-        # Track valid deliveries
-        is_valid_delivery = ball_data['extras'].get('no_balls', 0) == 0 and ball_data['extras'].get('wides', 0) == 0
+        ball_data.setdefault('extras', {})
+        ball_data['extras'].update(extras)
 
-        runs = ball_data['runs']
+        # ✅ Only force-select fielder in FULL mode
+        if not lite and not ball_data.get('fielder'):
+            ball_data['fielder'] = self.get_fielder_id()
+
+        # Valid delivery?
+        is_valid_delivery = extras.get('no_balls', 0) == 0 and extras.get('wides', 0) == 0
+
+        # Runs off the bat (safe default)
+        runs = int(ball_data.get('runs', 0))
         bowler = self.match_data.current_bowler
 
-        # Ensure bowler exists in stats
+        # Ensure bowler exists
         if bowler not in self.match_data.bowlers:
             self.match_data.bowlers[bowler] = {
                 'balls': 0, 'runs': 0, 'wickets': 0,
@@ -3214,12 +3349,12 @@ class BallByBallInterface:
                 'wides': 0, 'no_balls': 0
             }
 
-        # Update bowler stats (only for valid deliveries)
+        # Bowler balls & over progression on legal deliveries
         if is_valid_delivery:
-            self.match_data.bowlers[self.match_data.current_bowler]['balls'] += 1
+            self.match_data.bowlers[bowler]['balls'] += 1
             self.match_data.balls_this_over += 1
-        
-        # Update batter stats (not for wides/penalty)
+
+        # Batter stats (ignore wides for BF)
         if extras['wides'] == 0:
             self.match_data.batters[self.match_data.striker]['balls'] += 1
             self.match_data.batters[self.match_data.striker]['runs'] += runs
@@ -3228,286 +3363,248 @@ class BallByBallInterface:
             elif runs == 6:
                 self.match_data.batters[self.match_data.striker]['sixes'] += 1
 
+        # Bowler wides/no-balls counters
         if extras['no_balls'] == 1:
-            self.match_data.bowlers[self.match_data.current_bowler]['no_balls'] += 1
+            self.match_data.bowlers[bowler]['no_balls'] += 1
             ball_data['no_balls'] = 1
-
-        
         if extras['wides'] != 0:
-            self.match_data.bowlers[self.match_data.current_bowler]['wides'] += extras['wides']
+            self.match_data.bowlers[bowler]['wides'] += extras['wides']
             ball_data['wides'] = extras['wides']
-        
+
+        # Copy extras for persistence columns
         if extras['byes'] != 0:
             ball_data['byes'] = extras['byes']
-        
         if extras['leg_byes'] != 0:
             ball_data['leg_byes'] = extras['leg_byes']
-
         if extras['penalty_runs'] != 0:
             ball_data['penalty_runs'] = extras['penalty_runs']
-        
-        # Update total runs
+
+        # Totals
         total_runs = runs + sum(extras.values())
         self.match_data.total_runs += total_runs
-        
-        # Calculate dot ball status
-        is_dot = (is_valid_delivery and ball_data['runs'] == 0 and not any(ball_data['extras'].values()))
-        
-        # Add to ball data
+
+        # Dot ball
+        is_dot = (is_valid_delivery and runs == 0 and not any(extras.values()))
         ball_data['dot_balls'] = 1 if is_dot else 0
 
-        # Update bowler's conceded runs
-        bowler_runs = ball_data['runs'] + extras.get('wides', 0) + extras.get('no_balls', 0)
-        self.match_data.bowlers[self.match_data.current_bowler]['runs'] += bowler_runs
-        
-        
-       
+        # Bowler conceded (no byes/LB/penalty)
+        bowler_conceded = runs + extras.get('wides', 0) + extras.get('no_balls', 0)
+        self.match_data.bowlers[bowler]['runs'] += bowler_conceded
 
-        # Always update partnership (even for extras)
-        if not ball_data.get('extras', {}).get('wides', 0):
+        # Partnership (ignore wides as balls)
+        if extras.get('wides', 0) == 0:
             self.match_data.current_partnership['balls'] += 1
-            
-            if ball_data['runs'] == 0:
+            if runs == 0:
                 self.match_data.current_partnership['dots'] += 1
-            elif ball_data['runs'] == 1:
+            elif runs == 1:
                 self.match_data.current_partnership['ones'] += 1
-            elif ball_data['runs'] == 2:
+            elif runs == 2:
                 self.match_data.current_partnership['twos'] += 1
-            elif ball_data['runs'] == 3:
+            elif runs == 3:
                 self.match_data.current_partnership['threes'] += 1
-            elif ball_data['runs'] == 4:
+            elif runs == 4:
                 self.match_data.current_partnership['fours'] += 1
-            elif ball_data['runs'] == 6:
+            elif runs == 6:
                 self.match_data.current_partnership['sixes'] += 1
-                
-            self.match_data.current_partnership['runs'] += ball_data['runs']
+            self.match_data.current_partnership['runs'] += runs
 
-        # Handle dismissal data
-        if ball_data['dismissal']:
-            # Show dismissal dialog first
-            self.handle_dismissal(ball_data)
-
-            # 🛑 Do not continue the process yet — wait for dismissal confirm
-            return  # This is SAFE — your match loop will continue after confirm!
-        else:
-            ball_data['dismissed_player_id'] = None
-            ball_data['dismissal_type'] = None
-
-
-        # Debug output
-        #print(f"[DEBUG] Dismissal data - Type: {ball_data.get('dismissal_type')}, Player: {ball_data['dismissed_player_id']}")
-
-        # Handle missed/dismissal cases
-        if self.missed_var.get() or ball_data['dismissal_type'] in ['Bowled', 'LBW', 'Stumped']:
+        # Missed / auto-dismissal only in FULL mode (Lite already sends neutral coords)
+        if not lite and (self.missed_var.get() or ball_data.get('dismissal_type') in ['Bowled', 'LBW', 'Stumped']):
             ball_data['shot_coords'] = (None, None)
             ball_data['missed'] = True if self.missed_var.get() else 'Dismissal'
 
-        # Store both data and display symbol - NEW
-        ball_symbol = self.get_ball_symbol(ball_data)
-        self.match_data.current_over_balls.append({
-            'data': ball_data,
-            'symbol': ball_symbol
-        })
+        # Store symbol for UI
+        ball_symbol = self.get_ball_symbol(ball_data) if not lite else self._lite_symbol(ball_data)
+        self.match_data.current_over_balls.append({'data': ball_data, 'symbol': ball_symbol})
 
+        # Bowler dot counter (legal)
         if extras.get('wides', 0) == 0 and extras.get('no_balls', 0) == 0:
-            if ball_data['runs'] == 0:
-                self.match_data.bowlers[self.match_data.current_bowler]['dot_balls'] += 1
-               
+            if runs == 0:
+                self.match_data.bowlers[bowler]['dot_balls'] += 1
+
+        # Ball indices & limits
         total_balls = (self.match_data.current_over * 6) + self.match_data.balls_this_over
         max_balls = self.match_data.total_overs * 6
         ball_data["ball_number"] = total_balls
 
-        
-        # Get fielding data
-        ball_data['fielding_events'] = [event for event, var in self.fielding_vars.items() if var.get()]
-        ball_data['boundary_saved'] = 'Boundary Save' in ball_data['fielding_events']
-        ball_data['fielder'] = self.get_fielder_id()  # Your existing fielder selection method
+        # === FIELDING & EXPECTED WICKET: FULL mode only ===
+        if not lite:
+            ball_data['fielding_events'] = [event for event, var in self.fielding_vars.items() if var.get()]
+            ball_data['boundary_saved'] = 'Boundary Save' in ball_data['fielding_events']
 
-        # 🔍 Calculate expected wicket from fielding mistakes
-        ball_data['expected_wicket'] = 0.00
-        chance_events = [
-            "Drop Catch", "Missed Catch", "Missed Run Out",
-            "Missed Half Chance", "Missed Stumping"
-        ]
+            ball_data['expected_wicket'] = 0.00
+            chance_events = [
+                "Drop Catch", "Missed Catch", "Missed Run Out",
+                "Missed Half Chance", "Missed Stumping"
+            ]
+            for event in ball_data['fielding_events']:
+                if event in chance_events:
+                    ew_value = self.prompt_expected_wicket(event)
+                    if ew_value is not None:
+                        ball_data['expected_wicket'] += ew_value
+        else:
+            # Neutralize in Lite
+            ball_data.setdefault('fielding_events', [])
+            ball_data.setdefault('boundary_saved', 0)
+            ball_data.setdefault('expected_wicket', 0.00)
 
-        for event in ball_data['fielding_events']:
-            if event in chance_events:
-                ew_value = self.prompt_expected_wicket(event)
-                if ew_value is not None:
-                    ball_data['expected_wicket'] += ew_value
-                    #print(f"[DEBUG] Setting the EW value: {ball_data.get('expected_wicket')}")
-
-
-
-                # Compute required run rate for second innings
+        # Required Run Rate (safe in both modes)
         if self.match_data.innings == 2 and self.match_data.target_runs is not None:
             remaining_runs = self.match_data.target_runs - self.match_data.total_runs
             completed_overs = self.match_data.current_over + (self.match_data.balls_this_over / 6)
             remaining_overs = self.match_data.total_overs - completed_overs
-            if remaining_overs > 0:
-                ball_data['required_run_rate'] = remaining_runs / remaining_overs
-            else:
-                ball_data['required_run_rate'] = 0
+            ball_data['required_run_rate'] = (remaining_runs / remaining_overs) if remaining_overs > 0 else 0
         else:
             ball_data['required_run_rate'] = 0
 
-        # Compute balls bowled so far
+        # Phase flags (safe both modes)
         balls_bowled = (self.match_data.current_over * 6) + self.match_data.balls_this_over
-        current_ball_number = balls_bowled + 1  # 1-based ball number
-
-        # Get phase ranges
+        current_ball_number = balls_bowled + 1
         phases = self.match_data.overs_phases
         pp_start, pp_end = phases['Powerplay']
         mo_start, mo_end = phases['Middle Overs']
         do_start, do_end = phases['Death Overs']
-
-        # Phase ranges in balls:
         pp_start_ball = (pp_start - 1) * 6 + 1
-        pp_end_ball = pp_end * 6
+        pp_end_ball   = pp_end * 6
         mo_start_ball = (mo_start - 1) * 6 + 1
-        mo_end_ball = mo_end * 6
+        mo_end_ball   = mo_end * 6
         do_start_ball = (do_start - 1) * 6 + 1
-        do_end_ball = do_end * 6
-
-        # Set flags
-        ball_data['is_powerplay'] = int(pp_start_ball <= current_ball_number <= pp_end_ball)
+        do_end_ball   = do_end * 6
+        ball_data['is_powerplay']    = int(pp_start_ball <= current_ball_number <= pp_end_ball)
         ball_data['is_middle_overs'] = int(mo_start_ball <= current_ball_number <= mo_end_ball)
-        ball_data['is_death_overs'] = int(do_start_ball <= current_ball_number <= do_end_ball)
+        ball_data['is_death_overs']  = int(do_start_ball <= current_ball_number <= do_end_ball)
 
-        # Retrieve previous ball events and calculate BPI
-        ball_events = self.get_previous_ball_events()
-        ball_data["partnership_runs"] = self.match_data.current_partnership["runs"]
-        
-        completed_overs = self.match_data.current_over + (self.match_data.balls_this_over / 6)
-        if completed_overs > 0:
-            current_rr = self.match_data.total_runs / completed_overs
+        # === BPI / Intent / Milestones: FULL mode only ===
+        if not lite:
+            ball_events = self.get_previous_ball_events()
+            ball_data["partnership_runs"] = self.match_data.current_partnership["runs"]
+            self._prev_events_for_pressure = ball_events
+
+            completed_overs = self.match_data.current_over + (self.match_data.balls_this_over / 6)
+            current_rr = (self.match_data.total_runs / completed_overs) if completed_overs > 0 else 0
+            ball_data["current_run_rate"] = round(current_rr, 2)
+
+            # Milestones
+            partnership_runs = self.match_data.current_partnership["runs"]
+            milestones = [(25,0.4),(50,0.8),(75,1.4),(100,2)]
+            for milestone, weight in milestones:
+                if partnership_runs >= milestone and self.match_data.current_partnership.get("last_milestone", 0) < milestone:
+                    ball_data["partnership_milestone"] = milestone
+                    self.match_data.current_partnership["last_milestone"] = milestone
+                    break
+            else:
+                ball_data["partnership_milestone"] = None
+
+            for b in ball_events[-3:]:
+                print(f"Ball #{b.get('ball_number')}, Runs: {b.get('runs')}, Expected: {b.get('expected_runs')}")
+
+            batting_bpi, bowling_bpi = self.calculate_bpi(ball_events, ball_data)
+            self.update_bpi_display(batting_bpi, bowling_bpi)
+            ball_data['batting_bpi'] = batting_bpi
+            ball_data['bowling_bpi'] = bowling_bpi
+
+            ball_data['batter_id'] = self.match_data.striker
+            ball_data['non_striker_id'] = self.match_data.non_striker
+
+            ball_data['intent_score'] = self.calculate_batting_intent_score(ball_data)
         else:
-            current_rr = 0
-        ball_data["current_run_rate"] = round(current_rr, 2)
-        
-        # Check for new milestone
-        partnership_runs = self.match_data.current_partnership["runs"]
-        milestones = [
-            (25, 0.4),     # +1 bowling pressure, -1 batting pressure
-            (50, 0.8),     # +2 bowling pressure, -2 batting pressure
-            (75, 1.4),     # +3 bowling pressure, -3 batting pressure
-            (100, 2),    # +4 bowling pressure, -4 batting pressure
-        ]
+            # Neutral defaults in Lite
+            ball_data.setdefault('partnership_runs', self.match_data.current_partnership["runs"])
+            ball_data.setdefault('current_run_rate', 0)
+            ball_data['partnership_milestone'] = None
+            ball_data['batting_bpi'] = 0
+            ball_data['bowling_bpi'] = 0
+            ball_data['batter_id'] = self.match_data.striker
+            ball_data['non_striker_id'] = self.match_data.non_striker
+            ball_data['intent_score'] = 0
 
-        for milestone, weight in milestones:
-             if partnership_runs >= milestone and self.match_data.current_partnership.get("last_milestone", 0) < milestone:
-                ball_data["partnership_milestone"] = milestone
-                self.match_data.current_partnership["last_milestone"] = milestone
-                break
+        # Fielder-required dismissals: enforce ONLY in FULL mode
+        dt = (ball_data.get('dismissal_type') or '').strip().lower()
+        if not lite and ball_data.get('dismissal') and dt in ('caught', 'stumped', 'run out'):
+            if not ball_data.get('fielder'):
+                fid = self.get_fielder_id()
+                if not fid:
+                    messagebox.showerror("Missing fielder",
+                                        "Please select the fielder who made the catch/stumping/run-out.")
+                    return
+                ball_data['fielder'] = fid
+            if dt == 'caught':
+                fe = set(ball_data.get('fielding_events', []))
+                fe.add('Catch')
+                ball_data['fielding_events'] = list(fe)
+
+        # Dismissal handling (both modes)
+        if ball_data.get('dismissal'):
+            self.handle_dismissal(ball_data)
+            return
         else:
-            ball_data["partnership_milestone"] = None
+            ball_data['dismissed_player_id'] = None
+            ball_data['dismissal_type'] = None
 
-        #print("[DEBUG] Fielding Events:", ball_data.get("fielding_events"))
-        #print(f"[DEBUG] dot_balls: {ball_data.get('dot_balls')} | Runs: {ball_data.get('runs')} | Extras: {ball_data.get('extras')}")
-
-
-
-        #print("Recent Ball Events Sample:")
-        for b in ball_events[-3:]:
-            print(f"Ball #{b.get('ball_number')}, Runs: {b.get('runs')}, Expected: {b.get('expected_runs')}")
-        batting_bpi, bowling_bpi = self.calculate_bpi(ball_events, ball_data)
-        self.update_bpi_display(batting_bpi, bowling_bpi)
-        ball_data['batting_bpi'] = batting_bpi
-        ball_data['bowling_bpi'] = bowling_bpi
-        #print("[DEBUG] Expected Runs (final before save):", ball_data.get("expected_runs"))
-        # Set the final striker and non-striker values into ball_data
-        ball_data['batter_id'] = self.match_data.striker
-        ball_data['non_striker_id'] = self.match_data.non_striker
-
-
-        ball_data['intent_score'] = self.calculate_batting_intent_score(ball_data)
+        # Save event
         ball_id = self.save_ball_event(ball_data)
+        ball_data['ball_id'] = ball_id
 
+        # Pressure impact: FULL mode only
+        if not lite:
+            ball_events = self.get_previous_ball_events()
+            self.save_individual_pressure_impact(ball_events, ball_data)
 
-        ball_data['ball_id'] = ball_id  # ✅ Pass ball_id forward
-        self.save_individual_pressure_impact(ball_events, ball_data)
-
-        # Check for innings completion
+        # Innings completion
         if self.match_data.wickets >= 10 or total_balls >= max_balls:
             self.end_innings()
             return
-        
-        # ✅ Check if delivery was legal (not wide or no ball)
+
+        # End of over on legal delivery
         if extras.get("wides", 0) == 0 and extras.get("no_balls", 0) == 0:
-            # ✅ Check for end of over
             if self.match_data.balls_this_over >= 6:
                 self.match_data.current_over += 1
                 self.match_data.balls_this_over = 0
                 self.pending_swap_end_of_over = True
-
-                # 🛑 But only select new bowler if innings is NOT ending
                 if self.match_data.current_over < self.match_data.total_overs:
                     self.select_new_bowler()
 
-        
-         # === Striker Swap Logic (run/extras triggered) ===
+        # Striker swap logic
         swap = False
-
-        # Check if run-based swap is needed
         if runs in [1, 3, 5]:
             swap = True
-
-        # Check if byes or leg byes are odd
         elif extras.get("byes", 0) in [1, 3, 5] or extras.get("leg_byes", 0) in [1, 3, 5]:
             swap = True
-
-        # Check for wide-based even-number runs (e.g., 2, 4, 6 wides)
         elif extras.get("wides", 0) in [2, 4, 6]:
             swap = True
-        
         elif hasattr(self, 'pending_swap_end_of_over') and self.pending_swap_end_of_over:
             self.swap_batters()
             self.pending_swap_end_of_over = False
-
-
         if swap:
             self.swap_batters()
-            #print("[DEBUG] Batter swapped due to run/extras logic")
 
         self.update_display()
         self.window.update_idletasks()
 
-
-
-        # 🔁 Always check Super Over transition first
+        # Super Over / match end logic (unchanged)
         if self.match_data.is_super_over:
             self.check_super_over_transition()
             return
-        #print(f"🧪 BEFORE MATCH END CHECK — waiting flag: {self.match_data.waiting_for_new_innings_setup}")
 
-        # ✅ Allow match-ending logic after the first valid ball of 2nd innings
         if self.match_data.waiting_for_new_innings_setup:
-            #print("🟢 Second innings setup complete — match checks now enabled.")
             self.match_data.waiting_for_new_innings_setup = False
 
-        # ⛔ Block match-ending logic if second innings hasn't truly started
         if self.match_data.innings == 2 and self.match_data.waiting_for_new_innings_setup:
-            #print("⏳ Match-end check skipped — waiting for first real ball in 2nd innings.")
             return
 
-
-
-
-        # 🏏 Regular end-of-match logic
         if self.match_data.innings == 2:
-            runs = self.match_data.total_runs
+            runs_total = self.match_data.total_runs
             target = self.match_data.adjusted_target or self.match_data.target_runs
-
-            if runs >= target:
+            if runs_total >= target:
                 self.end_match(winner=self.match_data.batting_team)
             elif self.match_data.wickets >= 10 or self.match_data.current_over >= self.match_data.total_overs:
-                if runs == target - 1:
+                if runs_total == target - 1:
                     self.trigger_super_over()
                 else:
                     self.end_match(winner=self.match_data.bowling_team)
 
-
         self.save_match_state_to_db()
+
 
     def end_match(self, winner):
         self.set_submit_enabled(False)
@@ -4588,7 +4685,6 @@ class BallByBallInterface:
         
         # Get selected player ID
         new_batter_id = self.new_batter.get()
-
         self.match_data.new_batter = new_batter_id
 
         # Update striker/non-striker based on who was dismissed
@@ -4605,22 +4701,48 @@ class BallByBallInterface:
 
         # Initialize new batter stats
         self.match_data.batters[new_batter_id] = {
-            'runs': 0,
-            'balls': 0,
-            'fours': 0,
-            'sixes': 0,
-            'status': 'not out'
+            'runs': 0, 'balls': 0, 'fours': 0, 'sixes': 0, 'status': 'not out'
         }
 
         # Start new partnership using current striker/non-striker
         ball_data = {'dismissed_player_id': self.match_data.dismissed_batter}
         self._start_new_partnership(ball_data)
 
-        # ✅ Save the ball now — dismissal is confirmed
-        self.save_ball_event(self.last_dismissal_ball_data)
+
+            # ✅ Save the ball now — dismissal is confirmed
+        ball_id = self.save_ball_event(self.last_dismissal_ball_data)        # NEW
+        self.last_dismissal_ball_data['ball_id'] = ball_id                   # NEW
+
+        # ✅ Record pressure impact for the wicket ball (was previously skipped)  # NEW
+        prev_evts = getattr(self, '_prev_events_for_pressure', None) or self.get_previous_ball_events()  # NEW
+        self.save_individual_pressure_impact(prev_evts, self.last_dismissal_ball_data)                   # NEW
+        self._prev_events_for_pressure = None                                   # NEW
+
+        # --- CLOSE OVER (and apply strike swap) WHEN THE WICKET BALL WAS THE 6TH LEGAL DELIVERY ---
+        bd = self.last_dismissal_ball_data
+        ex = (bd.get('extras') or {})
+        runs = int(bd.get('runs') or 0)
+        wides = int(ex.get('wides', 0) or 0)
+        no_balls = int(ex.get('no_balls', 0) or 0)
+        byes = int(ex.get('byes', 0) or 0)
+        leg_byes = int(ex.get('leg_byes', 0) or 0)
+
+        # 1) Run/extras-based strike swap for THIS ball
+        if runs in (1, 3, 5) or byes in (1, 3, 5) or leg_byes in (1, 3, 5) or wides in (2, 4, 6):
+            self.swap_batters()
+
+        # 2) End over if legal ball #6
+        if wides == 0 and no_balls == 0 and self.match_data.balls_this_over >= 6:
+            self.swap_batters()                     # end-of-over swap
+            self.match_data.current_over += 1
+            self.match_data.balls_this_over = 0
+            if self.match_data.current_over < self.match_data.total_overs:
+                self.select_new_bowler()
+        # --- end over close ---
 
         # Update display
         self.update_display()
+
    
     def select_new_bowler(self):
         """Show bowler selection with proper stats handling"""
@@ -5087,14 +5209,15 @@ class BallByBallInterface:
     def save_ball_event(self, ball_data):
         conn = sqlite3.connect(r"C:\Users\Danielle\Desktop\Cricket Analysis Program\cricket_analysis.db")
         c = conn.cursor()
-
         try:
             if not hasattr(self.match_data, 'innings_id') or not self.match_data.innings_id:
                 raise ValueError("Missing innings_id in match_data")
-
             if not hasattr(self.match_data, "match_id") or not self.match_data.match_id:
                 messagebox.showerror("Error", "No active match! Create a match first.")
                 return 0
+
+            # --------- mode helper ----------
+            lite = bool(getattr(self.match_data, "lite_mode", False))
 
             # === Free Hit Logic ===
             ball_data['free_hit'] = 0
@@ -5105,131 +5228,211 @@ class BallByBallInterface:
                 LIMIT 1
             """, (self.match_data.innings_id,))
             prev = c.fetchone()
-            if prev and prev[0] > 0:
+            if prev and (prev[0] or 0) > 0:
                 ball_data['free_hit'] = 1
 
             # === Batting Position Logic ===
             batting_team = self.match_data.batting_team
-            striker_id = self.match_data.striker
+            batter_id = ball_data.get('batter_id', self.match_data.striker)
+            non_striker_id = ball_data.get('non_striker_id', self.match_data.non_striker)
+
             batting_order_list = self.match_data.selected_players.get(batting_team, [])
-            if striker_id in batting_order_list:
-                ball_data["batting_position"] = batting_order_list.index(striker_id) + 1
+            if batter_id in batting_order_list:
+                ball_data["batting_position"] = batting_order_list.index(batter_id) + 1
+            else:
+                ball_data.setdefault("batting_position", 0)
 
             # === Bowling Order Logic ===
             bowling_team = self.match_data.bowling_team
             bowler_id = self.match_data.current_bowler
-            if not hasattr(self.match_data, "bowler_usage"):
+            if not hasattr(self.match_data, "bowler_usage") or self.match_data.bowler_usage is None:
                 self.match_data.bowler_usage = {}
             bowling_order_list = self.match_data.bowler_usage.setdefault(bowling_team, [])
             if bowler_id not in bowling_order_list:
                 bowling_order_list.append(bowler_id)
             ball_data["bowling_order"] = bowling_order_list.index(bowler_id) + 1
 
-            # === Shot Coordinates ===
+            # === Shot Coordinates (accept tuple or dict) ===
             shot_x, shot_y = None, None
-            if ball_data.get('shot_coords'):
-                try:
-                    shot_x = ball_data['shot_coords']['cartesian'][0]
-                    shot_y = ball_data['shot_coords']['cartesian'][1]
-                except (KeyError, TypeError):
-                    pass
+            sc = ball_data.get('shot_coords')
+            if sc is not None:
+                # tuple/list: (x, y)
+                if isinstance(sc, (tuple, list)) and len(sc) >= 2:
+                    shot_x, shot_y = sc[0], sc[1]
+                # dict with cartesian
+                elif isinstance(sc, dict):
+                    try:
+                        shot_x = sc.get('cartesian', [None, None])[0]
+                        shot_y = sc.get('cartesian', [None, None])[1]
+                    except Exception:
+                        pass
+
+            # === Pitch Coordinates (accept tuple or dict), use ball_data where possible ===
+            pitch_x, pitch_y = None, None
+            pc = ball_data.get('pitch_coords')
+            if pc is not None:
+                if isinstance(pc, (tuple, list)) and len(pc) >= 2:
+                    pitch_x, pitch_y = pc[0], pc[1]
+                elif isinstance(pc, dict):
+                    try:
+                        pitch_x = pc.get('cartesian', [None, None])[0]
+                        pitch_y = pc.get('cartesian', [None, None])[1]
+                    except Exception:
+                        pass
+            # Fallback to UI vars only in full mode if not provided
+            if not lite and (pitch_x is None or pitch_y is None):
+                if getattr(self, "current_pitch_location", None):
+                    try:
+                        pitch_x, pitch_y = self.current_pitch_location[0], self.current_pitch_location[1]
+                    except Exception:
+                        pass
 
             # === Fielding Style ===
-            fielding_style = self.fielding_style_combo.get() or None
+            fielding_style = ball_data.get('fielding_style')
+            if not fielding_style and not lite:
+                # only read UI in full mode
+                fielding_style = (self.fielding_style_combo.get() or None) if hasattr(self, "fielding_style_combo") else None
 
-            # === Final Data Prep ===
-            ball_data['fielder'] = self.get_fielder_id()
+            # === Fielder (don’t force in lite) ===
+            fielder_id = ball_data.get('fielder') if not lite else None
             ball_data['fielding_events'] = ball_data.get('fielding_events', [])
 
-            # === Dynamic Game Phase Tagging ===
-            # Compute balls bowled so far
+            # === Dynamic Game Phase Tagging (compute if not already present) ===
+            # (safe to recompute; matches your process_ball logic)
             balls_bowled = (self.match_data.current_over * 6) + self.match_data.balls_this_over
             current_ball_number = balls_bowled + 1
-
-            # Phase ranges
             phases = self.match_data.overs_phases
             pp_start, pp_end = phases['Powerplay']
             mo_start, mo_end = phases['Middle Overs']
             do_start, do_end = phases['Death Overs']
-
             pp_start_ball = (pp_start - 1) * 6 + 1
-            pp_end_ball = pp_end * 6
+            pp_end_ball   = pp_end * 6
             mo_start_ball = (mo_start - 1) * 6 + 1
-            mo_end_ball = mo_end * 6
+            mo_end_ball   = mo_end * 6
             do_start_ball = (do_start - 1) * 6 + 1
-            do_end_ball = do_end * 6
+            do_end_ball   = do_end * 6
 
-            ball_data['is_powerplay'] = int(pp_start_ball <= current_ball_number <= pp_end_ball)
+            ball_data['is_powerplay']    = int(pp_start_ball <= current_ball_number <= pp_end_ball)
             ball_data['is_middle_overs'] = int(mo_start_ball <= current_ball_number <= mo_end_ball)
-            ball_data['is_death_overs'] = int(do_start_ball <= current_ball_number <= do_end_ball)
+            ball_data['is_death_overs']  = int(do_start_ball <= current_ball_number <= do_end_ball)
 
-            # === Ball number in over (fix "ball 0" bug) ===
-            ball_number_in_over = self.match_data.balls_this_over + 1
-
-            if ball_data.get('wides', 0) > 0 or ball_data.get('no_balls', 0) > 0:
-                if self.match_data.balls_this_over == 0:
-                    ball_number_in_over = 1
+            # === Legal vs illegal delivery position ===
+            is_illegal = int(ball_data.get('wides', 0)) > 0 or int(ball_data.get('no_balls', 0)) > 0
+            if is_illegal:
+                ball_number_in_over = self.match_data.balls_this_over + 1
             else:
-                if ball_number_in_over > 6:
-                    ball_number_in_over = 6
+                ball_number_in_over = self.match_data.balls_this_over
+                if ball_number_in_over < 1: ball_number_in_over = 1
+                if ball_number_in_over > 6: ball_number_in_over = 6
 
-            # Set for DB:
             over_number = self.match_data.current_over
             balls_this_over = ball_number_in_over
 
-            batter_blind_turn = int(self.batter_blind_turn_var.get())
-            non_striker_blind_turn = int(self.non_striker_blind_turn_var.get()) 
+            # Blind turn flags
+            batter_blind_turn = int(getattr(self, "batter_blind_turn_var", tk.IntVar(value=0)).get())
+            non_striker_blind_turn = int(getattr(self, "non_striker_blind_turn_var", tk.IntVar(value=0)).get())
 
-            # === Insert Ball Event ===
-            print(f"💾 Final Intent Score to DB: {ball_data['intent_score']}")
+            # === Normalize extras JSON keys (DB expects '$.penalty') ===
+            extras_json = dict(ball_data.get('extras') or {})
+            if 'penalty_runs' in extras_json and 'penalty' not in extras_json:
+                extras_json['penalty'] = extras_json.pop('penalty_runs')
+
+            # === Pull safe values from ball_data first; fall back to UI only in full mode ===
+            shot_type = ball_data.get('shot_type')
+            if not shot_type and not lite:
+                shot_type = self.shot_type_var.get() if hasattr(self, "shot_type_var") else None
+
+            footwork = ball_data.get('footwork')
+            if not footwork and not lite:
+                footwork = self.footwork_var.get() if hasattr(self, "footwork_var") else None
+
+            aerial = int(ball_data.get('aerial', 0))
+            edged = int(ball_data.get('edged', 0))
+            clean_hit = int(ball_data.get('clean_hit', 0))
+
+            # Delivery type / shot selection can be empty string if None
+            delivery_type = ball_data.get('delivery_type', '')
+            shot_selection = ball_data.get('shot_selection', '')
+
+            # Numeric safe-gets
+            dot_balls = int(ball_data.get('dot_balls', 0))
+            wides = int(ball_data.get('wides', 0))
+            no_balls = int(ball_data.get('no_balls', 0))
+            free_hit = int(ball_data.get('free_hit', 0))
+            byes = int(ball_data.get('byes', 0))
+            leg_byes = int(ball_data.get('leg_byes', 0))
+            penalty_runs = int(ball_data.get('penalty_runs', 0))  # stored separately as columns too
+            ball_missed = int(ball_data.get('missed', 0))
+            expected_runs = int(ball_data.get('expected_runs', 0))
+            expected_wicket = float(ball_data.get('expected_wicket', 0.00))
+            batting_bpi = round(float(ball_data.get('batting_bpi', 0)), 2)
+            bowling_bpi = round(float(ball_data.get('bowling_bpi', 0)), 2)
+            intent_score = round(float(ball_data.get('intent_score', 0)), 2)
+            batting_position = int(ball_data.get('batting_position', 0))
+            bowling_order = int(ball_data.get('bowling_order', 0))
+            over_the_wicket = int(ball_data.get('over_the_wicket', 0))
+            around_the_wicket = int(ball_data.get('around_the_wicket', 0))
+            is_powerplay = int(ball_data.get('is_powerplay', 0))
+            is_middle_overs = int(ball_data.get('is_middle_overs', 0))
+            is_death_overs = int(ball_data.get('is_death_overs', 0))
+
+            # Dismissal bits
+            dismissal_type = ball_data.get('dismissal_type')
+            dismissed_player_id = ball_data.get('dismissed_player_id')
+
+            # Ball number (global)
+            ball_number_global = int(ball_data.get('ball_number', 0))
+
+            print(f"💾 Final Intent Score to DB: {intent_score}")
+
             params = (
                 self.match_data.innings_id,
                 over_number,
                 self.match_data.innings,
                 balls_this_over,
-                int(ball_data.get('ball_number', 0)),
-                self.match_data.striker,
-                self.match_data.non_striker,
-                self.match_data.current_bowler,
-                ball_data.get('fielder'),
+                ball_number_global,
+                batter_id,
+                non_striker_id,
+                bowler_id,
+                fielder_id,
                 int(ball_data.get('runs', 0)),
-                json.dumps(ball_data.get('extras', {})) if ball_data.get('extras') else None,
-                self.shot_type_var.get(),
-                self.footwork_var.get(),
-                int(self.aerial_var.get()),
-                self.dismissal_combo.get() if self.dismissal_var.get() else None,
-                ball_data.get('dismissed_player_id'),
-                self.current_pitch_location[0] if self.current_pitch_location else None,
-                self.current_pitch_location[1] if self.current_pitch_location else None,
+                json.dumps(extras_json) if extras_json else None,
+                shot_type,
+                footwork,
+                aerial,
+                dismissal_type,
+                dismissed_player_id,
+                pitch_x,
+                pitch_y,
                 shot_x,
                 shot_y,
-                ball_data.get('delivery_type', ''),
+                delivery_type,
                 fielding_style,
-                int(ball_data.get('edged', 0)),
-                ball_data.get('shot_selection', ''),
-                int(ball_data.get('dot_balls', 0)),
-                int(ball_data.get('wides', 0)),
-                int(ball_data.get('no_balls', 0)),
-                int(ball_data.get('free_hit', 0)),
-                int(ball_data.get('byes', 0)),
-                int(ball_data.get('leg_byes', 0)),
-                int(ball_data.get('penalty_runs', 0)),
-                int(ball_data.get('missed', 0)),
-                int(ball_data.get('clean_hit')),
-                int(ball_data.get('expected_runs', 0)),
-                float(ball_data.get('expected_wicket', 0.00)),
-                round(float(ball_data.get('batting_bpi', 0)), 2),
-                round(float(ball_data.get('bowling_bpi', 0)), 2),
-                round(float(ball_data.get('intent_score', 0)), 2),
-                int(ball_data.get('batting_position', 0)),
-                int(ball_data.get('bowling_order', 0)),
+                edged,
+                shot_selection,
+                dot_balls,
+                wides,
+                no_balls,
+                free_hit,
+                byes,
+                leg_byes,
+                penalty_runs,
+                ball_missed,
+                clean_hit,
+                expected_runs,
+                expected_wicket,
+                batting_bpi,
+                bowling_bpi,
+                intent_score,
+                batting_position,
+                bowling_order,
                 batter_blind_turn,
                 non_striker_blind_turn,
-                int(ball_data.get('over_the_wicket', 0)),
-                int(ball_data.get('around_the_wicket', 0)),
-                int(ball_data.get('is_powerplay', 0)),
-                int(ball_data.get('is_middle_overs', 0)),
-                int(ball_data.get('is_death_overs', 0))
+                over_the_wicket,
+                around_the_wicket,
+                is_powerplay,
+                is_middle_overs,
+                is_death_overs
             )
 
             c.execute('''INSERT INTO ball_events (
@@ -5247,18 +5450,15 @@ class BallByBallInterface:
             ball_id = c.lastrowid
 
             # === Update or Insert Partnership Info ===
-            # Normalize batters regardless of striker/non-striker swap
-            b1 = self.match_data.striker
-            b2 = self.match_data.non_striker
+            b1 = batter_id
+            b2 = non_striker_id
             batter1_id, batter2_id = sorted([b1, b2])
 
-            # Check for existing partnership
             c.execute("""
                 SELECT partnership_id FROM partnerships
                 WHERE innings_id = ? AND batter1_id = ? AND batter2_id = ?
                 ORDER BY partnership_id DESC LIMIT 1
             """, (self.match_data.innings_id, batter1_id, batter2_id))
-
             row = c.fetchone()
 
             if row:
@@ -5267,25 +5467,23 @@ class BallByBallInterface:
                     UPDATE partnerships
                     SET runs = runs + ?, balls = balls + 1
                     WHERE partnership_id = ?
-                """, (ball_data.get('runs', 0), partnership_id))
+                """, (int(ball_data.get('runs', 0)), partnership_id))
             else:
                 print("⚠️ Warning: No current partnership found! Not inserting automatically to avoid duplicates.")
-                # Optional: raise an error or log only — don't insert blindly
 
-
-            # === Insert Fielding Events ===
-            for event_name in ball_data['fielding_events']:
+            # === Insert Fielding Events (skip in lite if empty) ===
+            for event_name in (ball_data.get('fielding_events') or []):
                 c.execute("SELECT event_id FROM fielding_events WHERE event_name = ?", (event_name,))
                 event_id = c.fetchone()
                 if event_id:
                     c.execute("INSERT INTO ball_fielding_events (ball_id, event_id) VALUES (?, ?)", (ball_id, event_id[0]))
 
-            # === Insert Fielder Contribution ===
-            if ball_data['fielder']:
+            # === Insert Fielder Contribution (only if fielder_id present) ===
+            if fielder_id:
                 c.execute('''INSERT INTO fielding_contributions
                             (ball_id, fielder_id, boundary_saved)
                             VALUES (?, ?, ?)''',
-                        (ball_id, ball_data['fielder'], ball_data.get('boundary_saved', 0)))
+                        (ball_id, fielder_id, int(ball_data.get('boundary_saved', 0))))
 
             # === Update Innings Table ===
             c.execute("""
@@ -5332,24 +5530,18 @@ class BallByBallInterface:
                 self.match_data.innings_id
             ))
 
-
-
-
-            # ✅ Only one commit here
             conn.commit()
-            #print(f"[SAVE COMPLETE] Ball ID {ball_id} committed successfully.")
             return ball_id
 
         except sqlite3.Error as e:
             conn.rollback()
             print("[DB ERROR]", str(e))
-            import traceback
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
             messagebox.showerror("Save Error", f"Database Error:\n{str(e)}")
             return 0
-
         finally:
             conn.close()
+
 
     def save_state(self):
         """Deep copy all relevant data for proper undo"""

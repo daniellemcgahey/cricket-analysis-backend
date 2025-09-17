@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 import io
@@ -12,7 +12,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.graphics.shapes import Drawing, Rect
 from reportlab.lib.enums import TA_CENTER
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from collections import defaultdict, Counter
 import os
 import sqlite3
@@ -227,6 +227,16 @@ class TournamentFieldingLeadersPayload(BaseModel):
     tournament: str
     countries: List[str]
 
+class CoachPackRequest(BaseModel):
+    match_id: int
+    our_team_id: int          # country_id
+    opponent_team_id: int     # country_id
+    context: Literal["pre", "live", "post"] = "post"  # drive which sections to include
+    top_n_matchups: int = 5
+    min_balls_matchup: int = 12
+
+
+
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
     country1_stats = get_country_stats(
@@ -307,6 +317,159 @@ def compare_player_over_tournament(payload: ComparePlayerOverTournamentPayload):
         "tournaments": payload.tournaments,
         "stats_by_tournament": result
     }
+
+@app.post("/coach-pack")
+def build_coach_pack(payload: CoachPackRequest):
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path); conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    # ---- Match summary (you already do similar in generate_team_pdf_report) ----
+    c.execute("""
+      SELECT m.match_date, c1.country_name AS team_a, c2.country_name AS team_b, 
+             m.result, m.adjusted_target, m.toss_winner, m.toss_decision
+      FROM matches m
+      JOIN countries c1 ON m.team_a=c1.country_id
+      JOIN countries c2 ON m.team_b=c2.country_id
+      WHERE m.match_id=?
+    """, (payload.match_id,))
+    ms = dict(c.fetchone() or {})
+
+    # ---- KPIs & over medals (reuse your functions) ----
+    kpis, medal_tallies_by_area = calculate_kpis(c, payload.match_id, payload.our_team_id, payload.our_team_id)
+    over_medals = calculate_over_medals(c, payload.match_id, payload.our_team_id)
+
+    # ---- Top favorable / avoid matchups using your /tactical-matchup-detailed logic style ----
+    # Build batting-vs-bowler style pairs for both teams, then rank by a composite score.
+    # Keep it simple: use your v of avg_rpb + dismissal_pct + dot% from /tactical-matchup-detailed.
+    # NOTE: zero-change DB — this is just SQL + small Python math.
+    def fetch_matchups(team_bat_id, team_bowl_id):
+        c.execute("""
+          SELECT be.batter_id, be.bowler_id,
+                 SUM(CASE WHEN be.wides=0 THEN 1 ELSE 0 END) AS legal_balls,
+                 SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs,
+                 SUM(CASE WHEN be.wides=0 AND be.no_balls=0 AND COALESCE(be.runs,0)=0
+                           AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0 
+                      THEN 1 ELSE 0 END) AS dots,
+                 SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS outs
+          FROM ball_events be
+          JOIN innings i ON be.innings_id=i.innings_id
+          WHERE i.match_id=? AND i.batting_team=? AND i.bowling_team=?
+          GROUP BY be.batter_id, be.bowler_id
+        """, (payload.match_id, team_bat_id, team_bowl_id))
+        rows = [dict(r) for r in c.fetchall()]
+        out = []
+        for r in rows:
+            balls = r["legal_balls"] or 0
+            if balls < payload.min_balls_matchup: 
+                continue
+            rpb = (r["runs"] / balls) if balls else 0.0
+            dot_pct = (r["dots"]*100.0/balls) if balls else 0.0
+            out_pct = (r["outs"]*100.0/balls) if balls else 0.0
+            score = (out_pct/100.0) + (1.0/max(rpb, 0.1))  # same composite you use elsewhere
+            out.append({**r, "rpb": round(rpb,2), "dot_pct": round(dot_pct,1), "dismissal_pct": round(out_pct,1), "score": round(score,3)})
+        return sorted(out, key=lambda x: x["score"], reverse=True), sorted(out, key=lambda x: x["score"])
+
+    # Favorable for us: bowlers who suppress their batters (high score = good for bowler)
+    our_bowling_favorables, their_batting_favorables = fetch_matchups(team_bat_id=payload.opponent_team_id, team_bowl_id=payload.our_team_id)
+    # Favorable for our batting: our batters vs their bowlers with LOW bowler score (invert)
+    their_bowling_favorables, our_batting_favorables = fetch_matchups(team_bat_id=payload.our_team_id, team_bowl_id=payload.opponent_team_id)
+
+    # ---- Intent bands from existing batting_intent_score ----
+    c.execute("""
+      SELECT be.batter_id,
+             CASE 
+               WHEN be.is_powerplay=1 THEN 'PP'
+               WHEN be.is_death_overs=1 THEN 'DO'
+               ELSE 'MO' END AS phase,
+             CASE 
+               WHEN be.batting_intent_score < 20 THEN '0-20'
+               WHEN be.batting_intent_score < 40 THEN '20-40'
+               WHEN be.batting_intent_score < 60 THEN '40-60'
+               WHEN be.batting_intent_score < 80 THEN '60-80'
+               ELSE '80-100' END AS band,
+             COUNT(*) AS balls,
+             SUM(be.runs + be.wides + be.no_balls + be.byes + be.leg_byes) AS runs,
+             SUM(CASE WHEN be.dismissal_type IS NOT NULL THEN 1 ELSE 0 END) AS outs
+      FROM ball_events be
+      JOIN innings i ON be.innings_id=i.innings_id
+      WHERE i.match_id=? AND i.batting_team=?
+      GROUP BY be.batter_id, phase, band
+    """, (payload.match_id, payload.our_team_id))
+    intent_rows = [dict(r) for r in c.fetchall()]
+    intent_bands = []
+    for r in intent_rows:
+        balls = r["balls"] or 0
+        sr = (r["runs"]*100.0/balls) if balls else 0.0
+        dismiss_pct = (r["outs"]*100.0/balls) if balls else 0.0
+        # heuristic: “green band” = top 2 SR bands with dismiss% not in top 2 highest
+        intent_bands.append({**r, "sr": round(sr,1), "dismissal_pct": round(dismiss_pct,1)})
+
+    # ---- 3 Do / 3 Don’t (auto text from your data) ----
+    # Keep rules simple and deterministic so coaches trust them.
+    do_list, dont_list = [], []
+
+    # Do 1: Use our top bowling favorable matchup
+    if our_bowling_favorables:
+        f = our_bowling_favorables[0]
+        do_list.append(f"Use our bowlers vs their batter #{f['batter_id']} (rpb {f['rpb']}, dismiss% {f['dismissal_pct']}%)")
+
+    # Do 2: Intent band suggestion (pick the band with best SR where dismissal% <= team median)
+    if intent_bands:
+        # quick band per phase aggregate
+        from statistics import median
+        med = median([r["dismissal_pct"] for r in intent_bands])
+        best = max([r for r in intent_bands if r["dismissal_pct"] <= med], key=lambda r: r["sr"], default=None)
+        if best:
+            do_list.append(f"Keep batter #{best['batter_id']} in {best['phase']} intent {best['band']} (SR {best['sr']}, dismiss {best['dismissal_pct']}%).")
+
+    # Do 3: Bowlers’ PP/MO/DO phase with best dot% from your KPIs
+    # (You can refine with your zone_effectiveness later.)
+    c.execute("""
+      SELECT be.bowler_id,
+             CASE WHEN be.is_powerplay=1 THEN 'PP' WHEN be.is_death_overs=1 THEN 'DO' ELSE 'MO' END AS phase,
+             ROUND(100.0*AVG(CASE WHEN be.wides=0 AND be.no_balls=0 
+                     AND COALESCE(be.runs,0)=0 AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0 THEN 1.0 ELSE 0.0 END),1) AS dot_pct
+      FROM ball_events be JOIN innings i ON be.innings_id=i.innings_id
+      WHERE i.match_id=? AND i.bowling_team=?
+      GROUP BY be.bowler_id, phase
+      ORDER BY dot_pct DESC LIMIT 1
+    """, (payload.match_id, payload.our_team_id))
+    top_dot = c.fetchone()
+    if top_dot:
+        do_list.append(f"Phase usage: #{top_dot['bowler_id']} in {top_dot['phase']} (dot {top_dot['dot_pct']}%).")
+
+    # Don’t 1: Avoid our batting vs their best suppressor
+    if their_bowling_favorables:
+        avoid = their_bowling_favorables[0]
+        dont_list.append(f"Avoid our batter #{avoid['batter_id']} vs their bowler #{avoid['bowler_id']} (rpb {avoid['rpb']}, dismiss% {avoid['dismissal_pct']}%).")
+    # Don’t 2: PP boundaries conceded (from your KPI)
+    # (We’ll scan your kpis for “PP Boundaries (Bowling)” > Bronze target)
+    for k in kpis:
+        if k["name"] == "PP Boundaries (Bowling)" and isinstance(k["targets"], dict):
+            if k["actual"] > k["targets"]["Bronze"]:
+                dont_list.append("Tighten PP boundary prevention—exceeded Bronze threshold.")
+            break
+    # Don’t 3: Extras if above target
+    for k in kpis:
+        if k["name"] == "Extras" and isinstance(k["targets"], dict):
+            if k["actual"] > k["targets"]["Bronze"]:
+                dont_list.append("Cut extras—above Bronze threshold.")
+            break
+
+    pack = {
+        "match_summary": ms,
+        "kpis": kpis,
+        "medal_tallies_by_area": medal_tallies_by_area,
+        "over_medals": over_medals,
+        "favorable_bowling": our_bowling_favorables[:payload.top_n_matchups],
+        "favorable_batting": our_batting_favorables[:payload.top_n_matchups],
+        "intent_bands": intent_bands,
+        "three_do": do_list[:3],
+        "three_dont": dont_list[:3]
+    }
+    conn.close()
+    return pack
 
 
 @app.post("/wagon-wheel-comparison")
@@ -5248,7 +5411,101 @@ def get_tournament_standings(payload: dict):
     table.sort(key=lambda x: (-x["points"], -x["nrr"], x["team"].lower()))
     return table
 
+@app.get("/venue-insights")
+def venue_insights(
+    ground: str = Query(..., description="Ground name (e.g., 'Wankhede Stadium')"),
+    time_of_day: Optional[str] = Query(None, description="Optional time of day, e.g., 'Day' / 'Night' if you store it"),
+    tournament: Optional[str] = None,
+    team_category: Optional[str] = None
+):
+    import sqlite3, os
 
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+
+    # Build concrete venue values to match how you store them ("Ground, Time") or just "Ground"
+    if time_of_day:
+        venues_to_match = [f"{ground}, {time_of_day}"]
+    else:
+        # Match either exact "Ground" or any "Ground, <time>" variants
+        # We'll use two predicates: exact OR startswith "Ground, "
+        venues_to_match = None  # handled via SQL LIKE for the ", time" variant
+
+    params = []
+    where = ["1=1"]
+
+    if venues_to_match:
+        where.append("m.venue = ?")
+        params.append(venues_to_match[0])
+    else:
+        where.append("(m.venue = ? OR m.venue LIKE ?)")
+        params.extend([ground, f"{ground}, %"])
+
+    if tournament:
+        where.append("m.tournament_id = (SELECT tournament_id FROM tournaments WHERE tournament_name = ?)")
+        params.append(tournament)
+
+    # Optional team_category filter by team names (your data encodes category in country_name)
+    # We include matches where either side's name matches the category, excluding "training" unless explicitly chosen.
+    if team_category:
+        where.append("(LOWER(ca.country_name) LIKE ? OR LOWER(cb.country_name) LIKE ?)")
+        params.extend([f"%{team_category.lower()}%", f"%{team_category.lower()}%"])
+
+    # ---------- Average 1st-innings total ----------
+    c.execute(f"""
+        SELECT AVG(i.total_runs) AS avg_first_innings
+        FROM matches m
+        JOIN innings i ON i.match_id = m.match_id AND i.innings = 1
+        JOIN countries ca ON ca.country_id = m.team_a
+        JOIN countries cb ON cb.country_id = m.team_b
+        WHERE {' AND '.join(where)}
+    """, params)
+    row = c.fetchone()
+    avg_first_innings = round(row["avg_first_innings"], 2) if row and row["avg_first_innings"] is not None else None
+
+    # ---------- Win rate when batting first ----------
+    # Map the batting team (innings=1) to a country_id and compare with winner_id
+    c.execute(f"""
+        SELECT 
+            SUM(CASE WHEN cw.country_id = m.winner_id THEN 1 ELSE 0 END) AS wins_batting_first,
+            COUNT(CASE WHEN m.winner_id IS NOT NULL THEN 1 END) AS decided_matches
+        FROM matches m
+        JOIN innings i1 ON i1.match_id = m.match_id AND i1.innings = 1
+        JOIN countries cw ON cw.country_name = i1.batting_team
+        JOIN countries ca ON ca.country_id = m.team_a
+        JOIN countries cb ON cb.country_id = m.team_b
+        WHERE {' AND '.join(where)}
+    """, params)
+    row = c.fetchone()
+    wins_bat_first = row["wins_batting_first"] or 0
+    decided = row["decided_matches"] or 0
+    bat_first_win_rate = round((wins_bat_first / decided) * 100, 2) if decided > 0 else None
+
+    # ---------- Toss decision distribution & most common ----------
+    c.execute(f"""
+        SELECT LOWER(COALESCE(m.toss_decision, 'unknown')) AS decision, COUNT(*) AS cnt
+        FROM matches m
+        JOIN countries ca ON ca.country_id = m.team_a
+        JOIN countries cb ON cb.country_id = m.team_b
+        WHERE {' AND '.join(where)}
+        GROUP BY LOWER(COALESCE(m.toss_decision, 'unknown'))
+        ORDER BY cnt DESC
+    """, params)
+    toss_rows = c.fetchall()
+    toss_distribution = {r["decision"]: r["cnt"] for r in toss_rows}
+    most_common_toss_decision = (toss_rows[0]["decision"] if toss_rows else None)
+
+    conn.close()
+    return JSONResponse({
+        "ground": ground,
+        "time_of_day": time_of_day,
+        "avg_first_innings": avg_first_innings,
+        "bat_first_win_rate_pct": bat_first_win_rate,         # e.g., 44.12
+        "toss_distribution": toss_distribution,                # {"bat": 12, "field": 18, "unknown": 1}
+        "most_common_toss_decision": most_common_toss_decision # "field" / "bat" / "unknown"
+    })
 
 
 

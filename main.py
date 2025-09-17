@@ -241,6 +241,20 @@ class OppKeyPlayersPayload(BaseModel):
     min_balls: int = 40
     min_overs: float = 10.0
 
+class OppositionStrengthsPayload(BaseModel):
+    team_category: str
+    opponent_country: str
+    min_balls_style: int = 40     # guard for style splits
+    min_balls_phase: int = 40     # guard for phase splits
+    min_balls_bowling: int = 120  # guard for bowling aggregates
+
+
+def _db():
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
     country1_stats = get_country_stats(
@@ -5515,12 +5529,6 @@ def venue_insights(
 def opposition_key_players(payload: OppKeyPlayersPayload):
     import sqlite3, os
     from fastapi.responses import JSONResponse
-
-    def _db():
-        db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
 
     team_category = payload.team_category
     opponent_country = payload.opponent_country

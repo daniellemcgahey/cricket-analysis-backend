@@ -235,11 +235,11 @@ class CoachPackRequest(BaseModel):
     top_n_matchups: int = 5
     min_balls_matchup: int = 12
 
-def _db():
-    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+class OppKeyPlayersPayload(BaseModel):
+    team_category: str
+    opponent_country: str
+    min_balls: int = 40
+    min_overs: float = 10.0
 
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
@@ -5512,22 +5512,25 @@ def venue_insights(
     })
 
 @app.post("/opposition-key-players")
-def opposition_key_players(
-    team_category: str,
-    opponent_country: str,
-    min_balls: int = 40,     # T20 guard rail
-    min_overs: float = 10.0  # T20 guard rail
-):
-    """
-    Returns top 3 opposition batters & bowlers for the selected category/opponent.
-    Batters ranked by Strike Rate desc, tie-break Average desc (min balls).
-    Bowlers ranked by Wickets desc, tie-break Economy asc (min overs).
-    """
+def opposition_key_players(payload: OppKeyPlayersPayload):
+    import sqlite3, os
+    from fastapi.responses import JSONResponse
+
+    def _db():
+        db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    team_category = payload.team_category
+    opponent_country = payload.opponent_country
+    min_balls = payload.min_balls
+    min_overs = payload.min_overs
+
     conn = _db()
     c = conn.cursor()
 
-    # 1) Get opponent player list (reuse your existing "team-players" logic contract)
-    #    We assume you already use this route in FE to fetch roster by (country_name, team_category).
+    # roster
     c.execute("""
         SELECT p.player_id, p.player_name, p.role, p.bowling_style
         FROM players p
@@ -5542,11 +5545,7 @@ def opposition_key_players(
     player_ids = [r["player_id"] for r in roster]
     placeholders = ",".join(["?"] * len(player_ids))
 
-    # -------------------------
-    # BATTERS (SR then Avg)
-    # -------------------------
-    # runs, balls (exclude wides), dismissals (exclude non-bowler dismissals)
-    # average = runs / dismissals, strike_rate = runs*100 / balls
+    # BATTERS: SR desc, then Avg desc, then runs
     c.execute(f"""
         WITH batter_raw AS (
             SELECT 
@@ -5577,21 +5576,16 @@ def opposition_key_players(
         FROM batter_raw r
         JOIN players p ON p.player_id = r.pid
         WHERE COALESCE(r.balls_faced,0) >= ?
-        ORDER BY strike_rate DESC, average DESC NULLS LAST, runs DESC
+        ORDER BY strike_rate DESC, COALESCE(average, -1) DESC, runs DESC
         LIMIT 3
     """, (*player_ids, min_balls))
     top_batters = [dict(row) for row in c.fetchall()]
 
-    # -------------------------
-    # BOWLERS (Wkts then Econ)
-    # -------------------------
-    # wickets: when bowler is credited (dismissed_player_id=batter_id and dismissal_type not in list)
-    # economy = runs_conceded*6 / legal_balls (legal = wides=0 and no_balls=0)
+    # BOWLERS: Wickets desc, tie-break Eco asc, then overs desc
     c.execute(f"""
         WITH bowler_raw AS (
             SELECT
                 be.bowler_id AS pid,
-                COUNT(*) AS total_balls_incl, -- for reference
                 COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
                 SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
                 SUM(
@@ -5618,16 +5612,14 @@ def opposition_key_players(
         FROM bowler_raw r
         JOIN players p ON p.player_id = r.pid
         WHERE COALESCE(r.legal_balls,0) >= (? * 6)
-        ORDER BY wickets DESC, economy ASC NULLS LAST, overs DESC
+        ORDER BY wickets DESC, COALESCE(economy, 9999) ASC, overs DESC
         LIMIT 3
     """, (*player_ids, min_overs))
     top_bowlers = [dict(row) for row in c.fetchall()]
 
     conn.close()
-    return JSONResponse({
-        "batters": top_batters,
-        "bowlers": top_bowlers
-    })
+    return JSONResponse({"batters": top_batters, "bowlers": top_bowlers})
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

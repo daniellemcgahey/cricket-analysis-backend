@@ -5485,12 +5485,12 @@ def venue_insights(
 
     # ---------- Toss decision distribution & most common ----------
     c.execute(f"""
-        SELECT LOWER(COALESCE(m.toss_decision, 'unknown')) AS decision, COUNT(*) AS cnt
+        SELECT COALESCE(m.toss_decision, 'unknown') AS decision, COUNT(*) AS cnt
         FROM matches m
         JOIN countries ca ON ca.country_id = m.team_a
         JOIN countries cb ON cb.country_id = m.team_b
         WHERE {' AND '.join(where)}
-        GROUP BY LOWER(COALESCE(m.toss_decision, 'unknown'))
+        GROUP BY COALESCE(m.toss_decision, 'unknown')
         ORDER BY cnt DESC
     """, params)
     toss_rows = c.fetchall()

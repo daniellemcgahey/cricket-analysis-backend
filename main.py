@@ -235,7 +235,11 @@ class CoachPackRequest(BaseModel):
     top_n_matchups: int = 5
     min_balls_matchup: int = 12
 
-
+def _db():
+    db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 @app.post("/compare")
 def compare_countries(payload: ComparisonPayload):
@@ -5507,7 +5511,123 @@ def venue_insights(
         "most_common_toss_decision": most_common_toss_decision # "field" / "bat" / "unknown"
     })
 
+@app.post("/opposition-key-players")
+def opposition_key_players(
+    team_category: str,
+    opponent_country: str,
+    min_balls: int = 40,     # T20 guard rail
+    min_overs: float = 10.0  # T20 guard rail
+):
+    """
+    Returns top 3 opposition batters & bowlers for the selected category/opponent.
+    Batters ranked by Strike Rate desc, tie-break Average desc (min balls).
+    Bowlers ranked by Wickets desc, tie-break Economy asc (min overs).
+    """
+    conn = _db()
+    c = conn.cursor()
 
+    # 1) Get opponent player list (reuse your existing "team-players" logic contract)
+    #    We assume you already use this route in FE to fetch roster by (country_name, team_category).
+    c.execute("""
+        SELECT p.player_id, p.player_name, p.role, p.bowling_style
+        FROM players p
+        JOIN countries ctry ON p.country_id = ctry.country_id
+        WHERE ctry.country_name = ?
+    """, (opponent_country,))
+    roster = c.fetchall()
+    if not roster:
+        conn.close()
+        return JSONResponse({"batters": [], "bowlers": []})
+
+    player_ids = [r["player_id"] for r in roster]
+    placeholders = ",".join(["?"] * len(player_ids))
+
+    # -------------------------
+    # BATTERS (SR then Avg)
+    # -------------------------
+    # runs, balls (exclude wides), dismissals (exclude non-bowler dismissals)
+    # average = runs / dismissals, strike_rate = runs*100 / balls
+    c.execute(f"""
+        WITH batter_raw AS (
+            SELECT 
+                be.batter_id AS pid,
+                SUM(COALESCE(be.runs,0)) AS runs,
+                COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls_faced,
+                SUM(
+                  CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
+                        'not out','run out','retired hurt','retired out','obstructing the field'
+                    )
+                    THEN 1 ELSE 0
+                  END
+                ) AS dismissals
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.batter_id IN ({placeholders})
+        )
+        SELECT 
+            r.pid AS player_id,
+            p.player_name,
+            COALESCE(r.runs,0) AS runs,
+            COALESCE(r.balls_faced,0) AS balls_faced,
+            COALESCE(r.dismissals,0) AS dismissals,
+            CASE WHEN COALESCE(r.balls_faced,0) > 0 THEN ROUND(r.runs * 100.0 / r.balls_faced, 2) ELSE 0 END AS strike_rate,
+            CASE WHEN COALESCE(r.dismissals,0) > 0 THEN ROUND(r.runs * 1.0 / r.dismissals, 2) ELSE NULL END AS average
+        FROM batter_raw r
+        JOIN players p ON p.player_id = r.pid
+        WHERE COALESCE(r.balls_faced,0) >= ?
+        ORDER BY strike_rate DESC, average DESC NULLS LAST, runs DESC
+        LIMIT 3
+    """, (*player_ids, min_balls))
+    top_batters = [dict(row) for row in c.fetchall()]
+
+    # -------------------------
+    # BOWLERS (Wkts then Econ)
+    # -------------------------
+    # wickets: when bowler is credited (dismissed_player_id=batter_id and dismissal_type not in list)
+    # economy = runs_conceded*6 / legal_balls (legal = wides=0 and no_balls=0)
+    c.execute(f"""
+        WITH bowler_raw AS (
+            SELECT
+                be.bowler_id AS pid,
+                COUNT(*) AS total_balls_incl, -- for reference
+                COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
+                SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
+                SUM(
+                  CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
+                        'not out','run out','retired hurt','retired out','obstructing the field'
+                    )
+                    THEN 1 ELSE 0
+                  END
+                ) AS wickets
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.bowler_id IN ({placeholders})
+        )
+        SELECT
+            r.pid AS player_id,
+            p.player_name,
+            COALESCE(r.legal_balls,0) AS legal_balls,
+            COALESCE(r.runs_conceded,0) AS runs_conceded,
+            COALESCE(r.wickets,0) AS wickets,
+            CASE WHEN COALESCE(r.legal_balls,0) > 0 THEN ROUND(r.runs_conceded * 6.0 / r.legal_balls, 2) ELSE NULL END AS economy,
+            ROUND(COALESCE(r.legal_balls,0) / 6.0, 1) AS overs
+        FROM bowler_raw r
+        JOIN players p ON p.player_id = r.pid
+        WHERE COALESCE(r.legal_balls,0) >= (? * 6)
+        ORDER BY wickets DESC, economy ASC NULLS LAST, overs DESC
+        LIMIT 3
+    """, (*player_ids, min_overs))
+    top_bowlers = [dict(row) for row in c.fetchall()]
+
+    conn.close()
+    return JSONResponse({
+        "batters": top_batters,
+        "bowlers": top_bowlers
+    })
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

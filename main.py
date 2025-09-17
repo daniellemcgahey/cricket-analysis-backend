@@ -244,10 +244,9 @@ class OppKeyPlayersPayload(BaseModel):
 class OppositionStrengthsPayload(BaseModel):
     team_category: str
     opponent_country: str
-    min_balls_style: int = 40     # guard for style splits
-    min_balls_phase: int = 40     # guard for phase splits
-    min_balls_bowling: int = 120  # guard for bowling aggregates
-
+    min_balls_style: int = 60
+    min_balls_phase: int = 60
+    min_balls_bowling: int = 120
 
 def _db():
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -5641,7 +5640,7 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
     conn = _db()
     c = conn.cursor()
 
-    # --- resolve opponent player ids
+    # 1) Resolve opponent roster
     c.execute("""
         SELECT p.player_id, p.player_name, p.role, p.bowling_style
         FROM players p
@@ -5656,15 +5655,21 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
             "bowling": {"by_phase": [], "by_style": [], "strengths": [], "weaknesses": []}
         })
 
-    batter_ids = [r["player_id"] for r in roster]      # for batting metrics we look at when these are the batter
-    bowler_ids = [r["player_id"] for r in roster]      # for bowling metrics we look at when these are the bowler
+    batter_ids = [r["player_id"] for r in roster]
+    bowler_ids = [r["player_id"] for r in roster]
     ph_bat = ",".join(["?"] * len(batter_ids))
     ph_bowl = ",".join(["?"] * len(bowler_ids))
 
-    # ---------------------------------------------------
-    # Batting vs bowler STYLE (SR, rpb, dot%, boundary%, outs/ball)
-    # ---------------------------------------------------
-    # Note: wides excluded from balls, no_balls counted as ball faced.
+    # helper for phase label
+    phase_case = """
+        CASE
+          WHEN be.is_powerplay = 1 THEN 'Powerplay'
+          WHEN be.is_death_overs = 1 THEN 'Death'
+          ELSE 'Middle'
+        END
+    """
+
+    # 2) Batting vs bowler style
     c.execute(f"""
         WITH raw AS (
             SELECT
@@ -5707,22 +5712,11 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
     """, (*batter_ids, min_style))
     bat_by_style = [dict(r) for r in c.fetchall()]
 
-    # ---------------------------------------------------
-    # Batting by PHASE (PP / Middle / Death)
-    # ---------------------------------------------------
-    def _phase_case():
-        return """
-            CASE
-              WHEN be.is_powerplay = 1 THEN 'Powerplay'
-              WHEN be.is_death_overs = 1 THEN 'Death'
-              ELSE 'Middle'
-            END
-        """
-
+    # 3) Batting by phase
     c.execute(f"""
         WITH raw AS (
             SELECT
-              {_phase_case()} AS phase,
+              {phase_case} AS phase,
               SUM(COALESCE(be.runs,0)) AS runs,
               COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls,
               SUM(CASE WHEN be.wides = 0 AND be.runs = 0
@@ -5732,7 +5726,7 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.batter_id IN ({ph_bat})
-            GROUP BY {_phase_case()}
+            GROUP BY {phase_case}
         )
         SELECT
           phase, runs, balls, dots, boundaries,
@@ -5745,14 +5739,11 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
     """, (*batter_ids, min_phase))
     bat_by_phase = [dict(r) for r in c.fetchall()]
 
-    # ---------------------------------------------------
-    # Bowling – team aggregates by PHASE (their bowlers)
-    # ---------------------------------------------------
-    # Economy per over = runs_conceded*6 / legal_balls; wickets/ball
+    # 4) Bowling by phase (their bowlers)
     c.execute(f"""
         WITH raw AS (
             SELECT
-              {_phase_case()} AS phase,
+              {phase_case} AS phase,
               COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
               SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
               SUM(CASE WHEN be.wides=0 AND be.no_balls=0 AND COALESCE(be.runs,0)=0
@@ -5767,7 +5758,7 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.bowler_id IN ({ph_bowl})
-            GROUP BY {_phase_case()}
+            GROUP BY {phase_case}
         )
         SELECT
           phase, legal_balls,
@@ -5783,9 +5774,7 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
     """, (*bowler_ids, min_bowl))
     bowl_by_phase = [dict(r) for r in c.fetchall()]
 
-    # ---------------------------------------------------
-    # Bowling – by STYLE (aggregate all their bowlers by style)
-    # ---------------------------------------------------
+    # 5) Bowling by style
     c.execute(f"""
         WITH raw AS (
             SELECT
@@ -5830,32 +5819,21 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
 
     conn.close()
 
-    # ---------------------------
-    # Curate strengths/weaknesses
-    # ---------------------------
+    # Curate bullets
     strengths_bat, weaknesses_bat = [], []
     if bat_by_style:
         best_style = max(bat_by_style, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
         worst_style = min(bat_by_style, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
-        strengths_bat.append(
-            f"Batting vs {best_style['style_norm']}: SR {best_style['strike_rate']}, Dot% {best_style['dot_pct']}, Boundary% {best_style['boundary_pct']}."
-        )
-        weaknesses_bat.append(
-            f"Batting vs {worst_style['style_norm']}: SR {worst_style['strike_rate']}, Dot% {worst_style['dot_pct']}, Boundary% {worst_style['boundary_pct']}."
-        )
+        strengths_bat.append(f"Batting vs {best_style['style_norm']}: SR {best_style['strike_rate']}, Dot% {best_style['dot_pct']}, Boundary% {best_style['boundary_pct']}.")
+        weaknesses_bat.append(f"Batting vs {worst_style['style_norm']}: SR {worst_style['strike_rate']}, Dot% {worst_style['dot_pct']}, Boundary% {worst_style['boundary_pct']}.")
     if bat_by_phase:
         best_phase = max(bat_by_phase, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
         worst_phase = min(bat_by_phase, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
-        strengths_bat.append(
-            f"Batting in {best_phase['phase']}: SR {best_phase['strike_rate']}, Dot% {best_phase['dot_pct']}."
-        )
-        weaknesses_bat.append(
-            f"Batting in {worst_phase['phase']}: SR {worst_phase['strike_rate']}, Dot% {worst_phase['dot_pct']}."
-        )
+        strengths_bat.append(f"Batting in {best_phase['phase']}: SR {best_phase['strike_rate']}, Dot% {best_phase['dot_pct']}.")
+        weaknesses_bat.append(f"Batting in {worst_phase['phase']}: SR {worst_phase['strike_rate']}, Dot% {worst_phase['dot_pct']}.")
 
     strengths_bowl, weaknesses_bowl = [], []
     if bowl_by_phase:
-        # strength = low economy / high wkts in PP, weakness = death econ high / boundary% high
         pp = next((r for r in bowl_by_phase if r["phase"] == "Powerplay"), None)
         death = next((r for r in bowl_by_phase if r["phase"] == "Death"), None)
         mid = next((r for r in bowl_by_phase if r["phase"] == "Middle"), None)
@@ -5868,12 +5846,8 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
     if bowl_by_style:
         best_style_bowl = min(bowl_by_style, key=lambda x: (x["economy"] if x["economy"] is not None else 9999, -x["wickets_perc_ball"]))
         worst_style_bowl = max(bowl_by_style, key=lambda x: (x["economy"] if x["economy"] is not None else 0, x["boundary_pct"]))
-        strengths_bowl.append(
-            f"Bowling style strength: {best_style_bowl['style_norm']} — Econ {best_style_bowl['economy']}, Wkts/ball {best_style_bowl['wickets_perc_ball']}."
-        )
-        weaknesses_bowl.append(
-            f"Bowling style weakness: {worst_style_bowl['style_norm']} — Econ {worst_style_bowl['economy']}, Boundary% {worst_style_bowl['boundary_pct']}."
-        )
+        strengths_bowl.append(f"Bowling style strength: {best_style_bowl['style_norm']} — Econ {best_style_bowl['economy']}, Wkts/ball {best_style_bowl['wickets_perc_ball']}.")
+        weaknesses_bowl.append(f"Bowling style weakness: {worst_style_bowl['style_norm']} — Econ {worst_style_bowl['economy']}, Boundary% {worst_style_bowl['boundary_pct']}.")
 
     return JSONResponse({
         "batting": {
@@ -5889,6 +5863,7 @@ def opposition_strengths(payload: OppositionStrengthsPayload):
             "weaknesses": weaknesses_bowl
         }
     })
+
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")

@@ -5631,6 +5631,265 @@ def opposition_key_players(payload: OppKeyPlayersPayload):
     return JSONResponse({"batters": top_batters, "bowlers": top_bowlers})
 
 
+@app.post("/opposition-strengths")
+def opposition_strengths(payload: OppositionStrengthsPayload):
+    opponent = payload.opponent_country
+    min_style = payload.min_balls_style
+    min_phase = payload.min_balls_phase
+    min_bowl = payload.min_balls_bowling
+
+    conn = _db()
+    c = conn.cursor()
+
+    # --- resolve opponent player ids
+    c.execute("""
+        SELECT p.player_id, p.player_name, p.role, p.bowling_style
+        FROM players p
+        JOIN countries ctry ON p.country_id = ctry.country_id
+        WHERE ctry.country_name = ?
+    """, (opponent,))
+    roster = c.fetchall()
+    if not roster:
+        conn.close()
+        return JSONResponse({
+            "batting": {"by_style": [], "by_phase": [], "strengths": [], "weaknesses": []},
+            "bowling": {"by_phase": [], "by_style": [], "strengths": [], "weaknesses": []}
+        })
+
+    batter_ids = [r["player_id"] for r in roster]      # for batting metrics we look at when these are the batter
+    bowler_ids = [r["player_id"] for r in roster]      # for bowling metrics we look at when these are the bowler
+    ph_bat = ",".join(["?"] * len(batter_ids))
+    ph_bowl = ",".join(["?"] * len(bowler_ids))
+
+    # ---------------------------------------------------
+    # Batting vs bowler STYLE (SR, rpb, dot%, boundary%, outs/ball)
+    # ---------------------------------------------------
+    # Note: wides excluded from balls, no_balls counted as ball faced.
+    c.execute(f"""
+        WITH raw AS (
+            SELECT
+              LOWER(bowl.bowling_style) AS style,
+              SUM(COALESCE(be.runs,0)) AS runs,
+              COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls,
+              SUM(CASE WHEN be.wides = 0 AND be.runs = 0
+                        AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0
+                        AND COALESCE(be.penalty_runs,0)=0 THEN 1 ELSE 0 END) AS dots,
+              SUM(CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END) AS boundaries,
+              SUM(CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN
+                        ('not out','run out','retired hurt','retired out','obstructing the field')
+                    THEN 1 ELSE 0 END) AS outs
+            FROM ball_events be
+            JOIN innings i   ON be.innings_id = i.innings_id
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE be.batter_id IN ({ph_bat})
+              AND bowl.bowling_style IS NOT NULL
+            GROUP BY LOWER(bowl.bowling_style)
+        )
+        SELECT
+          CASE
+            WHEN style LIKE '%off%' THEN 'Off Spin'
+            WHEN style LIKE '%leg%' THEN 'Leg Spin'
+            WHEN style LIKE '%medium%' THEN 'Medium'
+            WHEN style LIKE '%pace%' OR style LIKE '%fast%' THEN 'Pace'
+            ELSE COALESCE(style, 'Unknown')
+          END AS style_norm,
+          runs, balls, dots, boundaries, outs,
+          CASE WHEN balls>0 THEN ROUND(runs*100.0/balls,2) ELSE 0 END AS strike_rate,
+          CASE WHEN balls>0 THEN ROUND(runs*1.0/balls,3) ELSE 0 END AS rpb,
+          CASE WHEN balls>0 THEN ROUND(dots*100.0/balls,1) ELSE 0 END AS dot_pct,
+          CASE WHEN balls>0 THEN ROUND(boundaries*100.0/balls,1) ELSE 0 END AS boundary_pct,
+          CASE WHEN balls>0 THEN ROUND(outs*100.0/balls,2) ELSE 0 END AS outs_perc_ball
+        FROM raw
+        HAVING balls >= ?
+        ORDER BY style_norm
+    """, (*batter_ids, min_style))
+    bat_by_style = [dict(r) for r in c.fetchall()]
+
+    # ---------------------------------------------------
+    # Batting by PHASE (PP / Middle / Death)
+    # ---------------------------------------------------
+    def _phase_case():
+        return """
+            CASE
+              WHEN be.is_powerplay = 1 THEN 'Powerplay'
+              WHEN be.is_death_overs = 1 THEN 'Death'
+              ELSE 'Middle'
+            END
+        """
+
+    c.execute(f"""
+        WITH raw AS (
+            SELECT
+              {_phase_case()} AS phase,
+              SUM(COALESCE(be.runs,0)) AS runs,
+              COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls,
+              SUM(CASE WHEN be.wides = 0 AND be.runs = 0
+                        AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0
+                        AND COALESCE(be.penalty_runs,0)=0 THEN 1 ELSE 0 END) AS dots,
+              SUM(CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END) AS boundaries
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.batter_id IN ({ph_bat})
+            GROUP BY {_phase_case()}
+        )
+        SELECT
+          phase, runs, balls, dots, boundaries,
+          CASE WHEN balls>0 THEN ROUND(runs*100.0/balls,2) ELSE 0 END AS strike_rate,
+          CASE WHEN balls>0 THEN ROUND(dots*100.0/balls,1) ELSE 0 END AS dot_pct,
+          CASE WHEN balls>0 THEN ROUND(boundaries*100.0/balls,1) ELSE 0 END AS boundary_pct
+        FROM raw
+        HAVING balls >= ?
+        ORDER BY CASE phase WHEN 'Powerplay' THEN 1 WHEN 'Middle' THEN 2 ELSE 3 END
+    """, (*batter_ids, min_phase))
+    bat_by_phase = [dict(r) for r in c.fetchall()]
+
+    # ---------------------------------------------------
+    # Bowling – team aggregates by PHASE (their bowlers)
+    # ---------------------------------------------------
+    # Economy per over = runs_conceded*6 / legal_balls; wickets/ball
+    c.execute(f"""
+        WITH raw AS (
+            SELECT
+              {_phase_case()} AS phase,
+              COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
+              SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
+              SUM(CASE WHEN be.wides=0 AND be.no_balls=0 AND COALESCE(be.runs,0)=0
+                       AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0
+                       AND COALESCE(be.penalty_runs,0)=0 THEN 1 ELSE 0 END) AS dots,
+              SUM(CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END) AS boundaries,
+              SUM(CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN
+                        ('not out','run out','retired hurt','retired out','obstructing the field')
+                    THEN 1 ELSE 0 END) AS wickets
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.bowler_id IN ({ph_bowl})
+            GROUP BY {_phase_case()}
+        )
+        SELECT
+          phase, legal_balls,
+          runs_conceded, dots, boundaries, wickets,
+          CASE WHEN legal_balls>0 THEN ROUND(runs_conceded*6.0/legal_balls,2) ELSE NULL END AS economy,
+          CASE WHEN legal_balls>0 THEN ROUND(dots*100.0/legal_balls,1) ELSE 0 END AS dot_pct,
+          CASE WHEN legal_balls>0 THEN ROUND(boundaries*100.0/legal_balls,1) ELSE 0 END AS boundary_pct,
+          CASE WHEN legal_balls>0 THEN ROUND(wickets*100.0/legal_balls,2) ELSE 0 END AS wickets_perc_ball,
+          ROUND(legal_balls/6.0,1) AS overs
+        FROM raw
+        HAVING legal_balls >= ?
+        ORDER BY CASE phase WHEN 'Powerplay' THEN 1 WHEN 'Middle' THEN 2 ELSE 3 END
+    """, (*bowler_ids, min_bowl))
+    bowl_by_phase = [dict(r) for r in c.fetchall()]
+
+    # ---------------------------------------------------
+    # Bowling – by STYLE (aggregate all their bowlers by style)
+    # ---------------------------------------------------
+    c.execute(f"""
+        WITH raw AS (
+            SELECT
+              LOWER(bowl.bowling_style) AS style,
+              COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
+              SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
+              SUM(CASE WHEN be.wides=0 AND be.no_balls=0 AND COALESCE(be.runs,0)=0
+                        AND COALESCE(be.byes,0)=0 AND COALESCE(be.leg_byes,0)=0
+                        AND COALESCE(be.penalty_runs,0)=0 THEN 1 ELSE 0 END) AS dots,
+              SUM(CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END) AS boundaries,
+              SUM(CASE
+                    WHEN be.dismissed_player_id = be.batter_id
+                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN
+                        ('not out','run out','retired hurt','retired out','obstructing the field')
+                    THEN 1 ELSE 0 END) AS wickets
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE be.bowler_id IN ({ph_bowl}) AND bowl.bowling_style IS NOT NULL
+            GROUP BY LOWER(bowl.bowling_style)
+        )
+        SELECT
+          CASE
+            WHEN style LIKE '%off%' THEN 'Off Spin'
+            WHEN style LIKE '%leg%' THEN 'Leg Spin'
+            WHEN style LIKE '%medium%' THEN 'Medium'
+            WHEN style LIKE '%pace%' OR style LIKE '%fast%' THEN 'Pace'
+            ELSE COALESCE(style, 'Unknown')
+          END AS style_norm,
+          legal_balls,
+          runs_conceded, dots, boundaries, wickets,
+          CASE WHEN legal_balls>0 THEN ROUND(runs_conceded*6.0/legal_balls,2) ELSE NULL END AS economy,
+          CASE WHEN legal_balls>0 THEN ROUND(dots*100.0/legal_balls,1) ELSE 0 END AS dot_pct,
+          CASE WHEN legal_balls>0 THEN ROUND(boundaries*100.0/legal_balls,1) ELSE 0 END AS boundary_pct,
+          CASE WHEN legal_balls>0 THEN ROUND(wickets*100.0/legal_balls,2) ELSE 0 END AS wickets_perc_ball,
+          ROUND(legal_balls/6.0,1) AS overs
+        FROM raw
+        HAVING legal_balls >= ?
+        ORDER BY style_norm
+    """, (*bowler_ids, min_bowl))
+    bowl_by_style = [dict(r) for r in c.fetchall()]
+
+    conn.close()
+
+    # ---------------------------
+    # Curate strengths/weaknesses
+    # ---------------------------
+    strengths_bat, weaknesses_bat = [], []
+    if bat_by_style:
+        best_style = max(bat_by_style, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
+        worst_style = min(bat_by_style, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
+        strengths_bat.append(
+            f"Batting vs {best_style['style_norm']}: SR {best_style['strike_rate']}, Dot% {best_style['dot_pct']}, Boundary% {best_style['boundary_pct']}."
+        )
+        weaknesses_bat.append(
+            f"Batting vs {worst_style['style_norm']}: SR {worst_style['strike_rate']}, Dot% {worst_style['dot_pct']}, Boundary% {worst_style['boundary_pct']}."
+        )
+    if bat_by_phase:
+        best_phase = max(bat_by_phase, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
+        worst_phase = min(bat_by_phase, key=lambda x: (x["strike_rate"], -x["dot_pct"]))
+        strengths_bat.append(
+            f"Batting in {best_phase['phase']}: SR {best_phase['strike_rate']}, Dot% {best_phase['dot_pct']}."
+        )
+        weaknesses_bat.append(
+            f"Batting in {worst_phase['phase']}: SR {worst_phase['strike_rate']}, Dot% {worst_phase['dot_pct']}."
+        )
+
+    strengths_bowl, weaknesses_bowl = [], []
+    if bowl_by_phase:
+        # strength = low economy / high wkts in PP, weakness = death econ high / boundary% high
+        pp = next((r for r in bowl_by_phase if r["phase"] == "Powerplay"), None)
+        death = next((r for r in bowl_by_phase if r["phase"] == "Death"), None)
+        mid = next((r for r in bowl_by_phase if r["phase"] == "Middle"), None)
+        if pp:
+            strengths_bowl.append(f"Powerplay threat: Wkts/ball {pp['wickets_perc_ball']}, Dot% {pp['dot_pct']}.")
+        if death:
+            weaknesses_bowl.append(f"Death leakage: Econ {death['economy']}, Boundary% {death['boundary_pct']}.")
+        if mid:
+            strengths_bowl.append(f"Middle-overs control: Econ {mid['economy']}, Dot% {mid['dot_pct']}.")
+    if bowl_by_style:
+        best_style_bowl = min(bowl_by_style, key=lambda x: (x["economy"] if x["economy"] is not None else 9999, -x["wickets_perc_ball"]))
+        worst_style_bowl = max(bowl_by_style, key=lambda x: (x["economy"] if x["economy"] is not None else 0, x["boundary_pct"]))
+        strengths_bowl.append(
+            f"Bowling style strength: {best_style_bowl['style_norm']} — Econ {best_style_bowl['economy']}, Wkts/ball {best_style_bowl['wickets_perc_ball']}."
+        )
+        weaknesses_bowl.append(
+            f"Bowling style weakness: {worst_style_bowl['style_norm']} — Econ {worst_style_bowl['economy']}, Boundary% {worst_style_bowl['boundary_pct']}."
+        )
+
+    return JSONResponse({
+        "batting": {
+            "by_style": bat_by_style,
+            "by_phase": bat_by_phase,
+            "strengths": strengths_bat,
+            "weaknesses": weaknesses_bat
+        },
+        "bowling": {
+            "by_phase": bowl_by_phase,
+            "by_style": bowl_by_style,
+            "strengths": strengths_bowl,
+            "weaknesses": weaknesses_bowl
+        }
+    })
+
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)

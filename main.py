@@ -5545,7 +5545,7 @@ def opposition_key_players(payload: OppKeyPlayersPayload):
     player_ids = [r["player_id"] for r in roster]
     placeholders = ",".join(["?"] * len(player_ids))
 
-    # BATTERS: SR desc, then Avg desc, then runs
+    # --- BATTERS: SR desc, then Avg desc, then runs
     c.execute(f"""
         WITH batter_raw AS (
             SELECT 
@@ -5553,17 +5553,18 @@ def opposition_key_players(payload: OppKeyPlayersPayload):
                 SUM(COALESCE(be.runs,0)) AS runs,
                 COUNT(CASE WHEN be.wides = 0 THEN 1 END) AS balls_faced,
                 SUM(
-                  CASE
+                CASE
                     WHEN be.dismissed_player_id = be.batter_id
-                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
+                    AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
                         'not out','run out','retired hurt','retired out','obstructing the field'
                     )
                     THEN 1 ELSE 0
-                  END
+                END
                 ) AS dismissals
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.batter_id IN ({placeholders})
+            GROUP BY be.batter_id                 -- ✅ key fix
         )
         SELECT 
             r.pid AS player_id,
@@ -5581,7 +5582,7 @@ def opposition_key_players(payload: OppKeyPlayersPayload):
     """, (*player_ids, min_balls))
     top_batters = [dict(row) for row in c.fetchall()]
 
-    # BOWLERS: Wickets desc, tie-break Eco asc, then overs desc
+    # --- BOWLERS: Wickets desc, tie-break Eco asc, then overs desc
     c.execute(f"""
         WITH bowler_raw AS (
             SELECT
@@ -5589,17 +5590,18 @@ def opposition_key_players(payload: OppKeyPlayersPayload):
                 COUNT(CASE WHEN be.wides = 0 AND be.no_balls = 0 THEN 1 END) AS legal_balls,
                 SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)) AS runs_conceded,
                 SUM(
-                  CASE
+                CASE
                     WHEN be.dismissed_player_id = be.batter_id
-                     AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
+                    AND LOWER(COALESCE(be.dismissal_type,'')) NOT IN (
                         'not out','run out','retired hurt','retired out','obstructing the field'
                     )
                     THEN 1 ELSE 0
-                  END
+                END
                 ) AS wickets
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.bowler_id IN ({placeholders})
+            GROUP BY be.bowler_id                 -- ✅ key fix
         )
         SELECT
             r.pid AS player_id,

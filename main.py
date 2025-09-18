@@ -6350,21 +6350,21 @@ def _confidence_from_sample(n: int) -> str:
 
 
 
-def _venue_filters(payload) -> Tuple[str, List[Any]]:
+def _venue_filters(payload: dict) -> tuple[str, list]:
     """
-    Builds a SQL fragment + params to filter by venue with your 'ground[, time]' convention.
-    Returns (" AND (...) ", [params...]) or ("", []) if no filter.
+    Builds SQL fragment + params to filter by venue with your 'ground[, time]' convention.
+    Works with a plain dict payload.
     """
-    conds = []
-    params: List[Any] = []
+    ground = (payload or {}).get("ground")
+    time_of_day = (payload or {}).get("time_of_day")
 
-    if payload.ground and payload.time_of_day:
+    conds, params = [], []
+    if ground and time_of_day:
         conds.append("m.venue = ?")
-        params.append(f"{payload.ground}, {payload.time_of_day}")
-    elif payload.ground and not payload.time_of_day:
-        # Match exact ground OR any 'ground, time'
+        params.append(f"{ground}, {time_of_day}")
+    elif ground:
         conds.append("(m.venue = ? OR m.venue LIKE ?)")
-        params.extend([payload.ground, f"{payload.ground}, %"])
+        params.extend([ground, f"{ground}, %"])
 
     if conds:
         return " AND " + " AND ".join(conds) + " ", params
@@ -6387,24 +6387,21 @@ def _fmt_evidence_short(ev: Dict[str, Any]) -> str:
 
 
 @app.post("/do-donts")
-def do_donts(payload: Any = Body(...)):
-    """
-    Max-sophistication Do & Don’ts:
-    - Global: 1 headline DO and DON'T
-    - Phases: DO/DON'T for Powerplay, Middle, Death
-    - Batting: 1-2 items each (do/don’t) for ourTeam vs opponent bowling
-    - Bowling: 1-2 items each (do/don’t) for our bowlers vs opponent batting
-    - Matchups: a couple of favourable / unfavourable suggestions
-    """
-
-    # ---- config / thresholds (tunable, can be pushed into payload if you want) ----
-    MIN_BALLS_STYLE = getattr(payload, "min_balls_by_style", 60)
-    MIN_BALLS_DEATH_BATTER = getattr(payload, "min_balls_death_phase", 36)
+def do_donts(payload: Dict[str, Any] = Body(...)):
+    # ---- config / thresholds (read safely from dict) ----
+    MIN_BALLS_STYLE        = int(payload.get("min_balls_by_style", 60))
+    MIN_BALLS_DEATH_BATTER = int(payload.get("min_balls_death_phase", 36))
     MIN_BALLS_PP_TEAM_STYLE = 36
-    MIN_OVERS_BOWLER_PHASE = 6  # 36 balls
+    MIN_OVERS_BOWLER_PHASE  = 6  # 36 balls
 
-    OUR_TEAM = payload.our_team
-    OPP = payload.opponent_country
+    OUR_TEAM = payload.get("our_team")
+    OPP      = payload.get("opponent_country")
+
+    if not OUR_TEAM or not OPP:
+        return {
+            "error": "Missing required fields our_team or opponent_country",
+            "received": {"our_team": OUR_TEAM, "opponent_country": OPP}
+        }
 
     style_norm = _style_norm_case_sql()
     length_case = _length_case_sql()
@@ -6725,8 +6722,15 @@ def do_donts(payload: Any = Body(...)):
     # Assemble items
     # ---------------------------
     context = {}
-    if getattr(payload, "ground", None): context["ground"] = payload.ground
-    if getattr(payload, "time_of_day", None): context["time_of_day"] = payload.time_of_day
+
+    ground = payload.get("ground")
+    time_of_day = payload.get("time_of_day")
+
+    if ground:
+        context["ground"] = ground
+
+    if time_of_day:
+        context["time_of_day"] = time_of_day
 
     # Global DO: middle-overs style squeeze
     if mid_do_pick:

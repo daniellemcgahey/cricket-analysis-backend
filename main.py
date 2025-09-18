@@ -6193,8 +6193,8 @@ def batting_targets_advanced(
     # --------- 5) Phase allocation (shift shares by relative opp weakness per phase) ---------
     base_shares = {
         "Powerplay": 0.28,
-        "Middle": 0.36,
-        "Death": 0.36
+        "Middle": 0.34,
+        "Death": 0.38
     }
     # multipliers >1 => we push more weight into that phase
     mul_pp   = _safe_div(lg_pp_econ,   opp_pp_econ,   default=1.0)
@@ -6246,11 +6246,9 @@ def batting_targets_advanced(
     # Optional notes
     notes = []
     if opp_pp_econ > lg_pp_econ:
-        notes.append("Opposition PP economy above league → license to score early.")
+        notes.append("Opposition PP economy above global normal → license to score early.")
     if opp_death_econ > lg_death_econ:
-        notes.append("Opposition Death economy above league → back-end acceleration viable.")
-    if our_rpo > lg_bat_rpo:
-        notes.append("Our batting RPO above league baseline.")
+        notes.append("Opposition Death economy above global normal → back-end acceleration viable.")
 
     return {
         "venue": {

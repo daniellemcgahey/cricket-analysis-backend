@@ -16,13 +16,15 @@ from typing import List, Dict, Any, Optional, Literal
 from collections import defaultdict, Counter
 import os
 import sqlite3
-from datetime import datetime
+import math
+import statistics
+from datetime import datetime, timedelta
 
 
 import sys
 print(sys.path)
 
-
+DB_PATH = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
 app = FastAPI()
 
 # If not already there:
@@ -50,7 +52,6 @@ class ColorSquare(Flowable):
         self.canv.setStrokeColor(colors.black)
         self.canv.setFillColor(self.fill_color)
         self.canv.rect(0, 0, self.size, self.size, fill=1, stroke=1)
-
 
 class ComparisonPayload(BaseModel):
     country1: str
@@ -487,7 +488,6 @@ def build_coach_pack(payload: CoachPackRequest):
     }
     conn.close()
     return pack
-
 
 @app.post("/wagon-wheel-comparison")
 def wagon_wheel_comparison(payload: WagonWheelPayload):
@@ -5649,6 +5649,7 @@ def _phase_case(alias: str = "be") -> str:
       ELSE 'Middle'
     END
     """
+
 def _empty_strengths_payload() -> Dict[str, Any]:
     return {
         "batting": {
@@ -5664,7 +5665,6 @@ def _empty_strengths_payload() -> Dict[str, Any]:
             "by_phase": [],
         },
     }
-
 
 @app.post("/opposition-strengths")
 def opposition_strengths(payload: OppositionStrengthsPayload = Body(...)) -> JSONResponse:
@@ -5977,6 +5977,313 @@ def opposition_strengths(payload: OppositionStrengthsPayload = Body(...)) -> JSO
             "by_phase": bowling_by_phase_rows,
         }
     })
+
+def _overs_from_legal_balls(legal_balls: int) -> float:
+    return legal_balls / 6.0 if legal_balls else 0.0
+
+def _safe_div(a: float, b: float, default: float = 0.0) -> float:
+    try:
+        return a / b if b else default
+    except:
+        return default
+
+def _trimmed_median(values: List[float], trim: float = 0.1) -> Optional[float]:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    n = len(vals)
+    k = int(n * trim)
+    core = vals[k: n - k] if n - 2*k > 0 else vals
+    return statistics.median(core)
+
+
+def _fetchone(query: str, params: tuple = ()):
+    rows = _fetchall(query, params)
+    return rows[0] if rows else None
+
+def _fetchall(query: str, params: tuple = ()):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(query, params)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+@app.get("/batting-targets-advanced")
+def batting_targets_advanced(
+    team_category: str = Query(..., description="e.g., 'Women', 'Men', 'U19 Women'"),
+    our_team: str = Query(..., description="e.g., 'Brasil Women'"),
+    opponent_country: str = Query(..., description="e.g., 'Rwanda Women'"),
+    ground: str = Query(..., description="Pure ground name (no time)"),
+    time_of_day: Optional[str] = Query(None, description="If venue strings like 'Ground, Evening' exist"),
+    recency_days: int = Query(720, description="Lookback (days) for stats weighting, default ~24 months"),
+    include_rain: bool = Query(False, description="Include rain-interrupted/DLS matches in venue baseline?")
+) -> Dict[str, Any]:
+    """
+    Returns:
+      {
+        venue: {...},
+        par: { venue_par, adjusted_par, target_total },
+        phases: [{phase, overs, runs, rpo}, ...],
+        notes: [ ... ],
+        debug: { ... }  # optional—hide in UI if you want
+      }
+    """
+
+    # --------- Common filters ---------
+    cat_like = f"%{team_category.lower()}%"
+    cutoff = (datetime.utcnow() - timedelta(days=recency_days)).strftime("%Y-%m-%d")
+
+    # Venue WHERE
+    if time_of_day:
+        venue_exact = f"{ground}, {time_of_day}"
+        venue_where = "m.venue = ?"
+        venue_params = (venue_exact,)
+    else:
+        # accept either exact ground or strings starting with "ground, ..."
+        venue_where = " (m.venue = ? OR m.venue LIKE ?) "
+        venue_params = (ground, f"{ground}, %")
+
+    # Rain filter
+    rain_where = "" if include_rain else " AND (m.rain_interrupted = 0 OR m.rain_interrupted IS NULL) "
+
+    # --------- 1) VENUE BASELINE (first-innings, normalized to 20 overs, trimmed median) ---------
+    # Pull first-innings totals + overs_bowled; normalize to 20 overs (RPO * 20), cap scaler to avoid huge jumps.
+    venue_rows = _fetchall(f"""
+        SELECT i.total_runs, i.overs_bowled
+        FROM innings i
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE i.innings = 1
+          AND {venue_where}
+          AND (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+          AND (m.match_date IS NULL OR m.match_date >= ?)
+          {rain_where}
+    """, (*venue_params, cat_like, cat_like, cutoff))
+
+    eq20_samples = []
+    for r in venue_rows:
+        total = r["total_runs"] or 0
+        overs = r["overs_bowled"] or 0.0
+        if overs and overs > 0:
+            rpo = total / overs
+            # cap scaling factor to reduce extreme inflation/deflation
+            eq20 = rpo * 20.0
+            eq20_samples.append(eq20)
+        else:
+            eq20_samples.append(float(total))
+
+    venue_par = _trimmed_median(eq20_samples, trim=0.1) if eq20_samples else None
+
+    # As fallback, use league-wide baseline (same category) if venue has no data
+    if venue_par is None:
+        league_rows = _fetchall(f"""
+            SELECT i.total_runs, i.overs_bowled
+            FROM innings i
+            JOIN matches m ON m.match_id = i.match_id
+            WHERE i.innings = 1
+              AND (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+              AND (m.match_date IS NULL OR m.match_date >= ?)
+        """, (cat_like, cat_like, cutoff))
+        league_eq20 = []
+        for r in league_rows:
+            total = r["total_runs"] or 0
+            overs = r["overs_bowled"] or 0.0
+            eq20 = (total / overs) * 20.0 if overs else float(total)
+            league_eq20.append(eq20)
+        venue_par = _trimmed_median(league_eq20, 0.1) if league_eq20 else 140.0  # sensible default if empty
+
+    # --------- 2) OPPONENT BOWLING & LEAGUE BOWLING (economy) ---------
+    # Opponent bowling, all balls where opponent is the bowling team (category filter on team strings)
+    opp_bowl = _fetchone(f"""
+        SELECT 
+          SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)
+              + COALESCE(be.byes,0) + COALESCE(be.leg_byes,0) + COALESCE(be.penalty_runs,0)) AS runs_conceded,
+          SUM(CASE WHEN be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS legal_balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE i.bowling_team = ?
+          AND (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+          AND (m.match_date IS NULL OR m.match_date >= ?)
+    """, (opponent_country, cat_like, cat_like, cutoff))
+
+    opp_runs = (opp_bowl["runs_conceded"] or 0) if opp_bowl else 0
+    opp_balls = (opp_bowl["legal_balls"] or 0) if opp_bowl else 0
+    opp_econ = 6.0 * _safe_div(opp_runs, opp_balls, default=0.0)
+
+    # League bowling economy across category
+    league_bowl = _fetchone(f"""
+        SELECT 
+          SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)
+              + COALESCE(be.byes,0) + COALESCE(be.leg_byes,0) + COALESCE(be.penalty_runs,0)) AS runs_conceded,
+          SUM(CASE WHEN be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS legal_balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+          AND (m.match_date IS NULL OR m.match_date >= ?)
+    """, (cat_like, cat_like, cutoff))
+
+    lg_runs = (league_bowl["runs_conceded"] or 0) if league_bowl else 0
+    lg_balls = (league_bowl["legal_balls"] or 0) if league_bowl else 0
+    lg_econ = 6.0 * _safe_div(lg_runs, lg_balls, default=7.8)
+
+    # Opponent phase economies (PP/Middle/Death) vs league
+    def _phase_econ(where_flag: str, team: Optional[str]) -> float:
+        # team=None => league
+        rows = _fetchone(f"""
+            SELECT 
+              SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)
+                  + COALESCE(be.byes,0) + COALESCE(be.leg_byes,0) + COALESCE(be.penalty_runs,0)) AS runs_conceded,
+              SUM(CASE WHEN be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS legal_balls
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON m.match_id = i.match_id
+            WHERE {where_flag} = 1
+              {"AND i.bowling_team = ?" if team else ""}
+              AND (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+              AND (m.match_date IS NULL OR m.match_date >= ?)
+        """, ((team, cat_like, cat_like, cutoff) if team else (cat_like, cat_like, cutoff)))
+        r = (rows["runs_conceded"] or 0) if rows else 0
+        b = (rows["legal_balls"] or 0) if rows else 0
+        return 6.0 * _safe_div(r, b, default=lg_econ)
+
+    opp_pp_econ    = _phase_econ("be.is_powerplay", opponent_country)
+    opp_mid_econ   = _phase_econ("be.is_middle_overs", opponent_country)
+    opp_death_econ = _phase_econ("be.is_death_overs", opponent_country)
+
+    lg_pp_econ    = _phase_econ("be.is_powerplay", None)
+    lg_mid_econ   = _phase_econ("be.is_middle_overs", None)
+    lg_death_econ = _phase_econ("be.is_death_overs", None)
+
+    # --------- 3) OUR BATTING vs LEAGUE BATTING (RPO) ---------
+    our_bat = _fetchone(f"""
+        SELECT 
+          SUM(COALESCE(be.runs,0) + COALESCE(be.wides,0) + COALESCE(be.no_balls,0)
+              + COALESCE(be.byes,0) + COALESCE(be.leg_byes,0) + COALESCE(be.penalty_runs,0)) AS runs_scored,
+          SUM(CASE WHEN be.wides=0 AND be.no_balls=0 THEN 1 ELSE 0 END) AS legal_balls
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE i.batting_team = ?
+          AND (LOWER(i.batting_team) LIKE ? OR LOWER(i.bowling_team) LIKE ?)
+          AND (m.match_date IS NULL OR m.match_date >= ?)
+    """, (our_team, cat_like, cat_like, cutoff))
+
+    our_runs = (our_bat["runs_scored"] or 0) if our_bat else 0
+    our_balls = (our_bat["legal_balls"] or 0) if our_bat else 0
+    our_rpo = _safe_div(our_runs, _overs_from_legal_balls(our_balls), default=7.8)
+
+    # League batting RPO (same category)
+    # (Note: mathematically this equals lg_econ if you include byes/leg-byes symmetrically)
+    lg_bat_rpo = _safe_div(lg_runs, _overs_from_legal_balls(lg_balls), default=7.8)
+
+    # --------- 4) Adjust venue par by strengths (bounded ±15%) ---------
+    # Opponent "weakness factor" in bowling (econ higher than league => >1 => weaker)
+    opp_weakness = _safe_div(opp_econ, lg_econ, default=1.0)
+    # Our batting strength vs league (rpo higher => >1)
+    our_bat_strength = _safe_div(our_rpo, lg_bat_rpo, default=1.0)
+
+    combined = our_bat_strength * opp_weakness
+    adj_factor = max(min(combined - 1.0, 0.15), -0.15)  # clamp [-15%, +15%]
+
+    adjusted_par = venue_par * (1.0 + adj_factor)
+    target_total = math.ceil(adjusted_par * 1.10)  # +10% safety buffer
+
+    # --------- 5) Phase allocation (shift shares by relative opp weakness per phase) ---------
+    base_shares = {
+        "Powerplay": 0.30,
+        "Middle": 0.40,
+        "Death": 0.30
+    }
+    # multipliers >1 => we push more weight into that phase
+    mul_pp   = _safe_div(lg_pp_econ,   opp_pp_econ,   default=1.0)
+    mul_mid  = _safe_div(lg_mid_econ,  opp_mid_econ,  default=1.0)
+    mul_death= _safe_div(lg_death_econ,opp_death_econ,default=1.0)
+
+    # Apply gentle shift (avoid extreme reallocation)
+    def _limit_share(base, m):
+        # turn multiplier into a +/- up to 5% shift:
+        shift = max(min((m - 1.0) * 0.10, 0.05), -0.05)
+        return base + shift
+
+    share_pp   = _limit_share(base_shares["Powerplay"], mul_pp)
+    share_death= _limit_share(base_shares["Death"], mul_death)
+    # middle gets the remainder to sum to 1
+    share_mid  = 1.0 - (share_pp + share_death)
+    # guard rails
+    if share_mid < 0.25:  # don't starve the middle
+        deficit = 0.25 - share_mid
+        share_mid += deficit
+        # take evenly from others
+        share_pp   -= deficit/2
+        share_death-= deficit/2
+
+    # Overs per phase
+    overs_pp, overs_mid, overs_death = 6, 8, 6
+
+    phases = [
+        {
+            "phase": "Powerplay 0–6",
+            "overs": overs_pp,
+            "runs": round(target_total * share_pp),
+            "rpo": round(_safe_div(target_total * share_pp, overs_pp, 0), 2)
+        },
+        {
+            "phase": "Middle 7–14",
+            "overs": overs_mid,
+            "runs": round(target_total * share_mid),
+            "rpo": round(_safe_div(target_total * share_mid, overs_mid, 0), 2)
+        },
+        {
+            "phase": "Death 15–20",
+            "overs": overs_death,
+            "runs": round(target_total * share_death),
+            "rpo": round(_safe_div(target_total * share_death, overs_death, 0), 2)
+        },
+    ]
+
+    # Optional notes
+    notes = []
+    if opp_pp_econ > lg_pp_econ:
+        notes.append("Opposition PP economy above league → license to score early.")
+    if opp_death_econ > lg_death_econ:
+        notes.append("Opposition Death economy above league → back-end acceleration viable.")
+    if our_rpo > lg_bat_rpo:
+        notes.append("Our batting RPO above league baseline.")
+
+    return {
+        "venue": {
+            "ground": ground,
+            "time_of_day": time_of_day or "",
+            "cutoff_since": cutoff,
+            "samples_used": len(eq20_samples),
+        },
+        "par": {
+            "venue_par": round(venue_par, 1) if venue_par is not None else None,
+            "adjusted_par": round(adjusted_par, 1),
+            "target_total": int(target_total),
+            "safety_buffer_pct": 10
+        },
+        "phases": phases,
+        "notes": notes,
+        "debug": {
+            "opp_econ": round(opp_econ, 2),
+            "lg_econ": round(lg_econ, 2),
+            "our_rpo": round(our_rpo, 2),
+            "lg_bat_rpo": round(lg_bat_rpo, 2),
+            "phase_econ": {
+                "opp": {"pp": round(opp_pp_econ,2), "mid": round(opp_mid_econ,2), "death": round(opp_death_econ,2)},
+                "lg":  {"pp": round(lg_pp_econ,2),  "mid": round(lg_mid_econ,2),  "death": round(lg_death_econ,2)},
+            },
+            "shares": {
+                "pp": round(share_pp,3),
+                "mid": round(share_mid,3),
+                "death": round(share_death,3),
+            }
+        }
+    }
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -6328,7 +6635,6 @@ def get_country_stats(country, tournaments, selected_stats, selected_phases, bow
 
     return stats
 
-
 def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
@@ -6623,7 +6929,6 @@ def get_player_stats(player_id, tournaments, selected_stats, selected_phases, bo
     conn.close()
 
     return stats
-
 
 def fetch_over_pressure(conn, team_names, match_ids, selected_phases):
     print("✅ fetch_over_pressure called with:", team_names, match_ids, selected_phases)

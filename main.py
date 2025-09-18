@@ -5996,7 +5996,6 @@ def _trimmed_median(values: List[float], trim: float = 0.1) -> Optional[float]:
     core = vals[k: n - k] if n - 2*k > 0 else vals
     return statistics.median(core)
 
-
 def _fetchone(query: str, params: tuple = ()):
     rows = _fetchall(query, params)
     return rows[0] if rows else None
@@ -6193,9 +6192,9 @@ def batting_targets_advanced(
 
     # --------- 5) Phase allocation (shift shares by relative opp weakness per phase) ---------
     base_shares = {
-        "Powerplay": 0.30,
-        "Middle": 0.40,
-        "Death": 0.30
+        "Powerplay": 0.28,
+        "Middle": 0.36,
+        "Death": 0.36
     }
     # multipliers >1 => we push more weight into that phase
     mul_pp   = _safe_div(lg_pp_econ,   opp_pp_econ,   default=1.0)

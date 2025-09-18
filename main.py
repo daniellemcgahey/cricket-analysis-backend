@@ -12,7 +12,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.graphics.shapes import Drawing, Rect
 from reportlab.lib.enums import TA_CENTER
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Literal, Tuple
 from collections import defaultdict, Counter
 import os
 import sqlite3
@@ -6348,60 +6348,159 @@ def _confidence_from_sample(n: int) -> str:
         return "Low"
     return "Very Low"
 
-@app.post("/do-donts", response_model=DoDontResponse)
-def do_donts(payload: DoDontPayload = Body(...)):
+
+
+def _venue_filters(payload) -> Tuple[str, List[Any]]:
     """
-    Produces 1 x DO and 1 x DON'T with deep, evidence-backed reasoning.
-    DO: team-level batting weakness vs a bowler style in Middle Overs (phase leverage).
-    DON'T: batter-level hot zone in Death vs seam length/line (risk avoidance).
+    Builds a SQL fragment + params to filter by venue with your 'ground[, time]' convention.
+    Returns (" AND (...) ", [params...]) or ("", []) if no filter.
     """
+    conds = []
+    params: List[Any] = []
+
+    if payload.ground and payload.time_of_day:
+        conds.append("m.venue = ?")
+        params.append(f"{payload.ground}, {payload.time_of_day}")
+    elif payload.ground and not payload.time_of_day:
+        # Match exact ground OR any 'ground, time'
+        conds.append("(m.venue = ? OR m.venue LIKE ?)")
+        params.extend([payload.ground, f"{payload.ground}, %"])
+
+    if conds:
+        return " AND " + " AND ".join(conds) + " ", params
+    return "", []
+
+
+def _fmt_evidence_short(ev: Dict[str, Any]) -> str:
+    parts = []
+    if ev.get("balls") is not None: parts.append(f"n={ev['balls']}")
+    if ev.get("overs") is not None: parts.append(f"ov={ev['overs']}")
+    if ev.get("strike_rate") is not None: parts.append(f"SR {ev['strike_rate']}")
+    if ev.get("rpo") is not None: parts.append(f"RPO {ev['rpo']}")
+    if ev.get("economy") is not None: parts.append(f"Econ {ev['economy']}")
+    if ev.get("dot_pct") is not None: parts.append(f"Dot {ev['dot_pct']}%")
+    if ev.get("boundary_pct") is not None: parts.append(f"4/6 {ev['boundary_pct']}%")
+    if ev.get("outs_per_ball") is not None: parts.append(f"Outs/ball {ev['outs_per_ball']}")
+    if ev.get("sr_gap") is not None: parts.append(f"ΔSR {ev['sr_gap']}")
+    if ev.get("econ_gap") is not None: parts.append(f"ΔEcon {ev['econ_gap']}")
+    return " • ".join(map(str, parts))
+
+
+@app.post("/do-donts")
+def do_donts(payload: Any = Body(...)):
+    """
+    Max-sophistication Do & Don’ts:
+    - Global: 1 headline DO and DON'T
+    - Phases: DO/DON'T for Powerplay, Middle, Death
+    - Batting: 1-2 items each (do/don’t) for ourTeam vs opponent bowling
+    - Bowling: 1-2 items each (do/don’t) for our bowlers vs opponent batting
+    - Matchups: a couple of favourable / unfavourable suggestions
+    """
+
+    # ---- config / thresholds (tunable, can be pushed into payload if you want) ----
+    MIN_BALLS_STYLE = getattr(payload, "min_balls_by_style", 60)
+    MIN_BALLS_DEATH_BATTER = getattr(payload, "min_balls_death_phase", 36)
+    MIN_BALLS_PP_TEAM_STYLE = 36
+    MIN_OVERS_BOWLER_PHASE = 6  # 36 balls
+
+    OUR_TEAM = payload.our_team
+    OPP = payload.opponent_country
+
+    style_norm = _style_norm_case_sql()
+    length_case = _length_case_sql()
+    line_case   = _line_case_sql()
+
+    vfrag, vparams = _venue_filters(payload)
+
+    def qexec(c, sql: str, params: List[Any]) -> List[dict]:
+        c.execute(sql, params)
+        return [dict(r) for r in c.fetchall()]
+
     conn = _db()
     c = conn.cursor()
 
-    # Build venue value if provided (matches your "ground, time" convention)
-    venue_filter_values: List[str] = []
-    if payload.ground and payload.time_of_day:
-        venue_filter_values = [f"{payload.ground}, {payload.time_of_day}"]
-    elif payload.ground:
-        # Include both “ground” and any “ground, time” forms
-        # We'll handle via LIKE to capture variants like "Ground, Morning"
-        pass
+    # ---------------------------
+    # A) BATTING (our team) vs opponent bowling by phase
+    # ---------------------------
+    # Compute team-phase batting metrics for OUR_TEAM (SR, dot%, boundary%)
+    def team_batting_phase(team_name: str, phase_flag: str) -> Optional[Dict[str, Any]]:
+        rows = qexec(c, f"""
+            WITH balls AS (
+                SELECT
+                    1 AS ball,
+                    be.runs AS runs,
+                    CASE WHEN be.runs=0 THEN 1 ELSE 0 END AS is_dot,
+                    CASE WHEN be.runs>=4 THEN 1 ELSE 0 END AS is_boundary
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                JOIN matches m ON i.match_id = m.match_id
+                WHERE i.batting_team = ?
+                  AND be.wides = 0
+                  AND be.{phase_flag} = 1
+                  {vfrag}
+            )
+            SELECT
+                SUM(ball) AS balls,
+                SUM(runs) AS runs,
+                ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END,1) AS strike_rate,
+                ROUND(SUM(is_dot)*100.0/NULLIF(SUM(ball),0),1) AS dot_pct,
+                ROUND(SUM(is_boundary)*100.0/NULLIF(SUM(ball),0),1) AS boundary_pct
+            FROM balls
+        """, [team_name, *vparams])
+        return rows[0] if rows else None
 
-    # ---------- 1) DO: Team-level weakness vs bowler style in Middle Overs ----------
-    # Team = opponent (they are batting), Middle Overs = be.is_middle_overs = 1
-    # We aggregate over balls faced by opponent batters.
-    style_norm = _style_norm_case_sql()
+    our_pp   = team_batting_phase(OUR_TEAM,   "is_powerplay")
+    our_mid  = team_batting_phase(OUR_TEAM,   "is_middle_overs")
+    our_death= team_batting_phase(OUR_TEAM,   "is_death_overs")
 
-    # Build WHERE fragments safely
-    where_core = [
-        "i.match_id = m.match_id",
-        "be.innings_id = i.innings_id",
-        "be.wides = 0",  # legal-only for batting SR/dot/boundary
-        "i.batting_team = ?",
-        "be.is_middle_overs = 1"
-    ]
-    params_core: List[Any] = [payload.opponent_country]
+    # Opponent bowling strength by phase (economy, dot%, wickets/ball)
+    def opp_bowling_phase(opponent_team: str, phase_flag: str) -> Optional[Dict[str, Any]]:
+        rows = qexec(c, f"""
+            WITH balls AS (
+                SELECT
+                    1 AS ball,
+                    be.runs AS runs,
+                    CASE WHEN be.runs=0 THEN 1 ELSE 0 END AS is_dot,
+                    CASE 
+                      WHEN be.dismissal_type IS NOT NULL AND LOWER(be.dismissal_type) NOT IN 
+                           ('run out','retired out','retired hurt','obstructing the field','not out')
+                      THEN 1 ELSE 0 END AS is_wkt
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                JOIN matches m ON i.match_id = m.match_id
+                WHERE i.bowling_team = ?
+                  AND be.{phase_flag} = 1
+                  {vfrag}
+            ),
+            agg AS (
+                SELECT SUM(ball) AS balls, SUM(runs) AS runs, SUM(is_dot) AS dots, SUM(is_wkt) AS wkts
+                FROM balls
+            )
+            SELECT
+                balls,
+                ROUND(runs/6.0,2) AS economy,                 -- per over
+                ROUND(dots*100.0/NULLIF(balls,0),1) AS dot_pct,
+                ROUND(wkts*1.0/NULLIF(balls,0),3) AS wkts_per_ball
+            FROM agg
+        """, [opponent_team, *vparams])
+        return rows[0] if rows else None
 
-    # Optional venue constraint
-    if payload.ground and not payload.time_of_day:
-        # Ground-only: we accept exact equals OR comma variant using LIKE
-        where_core.append("(m.venue = ? OR m.venue LIKE ?)")
-        params_core.extend([payload.ground, f"{payload.ground}, %"])
-    elif venue_filter_values:
-        where_core.append("m.venue IN ({})".format(",".join("?" * len(venue_filter_values))))
-        params_core.extend(venue_filter_values)
+    opp_pp   = opp_bowling_phase(OPP, "is_powerplay")
+    opp_mid  = opp_bowling_phase(OPP, "is_middle_overs")
+    opp_death= opp_bowling_phase(OPP, "is_death_overs")
 
-    where_sql = " AND ".join(where_core)
-
-    # Team-level by-style metrics in middle overs
-    c.execute(f"""
+    # ---------------------------
+    # B) BOWLING (our team) vs opponent batting by style & phase
+    # ---------------------------
+    # Opponent batting by style in Middle (choose weakest style)
+    by_style_mid = qexec(c, f"""
         WITH balls AS (
             SELECT
                 {style_norm} AS style_norm,
                 1 AS ball,
                 be.runs AS runs,
-                CASE WHEN be.runs = 0 THEN 1 ELSE 0 END AS is_dot,
-                CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END AS is_boundary,
+                CASE WHEN be.runs=0 THEN 1 ELSE 0 END AS is_dot,
+                CASE WHEN be.runs>=4 THEN 1 ELSE 0 END AS is_boundary,
                 CASE 
                     WHEN be.dismissal_type IS NOT NULL 
                          AND LOWER(be.dismissal_type) NOT IN ('run out','retired out','retired hurt','obstructing the field','not out')
@@ -6410,345 +6509,450 @@ def do_donts(payload: DoDontPayload = Body(...)):
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             JOIN players bowl ON be.bowler_id = bowl.player_id
-            WHERE {where_sql}
-        ),
-        by_style AS (
-            SELECT
-                style_norm,
-                SUM(ball) AS balls,
-                SUM(runs) AS runs,
-                SUM(is_dot) AS dots,
-                SUM(is_boundary) AS boundaries,
-                SUM(is_out) AS outs
-            FROM balls
-            GROUP BY style_norm
+            WHERE i.batting_team = ?
+              AND be.wides = 0
+              AND be.is_middle_overs = 1
+              {vfrag}
         )
         SELECT
             style_norm,
-            balls,
-            runs,
-            dots,
-            boundaries,
-            outs,
-            -- Per-ball metrics
-            ROUND(CASE WHEN balls > 0 THEN (runs * 100.0) / balls ELSE NULL END, 1) AS strike_rate,
-            ROUND(CASE WHEN balls > 0 THEN (dots * 100.0) / balls ELSE NULL END, 1) AS dot_pct,
-            ROUND(CASE WHEN balls > 0 THEN (boundaries * 100.0) / balls ELSE NULL END, 1) AS boundary_pct,
-            ROUND(CASE WHEN balls > 0 THEN (outs * 1.0) / balls ELSE NULL END, 3) AS outs_per_ball
-        FROM by_style
+            SUM(ball) AS balls,
+            SUM(runs) AS runs,
+            SUM(is_dot) AS dots,
+            SUM(is_boundary) AS boundaries,
+            SUM(is_out) AS outs,
+            ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END,1) AS strike_rate,
+            ROUND(SUM(is_dot)*100.0/NULLIF(SUM(ball),0),1) AS dot_pct,
+            ROUND(SUM(is_boundary)*100.0/NULLIF(SUM(ball),0),1) AS boundary_pct,
+            ROUND(SUM(is_out)*1.0/NULLIF(SUM(ball),0),3) AS outs_per_ball
+        FROM balls
+        GROUP BY style_norm
         ORDER BY style_norm
-    """, params_core)
-    by_style_rows = [dict(r) for r in c.fetchall()]
+    """, [OPP, *vparams])
 
-    # Venue baseline for team-level comparison (all teams at same filters)
-    base_where = [
-        "i.match_id = m.match_id",
-        "be.innings_id = i.innings_id",
-        "be.wides = 0",
-        "be.is_middle_overs = 1"
-    ]
-    base_params: List[Any] = []
-    if payload.ground and not payload.time_of_day:
-        base_where.append("(m.venue = ? OR m.venue LIKE ?)")
-        base_params.extend([payload.ground, f"{payload.ground}, %"])
-    elif venue_filter_values:
-        base_where.append("m.venue IN ({})".format(",".join("?" * len(venue_filter_values))))
-        base_params.extend(venue_filter_values)
-    base_where_sql = " AND ".join(base_where)
-
-    c.execute(f"""
+    # Venue baseline for same (all teams)
+    base_style_mid = qexec(c, f"""
         WITH balls AS (
             SELECT
                 {style_norm} AS style_norm,
                 1 AS ball,
                 be.runs AS runs,
-                CASE WHEN be.runs = 0 THEN 1 ELSE 0 END AS is_dot,
-                CASE WHEN be.runs >= 4 THEN 1 ELSE 0 END AS is_boundary
+                CASE WHEN be.runs=0 THEN 1 ELSE 0 END AS is_dot
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
             JOIN players bowl ON be.bowler_id = bowl.player_id
-            WHERE {base_where_sql}
-        ),
-        base AS (
-            SELECT
-                style_norm,
-                SUM(ball) AS balls,
-                SUM(runs) AS runs,
-                SUM(is_dot) AS dots,
-                SUM(is_boundary) AS boundaries
-            FROM balls
-            GROUP BY style_norm
+            WHERE be.wides = 0
+              AND be.is_middle_overs = 1
+              {vfrag}
         )
         SELECT
             style_norm,
-            balls,
-            runs,
-            dots,
-            boundaries,
-            ROUND(CASE WHEN balls > 0 THEN (runs * 100.0) / balls ELSE NULL END, 1) AS strike_rate,
-            ROUND(CASE WHEN balls > 0 THEN (dots * 100.0) / balls ELSE NULL END, 1) AS dot_pct,
-            ROUND(CASE WHEN balls > 0 THEN (boundaries * 100.0) / balls ELSE NULL END, 1) AS boundary_pct
-        FROM base
-        ORDER BY style_norm
-    """, base_params)
-    base_style_rows = {r["style_norm"]: dict(r) for r in c.fetchall()}
+            SUM(ball) AS balls,
+            ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END,1) AS strike_rate,
+            ROUND(SUM(is_dot)*100.0/NULLIF(SUM(ball),0),1) AS dot_pct
+        FROM balls
+        GROUP BY style_norm
+    """, [*vparams])
+    base_mid_map = {r["style_norm"]: r for r in base_style_mid}
 
-    # Choose the "weakest" style for DO:
-    # Heuristic: large sample AND (low SR AND high dot% AND decent outs/ball) vs baseline.
-    do_pick = None
-    do_reason = ""
-    for r in by_style_rows:
-        balls = r.get("balls", 0) or 0
-        if balls < payload.min_balls_style:
+    # Pick weakest style (low SR, high dots, decent outs/ball) with sample >= MIN_BALLS_STYLE
+    mid_do_pick = None
+    for r in by_style_mid:
+        if (r["balls"] or 0) < MIN_BALLS_STYLE:
             continue
-        style = r["style_norm"]
-        sr = r.get("strike_rate") or 0.0
-        dot_pct = r.get("dot_pct") or 0.0
-        outs_pb = r.get("outs_per_ball") or 0.0
+        base = base_mid_map.get(r["style_norm"], {})
+        sr_gap  = (base.get("strike_rate") or 0) - (r.get("strike_rate") or 0)
+        dot_gap = (r.get("dot_pct") or 0) - (base.get("dot_pct") or 0)
+        score = (sr_gap * .6) + (dot_gap * .3) + (r.get("outs_per_ball") or 0)*20.0
+        candidate = {**r, "sr_gap": round(sr_gap,1), "dot_gap": round(dot_gap,1), "score": score}
+        if (mid_do_pick is None) or (candidate["score"] > mid_do_pick["score"]):
+            mid_do_pick = candidate
 
-        base = base_style_rows.get(style, {})
-        base_sr = base.get("strike_rate") or None
-        base_dot = base.get("dot_pct") or None
-
-        # score: lower SR than base (positive gap), higher dots than base, plus outs/ball weight
-        sr_gap = (base_sr - sr) if base_sr is not None else 0.0
-        dot_gap = (dot_pct - base_dot) if base_dot is not None else 0.0
-        score = (sr_gap * 0.6) + (dot_gap * 0.3) + (outs_pb * 20.0)  # weight outs/ball meaningfully
-
-        candidate = {
-            "style_norm": style,
-            "balls": balls,
-            "strike_rate": sr,
-            "dot_pct": dot_pct,
-            "outs_per_ball": outs_pb,
-            "sr_gap_vs_venue": round(sr_gap, 1) if base_sr is not None else None,
-            "dot_gap_vs_venue": round(dot_gap, 1) if base_dot is not None else None,
-            "score": score,
-            "baseline": base or None
-        }
-        if (do_pick is None) or (candidate["score"] > do_pick["score"]):
-            do_pick = candidate
-
-    if do_pick is None:
-        do_text = "Exploit opponent’s least effective style in middle overs based on your scouting. (Insufficient sample to auto-identify from DB.)"
-        do_obj = {
-            "text": do_text,
-            "confidence": "Very Low",
-            "evidence": {}
-        }
-    else:
-        conf = _confidence_from_sample(do_pick["balls"])
-        # Action line depends on style
-        style = do_pick["style_norm"]
-        action = f"Deploy {style} immediately after the Powerplay with a squeeze field (4-5). Bowl full at 4th stump to amplify dots."
-
-        do_obj = {
-            "text": f"Exploit {payload.opponent_country} weakness vs {style} in the middle overs.",
-            "confidence": conf,
-            "evidence": {
-                "balls": do_pick["balls"],
-                "strike_rate": do_pick["strike_rate"],
-                "dot_pct": do_pick["dot_pct"],
-                "outs_per_ball": do_pick["outs_per_ball"],
-                "vs_venue_sr_gap": do_pick["sr_gap_vs_venue"],
-                "vs_venue_dot_gap": do_pick["dot_gap_vs_venue"],
-                "venue_baseline": do_pick["baseline"]
-            },
-            "action": action
-        }
-
-    # ---------- 2) DON'T: Batter-level hot zone in Death vs seam back-of-length on leg ----------
-    # Find best death batter (by SR with min balls at death), then extract their dangerous seam line/length pocket
-    length_case = _length_case_sql()
-    line_case = _line_case_sql()
-
-    dont_obj = {
-        "text": "Avoid feeding an opponent finisher’s hot zone at the death.",
-        "confidence": "Very Low",
-        "evidence": {}
-    }
-
-    # Find opponent individual death stats
-    where_ind = [
-        "be.innings_id = i.innings_id",
-        "i.match_id = m.match_id",
-        "be.wides = 0",
-        "be.is_death_overs = 1",
-        "be.batter_id = bat.player_id",
-        "i.batting_team = ?"
-    ]
-    params_ind: List[Any] = [payload.opponent_country]
-
-    if payload.ground and not payload.time_of_day:
-        where_ind.append("(m.venue = ? OR m.venue LIKE ?)")
-        params_ind.extend([payload.ground, f"{payload.ground}, %"])
-    elif venue_filter_values:
-        where_ind.append("m.venue IN ({})".format(",".join("?" * len(venue_filter_values))))
-        params_ind.extend(venue_filter_values)
-
-    # Best death batter
-    c.execute(f"""
+    # ---------------------------
+    # C) FINISHER hot pocket (DON’T at death)
+    # ---------------------------
+    finisher = qexec(c, f"""
         WITH death_balls AS (
             SELECT
-                bat.player_id,
-                bat.player_name,
+                bat.player_id, bat.player_name,
+                1 AS ball, be.runs AS runs
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            JOIN players bat ON be.batter_id = bat.player_id
+            WHERE i.batting_team = ?
+              AND be.wides = 0
+              AND be.is_death_overs = 1
+              {vfrag}
+        ),
+        agg AS (
+            SELECT player_id, player_name,
+                   SUM(ball) AS balls,
+                   ROUND(SUM(runs)*100.0/NULLIF(SUM(ball),0),1) AS strike_rate
+            FROM death_balls
+            GROUP BY player_id, player_name
+        )
+        SELECT * FROM agg
+        WHERE balls >= ?
+        ORDER BY strike_rate DESC, balls DESC
+        LIMIT 1
+    """, [OPP, *vparams, MIN_BALLS_DEATH_BATTER])
+    finisher = finisher[0] if finisher else None
+
+    pocket_row, base_pocket_row = None, None
+    if finisher:
+        pocket_row = qexec(c, f"""
+            WITH pocket AS (
+                SELECT
+                    1 AS ball, be.runs AS runs
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                JOIN matches m ON i.match_id = m.match_id
+                JOIN players bowl ON be.bowler_id = bowl.player_id
+                WHERE be.wides = 0
+                  AND be.is_death_overs = 1
+                  AND be.batter_id = ?
+                  AND bowl.bowling_style IN ('Pace','Medium')
+                  AND {length_case} IN ('Good','Short')
+                  AND {line_case} = 'Leg'
+                  {vfrag}
+            ), agg AS (
+                SELECT SUM(ball) AS balls, SUM(runs) AS runs,
+                       ROUND(SUM(runs)*1.0/NULLIF(SUM(ball),0),2) AS rpb,
+                       ROUND(SUM(runs)*100.0/NULLIF(SUM(ball),0),1) AS strike_rate,
+                       ROUND(SUM(CASE WHEN runs>=4 THEN 1 ELSE 0 END)*100.0/NULLIF(SUM(ball),0),1) AS boundary_pct,
+                       ROUND(SUM(CASE WHEN runs=0  THEN 1 ELSE 0 END)*100.0/NULLIF(SUM(ball),0),1) AS dot_pct
+                FROM pocket
+            )
+            SELECT * FROM agg
+        """, [finisher["player_id"], *vparams])[0]
+
+        base_pocket_row = qexec(c, f"""
+            WITH pocket AS (
+                SELECT 1 AS ball, be.runs AS runs
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                JOIN matches m ON i.match_id = m.match_id
+                JOIN players bowl ON be.bowler_id = bowl.player_id
+                WHERE be.wides = 0
+                  AND be.is_death_overs = 1
+                  AND bowl.bowling_style IN ('Pace','Medium')
+                  AND {length_case} IN ('Good','Short')
+                  AND {line_case} = 'Leg'
+                  {vfrag}
+            ), agg AS (
+                SELECT SUM(ball) AS balls, SUM(runs) AS runs,
+                       ROUND(SUM(runs)*1.0/NULLIF(SUM(ball),0),2) AS rpb,
+                       ROUND(SUM(runs)*100.0/NULLIF(SUM(ball),0),1) AS strike_rate
+                FROM pocket
+            )
+            SELECT * FROM agg
+        """, [*vparams])[0]
+
+    # ---------------------------
+    # D) POWERPLAY: which style squeezes OPP best? (for our bowling DO)
+    # ---------------------------
+    by_style_pp = qexec(c, f"""
+        WITH balls AS (
+            SELECT
+                {style_norm} AS style_norm,
+                1 AS ball,
+                be.runs AS runs,
+                CASE WHEN be.runs=0 THEN 1 ELSE 0 END AS is_dot,
+                CASE WHEN be.runs>=4 THEN 1 ELSE 0 END AS is_boundary
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            JOIN matches m ON i.match_id = m.match_id
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE i.batting_team = ?
+              AND be.wides = 0
+              AND be.is_powerplay = 1
+              {vfrag}
+        )
+        SELECT
+            style_norm,
+            SUM(ball) AS balls,
+            ROUND(SUM(runs)*100.0/NULLIF(SUM(ball),0),1) AS strike_rate,
+            ROUND(SUM(is_dot)*100.0/NULLIF(SUM(ball),0),1) AS dot_pct,
+            ROUND(SUM(is_boundary)*100.0/NULLIF(SUM(ball),0),1) AS boundary_pct
+        FROM balls
+        GROUP BY style_norm
+        ORDER BY style_norm
+    """, [OPP, *vparams])
+
+    pp_do_pick = None
+    for r in by_style_pp:
+        if (r["balls"] or 0) < MIN_BALLS_PP_TEAM_STYLE:
+            continue
+        # tradeoff: maximize dot%, minimize boundary%
+        score = (r.get("dot_pct") or 0)*1.0 - (r.get("boundary_pct") or 0)*0.8
+        candidate = {**r, "score": score}
+        if (pp_do_pick is None) or (candidate["score"] > pp_do_pick["score"]):
+            pp_do_pick = candidate
+
+    # ---------------------------
+    # E) OUR batting vs OPP in PP: identify DON'T (avoid reckless vs their best PP bowler type)
+    # ---------------------------
+    # Find opponent style that is toughest in PP (lowest SR conceded)
+    opp_pp_by_style = qexec(c, f"""
+        WITH balls AS (
+            SELECT
+                {style_norm} AS style_norm,
                 1 AS ball,
                 be.runs AS runs
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             JOIN matches m ON i.match_id = m.match_id
-            JOIN players bat ON be.batter_id = bat.player_id
-            WHERE {" AND ".join(where_ind)}
-        ),
-        agg AS (
-            SELECT
-                player_id,
-                player_name,
-                SUM(ball) AS balls,
-                SUM(runs) AS runs,
-                ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END, 1) AS strike_rate
-            FROM death_balls
-            GROUP BY player_id, player_name
+            JOIN players bowl ON be.bowler_id = bowl.player_id
+            WHERE i.bowling_team = ?
+              AND be.is_powerplay = 1
+              {vfrag}
         )
-        SELECT *
-        FROM agg
-        WHERE balls >= ?
-        ORDER BY strike_rate DESC, balls DESC
+        SELECT
+            style_norm,
+            SUM(ball) AS balls,
+            ROUND(SUM(runs)*100.0/NULLIF(SUM(ball),0),1) AS strike_rate_conceded
+        FROM balls
+        GROUP BY style_norm
+        HAVING SUM(ball) >= ?
+        ORDER BY strike_rate_conceded ASC
         LIMIT 1
-    """, params_ind + [payload.min_balls_death_batter])
-    finisher = c.fetchone()
+    """, [OPP, *vparams, MIN_BALLS_PP_TEAM_STYLE])
+    opp_tough_pp = opp_pp_by_style[0] if opp_pp_by_style else None
 
-    if finisher:
-        finisher = dict(finisher)
-        finisher_id = finisher["player_id"]
+    # ---------------------------
+    # Assemble items
+    # ---------------------------
+    context = {}
+    if getattr(payload, "ground", None): context["ground"] = payload.ground
+    if getattr(payload, "time_of_day", None): context["time_of_day"] = payload.time_of_day
 
-        # Now extract their seam back-of-length on Leg performance pocket
-        # Seam: Pace / Medium; Length: 'Good' or 'Short'; Line: 'Leg'
-        where_pocket = [
-            "be.innings_id = i.innings_id",
-            "i.match_id = m.match_id",
-            "be.wides = 0",
-            "be.is_death_overs = 1",
-            "be.batter_id = ?",
-            "bowl.player_id = be.bowler_id",
-            "bowl.bowling_style IN ('Pace','Medium')",
-            f"{length_case} IN ('Good','Short')",
-            f"{line_case} = 'Leg'"
-        ]
-        params_pocket: List[Any] = [finisher_id]
+    # Global DO: middle-overs style squeeze
+    if mid_do_pick:
+        mid_do_conf = _confidence_from_sample(mid_do_pick["balls"])
+        mid_do_item = {
+            "text": f"Exploit {OPP} vs {mid_do_pick['style_norm']} through the middle.",
+            "phase": "Middle (7–15)",
+            "evidence": _fmt_evidence_short({
+                "balls": mid_do_pick["balls"],
+                "strike_rate": mid_do_pick["strike_rate"],
+                "dot_pct": mid_do_pick["dot_pct"],
+                "outs_per_ball": mid_do_pick["outs_per_ball"],
+                "sr_gap": mid_do_pick["sr_gap"],
+            }),
+            "confidence": mid_do_conf,
+            "action": "Bring that style on immediately after PP with a 4–5 field; attack 4th-stump, vary pace into the wicket."
+        }
+    else:
+        mid_do_item = {
+            "text": "Use your best control style early in the middle overs (insufficient sample to auto-pick).",
+            "phase": "Middle (7–15)",
+            "evidence": None,
+            "confidence": "Very Low",
+            "action": "Start with your most accurate option, ring field, force miscues with pace variation."
+        }
 
-        if payload.ground and not payload.time_of_day:
-            where_pocket.append("(m.venue = ? OR m.venue LIKE ?)")
-            params_pocket.extend([payload.ground, f"{payload.ground}, %"])
-        elif venue_filter_values:
-            where_pocket.append("m.venue IN ({})".format(",".join("?" * len(venue_filter_values))))
-            params_pocket.extend(venue_filter_values)
-
-        c.execute(f"""
-            WITH pocket AS (
-                SELECT
-                    1 AS ball,
-                    be.runs AS runs
-                FROM ball_events be
-                JOIN innings i ON be.innings_id = i.innings_id
-                JOIN matches m ON i.match_id = m.match_id
-                JOIN players bowl ON be.bowler_id = bowl.player_id
-                WHERE {" AND ".join(where_pocket)}
-            ),
-            agg AS (
-                SELECT
-                    SUM(ball) AS balls,
-                    SUM(runs) AS runs,
-                    ROUND(CASE WHEN SUM(ball)>0 THEN SUM(runs)*1.0/SUM(ball) END, 2) AS rpb,
-                    ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END, 1) AS strike_rate,
-                    ROUND(SUM(CASE WHEN runs>=4 THEN 1 ELSE 0 END)*100.0 / NULLIF(SUM(ball),0), 1) AS boundary_pct,
-                    ROUND(SUM(CASE WHEN runs=0 THEN 1 ELSE 0 END)*100.0 / NULLIF(SUM(ball),0), 1) AS dot_pct
-                FROM pocket
-            )
-            SELECT * FROM agg
-        """, params_pocket)
-        pocket = dict(c.fetchone() or {})
-
-        # Venue baseline at death for all batters vs same pocket
-        where_base_pocket = [
-            "be.innings_id = i.innings_id",
-            "i.match_id = m.match_id",
-            "be.wides = 0",
-            "be.is_death_overs = 1",
-            "bowl.player_id = be.bowler_id",
-            "bowl.bowling_style IN ('Pace','Medium')",
-            f"{length_case} IN ('Good','Short')",
-            f"{line_case} = 'Leg'"
-        ]
-        params_base_pocket: List[Any] = []
-
-        if payload.ground and not payload.time_of_day:
-            where_base_pocket.append("(m.venue = ? OR m.venue LIKE ?)")
-            params_base_pocket.extend([payload.ground, f"{payload.ground}, %"])
-        elif venue_filter_values:
-            where_base_pocket.append("m.venue IN ({})".format(",".join("?" * len(venue_filter_values))))
-            params_base_pocket.extend(venue_filter_values)
-
-        c.execute(f"""
-            WITH pocket AS (
-                SELECT
-                    1 AS ball,
-                    be.runs AS runs
-                FROM ball_events be
-                JOIN innings i ON be.innings_id = i.innings_id
-                JOIN matches m ON i.match_id = m.match_id
-                JOIN players bowl ON be.bowler_id = bowl.player_id
-                WHERE {" AND ".join(where_base_pocket)}
-            ),
-            agg AS (
-                SELECT
-                    SUM(ball) AS balls,
-                    SUM(runs) AS runs,
-                    ROUND(CASE WHEN SUM(ball)>0 THEN SUM(runs)*1.0/SUM(ball) END, 2) AS rpb,
-                    ROUND(CASE WHEN SUM(ball)>0 THEN (SUM(runs)*100.0)/SUM(ball) END, 1) AS strike_rate
-                FROM pocket
-            )
-            SELECT * FROM agg
-        """, params_base_pocket)
-        base_pocket = dict(c.fetchone() or {})
-
-        pocket_balls = pocket.get("balls") or 0
-        conf_dont = _confidence_from_sample(pocket_balls)
+    # Global DON'T: finisher hot pocket
+    if finisher and pocket_row and (pocket_row.get("balls") or 0) > 0:
+        conf_dont = _confidence_from_sample(pocket_row["balls"])
         sr_gain = None
-        if pocket.get("strike_rate") is not None and base_pocket.get("strike_rate") is not None:
-            sr_gain = round(pocket["strike_rate"] - base_pocket["strike_rate"], 1)
+        if pocket_row.get("strike_rate") is not None and base_pocket_row.get("strike_rate") is not None:
+            sr_gain = round(pocket_row["strike_rate"] - base_pocket_row["strike_rate"], 1)
+        death_dont_item = {
+            "text": f"Don’t feed {finisher['player_name']}'s leg-side back-of-length seam at the death.",
+            "phase": "Death (16–20)",
+            "evidence": _fmt_evidence_short({
+                "balls": pocket_row["balls"],
+                "strike_rate": pocket_row["strike_rate"],
+                "boundary_pct": pocket_row["boundary_pct"],
+                "dot_pct": pocket_row["dot_pct"],
+                "sr_gap": sr_gain
+            }),
+            "confidence": conf_dont,
+            "action": "Go wide-yorker / off-pace into the pitch outside off; deep cover & long-off back; fine leg down."
+        }
+    else:
+        death_dont_item = {
+            "text": "Avoid leg-side back-of-length seam to their finishers at the death (insufficient pocket sample).",
+            "phase": "Death (16–20)",
+            "evidence": None,
+            "confidence": "Very Low",
+            "action": "Prefer wide yorkers or slow bouncers into the wicket with off-side protection."
+        }
 
-        if pocket_balls > 0:
-            dont_obj = {
-                "text": f"Don’t bowl back-of-a-length seam on leg at the death to {finisher['player_name']}.",
-                "confidence": conf_dont,
-                "evidence": {
-                    "batter": {
-                        "player_id": finisher["player_id"],
-                        "player_name": finisher["player_name"],
-                        "death_balls": finisher["balls"],
-                        "death_strike_rate": finisher["strike_rate"]
-                    },
-                    "hot_pocket": {
-                        "balls": pocket_balls,
-                        "rpb": pocket.get("rpb"),
-                        "strike_rate": pocket.get("strike_rate"),
-                        "boundary_pct": pocket.get("boundary_pct"),
-                        "dot_pct": pocket.get("dot_pct"),
-                        "sr_gain_vs_venue": sr_gain
-                    },
-                    "venue_baseline_pocket": {
-                        "balls": base_pocket.get("balls"),
-                        "rpb": base_pocket.get("rpb"),
-                        "strike_rate": base_pocket.get("strike_rate")
-                    }
-                },
-                "action": "Go to wide yorker or off-pace full outside off. Stack the off side (deep cover & long-off), keep third up, remove fine leg."
-            }
+    # Phase DO/DON’T (Powerplay)
+    if pp_do_pick:
+        pp_do = [{
+            "text": f"Open with {pp_do_pick['style_norm']} to squeeze PP dots.",
+            "phase": "Powerplay (1–6)",
+            "evidence": _fmt_evidence_short({
+                "balls": pp_do_pick["balls"],
+                "strike_rate": pp_do_pick["strike_rate"],
+                "dot_pct": pp_do_pick["dot_pct"],
+                "boundary_pct": pp_do_pick["boundary_pct"]
+            }),
+            "confidence": _confidence_from_sample(pp_do_pick["balls"]),
+            "action": "Tight channels, two slips initially if conditions allow; defend straight, attack 4th-stump."
+        }]
+    else:
+        pp_do = [{
+            "text": "Use your most accurate new-ball style to maximise dots (no single style stands out in sample).",
+            "phase": "Powerplay (1–6)",
+            "evidence": None,
+            "confidence": "Very Low",
+            "action": "Hard lengths on 4th-stump; proactive field tweaks after 8–10 balls."
+        }]
+
+    if opp_tough_pp:
+        pp_dont = [{
+            "text": f"Don’t over-attack {OPP} in PP vs their toughest style ({opp_tough_pp['style_norm']}).",
+            "phase": "Powerplay (1–6)",
+            "evidence": _fmt_evidence_short({
+                "balls": opp_tough_pp["balls"],
+                "strike_rate": opp_tough_pp["strike_rate_conceded"]
+            }),
+            "confidence": _confidence_from_sample(opp_tough_pp["balls"]),
+            "action": "Stay patient; rotate early; take on the other end or wait one over for a matchup shift."
+        }]
+    else:
+        pp_dont = [{
+            "text": "Don’t gift early wickets—respect their best PP operator until matchup swings your way.",
+            "phase": "Powerplay (1–6)",
+            "evidence": None,
+            "confidence": "Very Low",
+            "action": "Set a low-risk boundary option per over; target gaps, not heroes."
+        }]
+
+    # Middle
+    middle_do  = [mid_do_item]
+    middle_dont= [{
+        "text": "Don’t drift too full at 4–5 if they’re absorbing—length discipline first, changes later.",
+        "phase": "Middle (7–15)",
+        "evidence": None,
+        "confidence": "Medium",
+        "action": "Hold hard length into the pitch before attempting pace-off floaters."
+    }]
+
+    # Death
+    death_do = [{
+        "text": "Do front-load your best yorker/slow-bouncer operator to overs 18 & 20.",
+        "phase": "Death (16–20)",
+        "evidence": _fmt_evidence_short(opp_death or {}),
+        "confidence": (_confidence_from_sample((opp_death or {}).get("balls", 0)) if opp_death else "Very Low"),
+        "action": "Clear plans per batter: wide-yorker vs leg-side hitters; into-the-wicket vs base-leg finishers."
+    }]
+    death_dont = [death_dont_item]
+
+    # Team-wide batting guidance (ourTeam vs OPP)
+    batting_do = []
+    batting_dont = []
+
+    if our_mid and opp_mid:
+        # If our SR is strong vs their mid-overs bowling, double down on rotation
+        if (our_mid.get("strike_rate") or 0) > 115 and (opp_mid.get("dot_pct") or 0) < 45:
+            batting_do.append({
+                "text": "Keep rotating in the middle—don’t stall on 4/5-ball overs.",
+                "phase": "Middle (7–15)",
+                "evidence": _fmt_evidence_short({
+                    "strike_rate": our_mid["strike_rate"],
+                    "dot_pct": our_mid["dot_pct"]
+                }),
+                "confidence": _confidence_from_sample( (our_mid.get("balls") or 0) ),
+                "action": "One power option per over; everyone else strike to gap, hard running."
+            })
+        # If their dot% is high, warn about reckless slogging
+        if (opp_mid.get("dot_pct") or 0) >= 50:
+            batting_dont.append({
+                "text": "Don’t chase release balls—high mid-over dot% from them punishes impatience.",
+                "phase": "Middle (7–15)",
+                "evidence": _fmt_evidence_short(opp_mid),
+                "confidence": _confidence_from_sample( (opp_mid.get("balls") or 0) ),
+                "action": "Earn your release with strike-to-field, not premeditated swings."
+            })
+
+    if our_death and opp_death:
+        # If opponent death economy is strong, emphasize par management into last 5
+        if (opp_death.get("economy") or 0) < 8.2:
+            batting_do.append({
+                "text": "Bank a platform into 16–20 against a tight death unit.",
+                "phase": "Death (16–20)",
+                "evidence": _fmt_evidence_short(opp_death),
+                "confidence": _confidence_from_sample( (opp_death.get("balls") or 0) ),
+                "action": "Be above run-rate by 15; pick the right finisher-vs-matchup at 18 & 20."
+            })
+
+    # Team-wide bowling guidance (ourTeam)
+    bowling_do = []
+    bowling_dont = []
+
+    if pp_do_pick:
+        bowling_do.append({
+            "text": f"Open with {pp_do_pick['style_norm']} for control.",
+            "phase": "Powerplay (1–6)",
+            "evidence": _fmt_evidence_short(pp_do_pick),
+            "confidence": _confidence_from_sample(pp_do_pick["balls"]),
+            "action": "Third/fine up initially; change only after read of batter intent."
+        })
+
+    if mid_do_pick:
+        bowling_do.append({
+            "text": f"Use {mid_do_pick['style_norm']} through 7–12 for squeeze.",
+            "phase": "Middle (7–15)",
+            "evidence": _fmt_evidence_short(mid_do_pick),
+            "confidence": _confidence_from_sample(mid_do_pick["balls"]),
+            "action": "Tight 4th-stump, into the pitch, vary pace; catching ring live."
+        })
+
+    if finisher and pocket_row and (pocket_row.get("balls") or 0) > 0:
+        bowling_dont.append({
+            "text": f"Don’t bowl leg-side back-of-length seam to {finisher['player_name']} late.",
+            "phase": "Death (16–20)",
+            "evidence": _fmt_evidence_short(pocket_row),
+            "confidence": _confidence_from_sample(pocket_row["balls"]),
+            "action": "Go wide-yorker/slow-into-pitch with off-side stacked."
+        })
+
+    # Simple matchup stubs (data-light but useful narrative)
+    matchups = {
+        "favourable": [],
+        "unfavourable": []
+    }
+    if mid_do_pick:
+        matchups["favourable"].append({
+            "text": f"Our mid-over {mid_do_pick['style_norm']} vs their batters.",
+            "evidence": _fmt_evidence_short(mid_do_pick)
+        })
+    if opp_tough_pp:
+        matchups["unfavourable"].append({
+            "text": f"Our top-order vs their PP {opp_tough_pp['style_norm']} (tough operator).",
+            "evidence": _fmt_evidence_short(opp_tough_pp)
+        })
+
+    # ---------------------------
+    # Return the rich object + legacy keys (compat)
+    # ---------------------------
+    result = {
+        "context": context or None,
+        "global": {
+            "do":   [mid_do_item],
+            "dont": [death_dont_item]
+        },
+        "phases": {
+            "pp":     { "do": pp_do,       "dont": pp_dont },
+            "middle": { "do": middle_do,   "dont": middle_dont },
+            "death":  { "do": death_do,    "dont": death_dont }
+        },
+        "batting": { "do": batting_do, "dont": batting_dont },
+        "bowling": { "do": bowling_do, "dont": bowling_dont },
+        "matchups": matchups,
+        # legacy fields:
+        "do":   mid_do_item,
+        "dont": death_dont_item
+    }
 
     conn.close()
-    return {"do": do_obj, "dont": dont_obj}
+    return result
 
 
 def get_country_stats(country, tournaments, selected_stats, selected_phases, bowler_type, bowling_arm, team_category, selected_matches=None):

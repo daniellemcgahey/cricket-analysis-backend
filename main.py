@@ -6337,7 +6337,13 @@ def _line_case_sql(px_col: str = "be.pitch_x") -> str:
         END
     """
 
-def _confidence_from_sample(n: int) -> str:
+def _confidence_from_sample(n) -> str:
+    """Return a qualitative confidence label from a sample size."""
+    try:
+        n = int(n or 0)
+    except Exception:
+        n = 0
+
     if n >= 240:
         return "High"
     if n >= 120:
@@ -6347,7 +6353,6 @@ def _confidence_from_sample(n: int) -> str:
     if n >= 30:
         return "Low"
     return "Very Low"
-
 
 
 def _venue_filters(payload: dict) -> tuple[str, list]:

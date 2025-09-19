@@ -3330,8 +3330,12 @@ class BallByBallInterface:
         ball_data.setdefault('extras', {})
         ball_data['extras'].update(extras)
 
-        # ✅ Only force-select fielder in FULL mode
-        if not lite and not ball_data.get('fielder'):
+        # before using dismissal_type anywhere
+        dlt = (ball_data.get('dismissal_type') or ball_data.get('dismissal') or '')
+        dlt = dlt.strip().lower()
+
+        if (not ball_data.get('fielder')
+                and (not lite or dlt in ('caught', 'stumped'))):
             ball_data['fielder'] = self.get_fielder_id()
 
         # Valid delivery?

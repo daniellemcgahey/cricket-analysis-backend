@@ -1787,11 +1787,8 @@ def _table_has_column(cur, table: str, col: str) -> bool:
     return any((r["name"] == col) for r in cur.fetchall())
 
 @app.get("/probable-xi")
-def probable_xi(
-    country_name: str,
-    team_category: str,
-    last_games: int = 4
-):
+def probable_xi(country_name: str, team_category: str, last_games: int = 4):
+    print("[/probable-xi] country:", country_name, "category:", team_category, "last_games:", last_games)
     # ---- validate inputs
     if team_category not in ALLOWED_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"Invalid team_category. Must be one of {sorted(ALLOWED_CATEGORIES)}")

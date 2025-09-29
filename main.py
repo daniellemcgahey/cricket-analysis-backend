@@ -1797,12 +1797,21 @@ def probable_xi(country_name: str, team_category: str, last_games: int = 4):
     conn = _db()
     cur = conn.cursor()
 
-    # ---- 1) Squad (by country + category)
+ # ---------- NEW: resolve country_id from country_name ----------
+    # Adjust table/column names here if yours differ (common: "countries" table).
+    cur.execute("SELECT country_id FROM countries WHERE country_name = ?", (country_name,))
+    row = cur.fetchone()
+    if not row:
+        # If you store names differently, early exit with empty list
+        return {"player_ids": []}
+    country_id = row["country_id"]
+
+    # ---------- 1) Squad (by country_id + team_category) ----------
     cur.execute("""
         SELECT p.player_id AS id, p.player_name AS name
         FROM players p
-        WHERE p.country_name = ? AND p.team_category = ?
-    """, (country_name, team_category))
+        WHERE p.country_id = ? AND p.team_category = ?
+    """, (country_id, team_category))
     squad_rows = cur.fetchall()
     squad = [r["id"] for r in squad_rows]
     if not squad:

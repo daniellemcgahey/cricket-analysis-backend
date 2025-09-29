@@ -1794,7 +1794,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
     """
     last_games = max(1, min(10, int(last_games)))
 
-    conn = __db()
+    conn = _db()
     cur = conn.cursor()
     print(f"[/probable-xi] country: {country_name} (category ignored: {team_category}) last_games: {last_games}")
 

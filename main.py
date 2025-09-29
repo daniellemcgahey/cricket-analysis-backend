@@ -1188,9 +1188,8 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         cur.execute(f"""
             SELECT be.pitch_x AS px, be.pitch_y AS py
             FROM ball_events be
-            JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-              AND be.bowler_id = ? AND i.{phase_col} = 1
+            AND be.bowler_id = ? AND be.{phase_col} = 1
         """, (bowler_id,))
         cnt = Counter()
         for r in cur.fetchall():
@@ -1200,12 +1199,11 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     def fetch_batter_zone_perf_phase(batter_id, phase_col):
         cur.execute(f"""
             SELECT be.pitch_x AS px, be.pitch_y AS py,
-                   COALESCE(be.expected_runs, be.runs, 0) AS xr,
-                   COALESCE(be.expected_wicket, 0) AS xw
+                COALESCE(be.expected_runs, be.runs, 0) AS xr,
+                COALESCE(be.expected_wicket, 0) AS xw
             FROM ball_events be
-            JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-              AND be.batter_id = ? AND i.{phase_col} = 1
+            AND be.batter_id = ? AND be.{phase_col} = 1
         """, (batter_id,))
         acc = {}
         for r in cur.fetchall():
@@ -1231,9 +1229,8 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             cur.execute(f"""
                 SELECT be.pitch_x AS px, be.pitch_y AS py
                 FROM ball_events be
-                JOIN innings i ON be.innings_id = i.innings_id
                 WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-                  AND i.{ph} = 1
+                AND be.{ph} = 1
             """)
             for r in cur.fetchall():
                 priors[ph][zone_from_xy(r["px"], r["py"])] += 1
@@ -1299,7 +1296,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 counts[f"RUN_{runs_total}"] += 1
         return counts
 
-    GLOBAL_PHASE_COUNTS = {ph: fetch_counts_where(f"i.{ph}=1", ()) for ph in PHASE_COLS}
+    GLOBAL_PHASE_COUNTS = {ph: fetch_counts_where(f"be.{ph}=1", ()) for ph in PHASE_COLS}
 
     def blend_dirichlet(children, priors, weights):
         agg = Counter()
@@ -1314,15 +1311,14 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         return {k: smoothed[k] / total for k in OUTCOME_KEYS}
 
     def get_phase_counts_for_batter(batter_id, phase_col):
-        return fetch_counts_where("be.batter_id=? AND i." + phase_col + "=1", (batter_id,))
+        return fetch_counts_where("be.batter_id=? AND be."+phase_col+"=1", (batter_id,))
 
     def get_phase_counts_for_bowler(bowler_id, phase_col):
-        return fetch_counts_where("be.bowler_id=? AND i." + phase_col + "=1", (bowler_id,))
+        return fetch_counts_where("be.bowler_id=? AND be."+phase_col+"=1", (bowler_id,))
 
     def get_phase_counts_for_matchup(batter_id, bowler_id, phase_col):
-        return fetch_counts_where(
-            "be.batter_id=? AND be.bowler_id=? AND i." + phase_col + "=1", (batter_id, bowler_id)
-        )
+        return fetch_counts_where("be.batter_id=? AND be.bowler_id=? AND be."+phase_col+"=1", (batter_id, bowler_id))
+
 
     # ---- Bowler role weights ----
     def bowler_phase_role_weights(bowler_id):
@@ -1331,8 +1327,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             cur.execute(f"""
                 SELECT COUNT(*) AS balls
                 FROM ball_events be
-                JOIN innings i ON be.innings_id = i.innings_id
-                WHERE be.bowler_id=? AND i.{ph}=1
+                WHERE be.bowler_id=? AND be.{ph}=1
             """, (bowler_id,))
             balls = cur.fetchone()["balls"] or 0
             totals[ph] = balls

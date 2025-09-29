@@ -1025,6 +1025,30 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
+    # ───────────────────────── CONFIG (tweak freely) ─────────────────────────
+    LENGTH_BINS = [
+        ("Full Toss", (-0.0909,  0.03636)),  # py ∈ (-0.0909, 0.03636]
+        ("Yorker",    ( 0.03636, 0.16360)),  # (0.03636, 0.1636]
+        ("Full",      ( 0.16360, 0.31818)),  # (0.1636, 0.31818]
+        ("Good",      ( 0.31818, 0.545454)), # (0.31818, 0.545454]
+        ("Short",     ( 0.545454, 1.00000)), # (0.545454, 1.0]
+    ]
+
+    LINE_BINS = [
+        ("Leg",             (0.55,    float("inf"))),  # px > 0.55
+        ("Straight",        (0.44,    0.55)),          # 0.44 < px <= 0.55
+        ("Outside Off",     (0.26,    0.44)),          # 0.26 < px <= 0.44
+        ("Wide Outside Off",(-float("inf"), 0.26)),    # px <= 0.26
+    ]
+
+    # Impact magnitudes (kept conservative)
+    ZONE_RUN_IMPACT_MAX = 0.10   # ±10% tilt on boundary vs dot mix
+    ZONE_WKT_IMPACT_MAX = 0.12   # ±12% tilt on wicket chance
+    FIELD_WKT_ALPHA     = 0.20
+    FIELD_SAVE_ALPHA    = 0.18
+    FIELD_HANDS_ALPHA   = 0.08
+    MIN_ZONE_SAMPLES    = 25
+
     # -------------- Utilities --------------
     RNG = random.Random(payload.__dict__.get("seed", None))  # deterministic if you pass seed
 
@@ -1121,6 +1145,104 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
     team_a_strength = get_team_strength(payload.team_a_players)
     team_b_strength = get_team_strength(payload.team_b_players)
+
+    # ───────────────────────── ZONE HELPERS ─────────────────────────
+    def _in_left_open_right_closed(v, lo, hi):
+    # match your style: else/elif chain implies right-closed bins for px and py upper bounds
+        return (v > lo) and (v <= hi)
+
+    def _bucket(v, bins):
+        for name, (lo, hi) in bins:
+            # For px we mix strict/loose as in your rules; for py we use right-closed
+            if _in_left_open_right_closed(v, lo, hi):
+                return name
+        # If outside calibrated range, snap to closest
+        return bins[0][0] if v <= bins[0][1][0] else bins[-1][0]
+
+    def zone_from_xy(px, py):
+        length = _bucket(py, LENGTH_BINS)
+        # px rules: the first bin ("Leg") is strictly px > 0.55; others are chained ranges.
+        if px > 0.55:
+            line = "Leg"
+        elif (px > 0.44) and (px <= 0.55):
+            line = "Straight"
+        elif (px > 0.26) and (px <= 0.44):
+            line = "Outside Off"
+        else:
+            line = "Wide Outside Off"
+        return f"{length} | {line}"   # e.g., "Good | Outside Off"
+
+    def fetch_zone_counts_bowler_phase(bowler_id, phase_col):
+        cur.execute(f"""
+            SELECT be.pitch_x AS px, be.pitch_y AS py
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+            AND be.bowler_id = ? AND i.{phase_col}=1
+        """, (bowler_id,))
+        cnt = Counter()
+        for r in cur.fetchall():
+            cnt[zone_from_xy(r["px"], r["py"])] += 1
+        return cnt
+
+    def fetch_batter_zone_perf_phase(batter_id, phase_col):
+        cur.execute(f"""
+            SELECT be.pitch_x AS px, be.pitch_y AS py,
+                COALESCE(be.expected_runs, be.runs, 0) AS xr,
+                COALESCE(be.expected_wicket, 0) AS xw
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+            AND be.batter_id = ? AND i.{phase_col}=1
+        """, (batter_id,))
+        acc = {}
+        for r in cur.fetchall():
+            z = zone_from_xy(r["px"], r["py"])
+            d = acc.setdefault(z, {"xr_sum":0.0, "xw_sum":0.0, "n":0})
+            d["xr_sum"] += (r["xr"] or 0.0)
+            d["xw_sum"] += (r["xw"] or 0.0)
+            d["n"] += 1
+        for z, d in acc.items():
+            n = max(1, d["n"])
+            d["xr"] = d["xr_sum"]/n
+            d["xw"] = d["xw_sum"]/n
+        return acc
+
+    # Global zone priors (phase-level) for sparsity fallback
+    GLOBAL_ZONE_PRIOR = {ph: Counter() for ph in PHASE_COLS}
+    for ph in PHASE_COLS:
+        cur.execute(f"""
+            SELECT be.pitch_x AS px, be.pitch_y AS py
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+            AND i.{ph}=1
+        """)
+        for r in cur.fetchall():
+            GLOBAL_ZONE_PRIOR[ph][zone_from_xy(r["px"], r["py"])] += 1
+
+    def normalize_counter(cnt):
+        tot = sum(cnt.values()) or 1
+        return {k: (v/tot) for k,v in cnt.items()}
+
+    _BOWLER_ZONE_CACHE = {}
+    _BATTER_ZONE_CACHE = {}
+    def get_bowler_zone_dist(bowler_id, phase_col):
+        key = (bowler_id, phase_col)
+        if key in _BOWLER_ZONE_CACHE: return _BOWLER_ZONE_CACHE[key]
+        c = fetch_zone_counts_bowler_phase(bowler_id, phase_col)
+        if sum(c.values()) < MIN_ZONE_SAMPLES:
+            c = c + GLOBAL_ZONE_PRIOR[phase_col]
+        dist = normalize_counter(c)
+        _BOWLER_ZONE_CACHE[key] = dist
+        return dist
+
+    def get_batter_zone_perf(batter_id, phase_col):
+        key = (batter_id, phase_col)
+        if key in _BATTER_ZONE_CACHE: return _BATTER_ZONE_CACHE[key]
+        perf = fetch_batter_zone_perf_phase(batter_id, phase_col)
+        _BATTER_ZONE_CACHE[key] = perf
+        return perf
 
     # -------------- Probability engines --------------
     # We model a single "delivery outcome" with keys:
@@ -1337,46 +1459,133 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         run_mu = max(0.85, min(1.15, run_mu))
         w_mu = max(0.85, min(1.20, w_mu))
         return run_mu, w_mu
+    
+    # ───────────────────────── FIELDING PROFILE ─────────────────────────
+    # Event IDs from your memory:
+    #  2 Catch, 3 Run Out, 14 Stumping, 4 Taken Half Chance, 5 Direct Hit,
+    #  6 Drop Catch, 7 Missed Catch, 8 Missed Run Out, 15 Missed Stumping,
+    #  9 Missed Half Chance, 10 Fumble, 11 Missed Fielding, 13 Boundary Save, 1 Clean Stop
+    FIELD_GOOD = (2,3,4,5,14)
+    FIELD_MISS = (6,7,8,9,15)
+    FIELD_MISC = (10,11)
+    FIELD_SAVE = (13,)
+    FIELD_CLEAN = (1,)
+
+    def team_fielding_profile(player_ids):
+        placeholders = ",".join(["?"]*len(player_ids))
+        # All fielding events attributed to these players (as fielders)
+        cur.execute(f"""
+            SELECT fe.event_id
+            FROM fielding_contributions fc
+            JOIN ball_fielding_events fe ON fe.ball_id = fc.ball_id
+            WHERE fc.fielder_id IN ({placeholders})
+        """, player_ids)
+        good = miss = save = clean = misc = 0
+        rows = cur.fetchall()
+        for r in rows:
+            e = r["event_id"]
+            if e in FIELD_GOOD: good += 1
+            elif e in FIELD_MISS: miss += 1
+            elif e in FIELD_SAVE: save += 1
+            elif e in FIELD_CLEAN: clean += 1
+            elif e in FIELD_MISC: misc += 1
+
+        total_ops = good + miss + max(1, 0)  # avoid zero
+        conversion = good / max(1, (good + miss)) if (good+miss)>0 else 0.5
+        clean_hands = clean / max(1, (clean + misc + miss))
+        boundary_save = save / max(1, (save + miss + misc))
+
+        # Global baselines
+        cur.execute("""
+            SELECT 
+                SUM(CASE WHEN event_id IN (2,3,4,5,14) THEN 1 ELSE 0 END) AS g_good,
+                SUM(CASE WHEN event_id IN (6,7,8,9,15) THEN 1 ELSE 0 END) AS g_miss,
+                SUM(CASE WHEN event_id IN (1) THEN 1 ELSE 0 END) AS g_clean,
+                SUM(CASE WHEN event_id IN (10,11) THEN 1 ELSE 0 END) AS g_misc,
+                SUM(CASE WHEN event_id IN (13) THEN 1 ELSE 0 END) AS g_save
+            FROM ball_fielding_events
+        """)
+        g = cur.fetchone()
+        g_conv = ( (g["g_good"] or 0) / max(1, (g["g_good"] or 0) + (g["g_miss"] or 0)) ) if ((g["g_good"] or 0)+(g["g_miss"] or 0))>0 else 0.5
+        g_clean = (g["g_clean"] or 0) / max(1, (g["g_clean"] or 0) + (g["g_misc"] or 0) + (g["g_miss"] or 0))
+        g_save  = (g["g_save"]  or 0) / max(1, (g["g_save"]  or 0) + (g["g_miss"] or 0) + (g["g_misc"] or 0))
+
+        # Relative deltas (centered around 0)
+        conv_delta  = (conversion - g_conv)
+        clean_delta = (clean_hands - g_clean)
+        save_delta  = (boundary_save - g_save)
+
+        return {
+            "conversion_mu": 1.0 + FIELD_WKT_ALPHA * conv_delta,     # ~[0.8..1.2]
+            "clean_mu":      1.0 + FIELD_HANDS_ALPHA * clean_delta,  # ~[0.92..1.08]
+            "save_mu":       max(0.0, min(1.0, 0.10 + FIELD_SAVE_ALPHA * max(0.0, save_delta)))
+            # save_mu is *fraction of boundary prob* to redirect (0..~0.28 typical)
+        }
 
     # -------------- Momentum / spell effects --------------
-    def apply_context_tweaks(probs, dot_streak, spell_over_idx, phase_col, free_hit):
-        # Start from a copy
+    def apply_context_tweaks(probs, dot_streak, spell_over_idx, phase_col, free_hit,
+                         zone_mul=None, fielding_fx=None):
         p = dict(probs)
 
-        # Spell settling: slight economy improvement in a bowler's 2nd over of spell, tail off later
+        # (A) existing spell/dot/death tweaks (unchanged from previous answer) ...
         if spell_over_idx == 2:
-            # 2nd over of spell: fewer big runs & fewer wides
-            for k in ["RUN_4", "RUN_6", "WIDE", "NO_BALL"]:
-                p[k] *= 0.92
-            # slightly more dots and 1s
-            for k in ["RUN_0", "RUN_1"]:
-                p[k] *= 1.05
+            for k in ["RUN_4","RUN_6","WIDE","NO_BALL"]: p[k] *= 0.92
+            for k in ["RUN_0","RUN_1"]: p[k] *= 1.05
         elif spell_over_idx >= 3:
-            # later spell: a touch more boundary chance as batters read bowler
-            for k in ["RUN_4", "RUN_6"]:
-                p[k] *= 1.05
-
-        # Dot-ball pressure: after 2+ dots, tilt towards “boundary OR wicket”
+            for k in ["RUN_4","RUN_6"]: p[k] *= 1.05
         if dot_streak >= 2:
-            for k in ["RUN_4", "RUN_6", "WICKET"]:
-                p[k] *= 1.06
-            for k in ["RUN_1", "RUN_2"]:
-                p[k] *= 0.96
-
-        # Death overs: subtly shift to boundaries, fewer dots
+            for k in ["RUN_4","RUN_6","WICKET"]: p[k] *= 1.06
+            for k in ["RUN_1","RUN_2"]: p[k] *= 0.96
         if phase_col == "is_death_overs":
-            for k in ["RUN_4", "RUN_6"]:
-                p[k] *= 1.06
+            for k in ["RUN_4","RUN_6"]: p[k] *= 1.06
             p["RUN_0"] *= 0.95
-
-        # Free hit: suppress wicket outcomes
         if free_hit:
             p["WICKET"] *= 0.05
 
+        # (B) zone matchup multiplier (tilt boundaries vs dot/wicket)
+        if zone_mul:
+            # zone_mul like {"run_boost": ±x, "wkt_boost": ±y}
+            rb = zone_mul.get("run_boost", 0.0)  # e.g., +0.07
+            wb = zone_mul.get("wkt_boost", 0.0)  # e.g., +0.05
+            if rb != 0.0:
+                if rb > 0:
+                    p["RUN_4"] *= (1.0 + rb); p["RUN_6"] *= (1.0 + rb)
+                    p["RUN_0"] *= (1.0 - rb/2.0)
+                else:
+                    p["RUN_4"] *= (1.0 + rb); p["RUN_6"] *= (1.0 + rb)
+                    p["RUN_0"] *= (1.0 - rb/3.0)  # rb negative => reduces dots less aggressively
+            if wb != 0.0:
+                p["WICKET"] *= (1.0 + wb)
+
+        # (C) fielding effects
+        if fielding_fx:
+            conv_mu  = max(0.80, min(1.20, fielding_fx.get("conversion_mu", 1.0)))
+            clean_mu = max(0.90, min(1.10, fielding_fx.get("clean_mu", 1.0)))
+            save_mu  = max(0.0,  min(0.30, fielding_fx.get("save_mu", 0.0)))
+
+            # wickets convert better/worse:
+            p["WICKET"] *= conv_mu
+
+            # boundary saves: redirect a fraction of 4/6 mass to 2/3 (keeping total prob)
+            for bkey, midkey in [("RUN_4","RUN_2"), ("RUN_6","RUN_3")]:
+                take = p[bkey] * save_mu
+                p[bkey] -= take
+                p[midkey] += take
+
+            # clean hands: small dot/1s tilt (cleaner hands => a few more dots, fewer cheap singles)
+            # and if not clean, allow a few 1s from dots
+            if clean_mu >= 1.0:
+                shift = (clean_mu - 1.0) * 0.10  # max 1% abs
+                take = min(p["RUN_1"] * shift, p["RUN_1"])
+                p["RUN_1"] -= take; p["RUN_0"] += take
+            else:
+                shift = (1.0 - clean_mu) * 0.10
+                take = min(p["RUN_0"] * shift, p["RUN_0"])
+                p["RUN_0"] -= take; p["RUN_1"] += take
+
         # Renormalize
         s = sum(p.values()) or 1.0
-        for k in p.keys():
-            p[k] /= s
+        for k in p.keys(): p[k] /= s
         return p
 
     # -------------- Innings simulation --------------
@@ -1384,118 +1593,112 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         choose_bowler = make_bowler_selector(bowling_group, max_ov)
         run_mu, w_mu = strength_scalers(bat_strength, bowl_strength)
 
-        score = 0
-        wkts = 0
+        # NEW: fielding profile for this bowling team (XI on field)
+        fielding_fx = team_fielding_profile(bowling_group)
+
+        score = wkts = legal_balls = 0
         over_data = []
-        legal_balls = 0
         free_hit_next = False
-
-        bat_idx_strike = 0
-        bat_idx_non = 1
+        bat_idx_strike, bat_idx_non = 0, 1
         dismissed = set()
-
-        # track dot streak for momentum
         dot_streak = 0
-
-        # track bowler’s ongoing spell length
         current_bowler = None
         bowler_spell_len = defaultdict(int)
 
-        # fallback diagnostics
-        fallback_counter = outcome_model.fallback_tally  # same object, accumulates across balls
-
         for over in range(max_ov):
-            if wkts >= 10 or bat_idx_strike >= len(batting_order):
-                break
-
+            if wkts >= 10 or bat_idx_strike >= len(batting_order): break
             phase_col = compute_phase_col(over, max_ov)
             bowler = choose_bowler(phase_col)
-            if bowler is None:
-                break
-            bowler_name = get_player_name(bowler)
+            if bowler is None: break
 
+            bowler_name = get_player_name(bowler)
             if current_bowler != bowler:
                 current_bowler = bowler
                 bowler_spell_len[bowler] = 1
             else:
                 bowler_spell_len[bowler] += 1
 
-            runs_this_over = 0
-            wkts_this_over = 0
-            balls_this_over = 0
+            # PREP: sample zones from this bowler’s phase dist
+            bowler_zone_dist = get_bowler_zone_dist(bowler, phase_col)
+            zone_keys, zone_wts = zip(*bowler_zone_dist.items())
+
+            runs_this_over = wkts_this_over = balls_this_over = 0
 
             while balls_this_over < 6:
-                if wkts >= 10 or bat_idx_strike >= len(batting_order):
-                    break
-
+                if wkts >= 10 or bat_idx_strike >= len(batting_order): break
                 striker = batting_order[bat_idx_strike]
+
+                # Base outcome probs
                 probs_base = outcome_model.get_probs(striker, bowler, phase_col)
+
+                # Sample a zone for THIS ball from bowler’s phase distribution
+                z = RNG.choices(zone_keys, weights=zone_wts, k=1)[0]
+                bperf = get_batter_zone_perf(striker, phase_col).get(z, None)
+
+                # Compute zone multipliers
+                zone_mul = None
+                if bperf:
+                    # compare to team/global baselines
+                    xr_global = bat_strength["global_xrpb"]
+                    xw_global = bat_strength["global_xw"] or 0.02
+                    xr_rel = (bperf["xr"] - xr_global) / (xr_global or 1.0)
+                    xw_rel = (bperf["xw"] - xw_global) / (xw_global or 0.02)
+                    zone_mul = {
+                        "run_boost": max(-ZONE_RUN_IMPACT_MAX, min(ZONE_RUN_IMPACT_MAX, xr_rel * ZONE_RUN_IMPACT_MAX*1.2)),
+                        "wkt_boost": max(-ZONE_WKT_IMPACT_MAX, min(ZONE_WKT_IMPACT_MAX, xw_rel * ZONE_WKT_IMPACT_MAX*1.2)),
+                    }
+
+                # Apply all tweaks (spell, dots, death, free hit, zone, fielding)
                 probs = apply_context_tweaks(
-                    probs_base, 
+                    probs_base,
                     dot_streak=dot_streak,
                     spell_over_idx=bowler_spell_len[bowler],
                     phase_col=phase_col,
-                    free_hit=free_hit_next
+                    free_hit=free_hit_next,
+                    zone_mul=zone_mul,
+                    fielding_fx=fielding_fx
                 )
 
                 outcome = outcome_model.sample_outcome(probs)
 
                 if outcome == "WIDE":
-                    score += 1
-                    runs_this_over += 1
-                    # no legal ball consumed; keep free_hit state
+                    score += 1; runs_this_over += 1
                     continue
                 if outcome == "NO_BALL":
-                    score += 1
-                    runs_this_over += 1
+                    score += 1; runs_this_over += 1
                     free_hit_next = True
-                    # no legal ball consumed
                     continue
 
-                # LEGAL DELIVERY
+                # LEGAL
                 free_hit_next = False
                 balls_this_over += 1
                 legal_balls += 1
 
                 if outcome == "WICKET":
-                    # Scale wicket chance via w_mu: since we already sampled WICKET, just allow some "escape"
-                    # (akin to misc chances not converting). Keep it mild.
-                    if RNG.random() < (0.92 * w_mu):   # mostly convert
+                    # convert with team wicket multiplier too
+                    if RNG.random() < (0.92 * w_mu):  # keep your mild “escape” logic
                         wkts += 1
                         wkts_this_over += 1
                         dismissed.add(striker)
-                        # Next in
                         next_idx = max(bat_idx_strike, bat_idx_non) + 1
                         while next_idx < len(batting_order) and batting_order[next_idx] in dismissed:
                             next_idx += 1
                         bat_idx_strike = next_idx
                         dot_streak = 0
                     else:
-                        # escape becomes a dot
                         dot_streak += 1
                 else:
-                    # RUN_n
                     r = int(outcome.split("_")[1])
-                    # Strength scaling toward high/low runs
+                    # keep strength scaling on runs:
                     if r >= 4:
                         scaled = int(round(r * run_mu))
                     else:
-                        # low runs slightly dampened as teams get strong
                         low_adj = 0.02 if run_mu > 1.0 else -0.02
                         scaled = max(0, min(6, r + (1 if (RNG.random() < low_adj) else 0)))
-
-                    score += scaled
-                    runs_this_over += scaled
-
-                    # Strike rotation
+                    score += scaled; runs_this_over += scaled
                     if scaled % 2 == 1:
                         bat_idx_strike, bat_idx_non = bat_idx_non, bat_idx_strike
-
-                    # dot streak
-                    if scaled == 0:
-                        dot_streak += 1
-                    else:
-                        dot_streak = 0
+                    dot_streak = 0 if scaled > 0 else (dot_streak + 1)
 
             over_data.append({
                 "over": over + 1,
@@ -1506,10 +1709,9 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 "total_wickets": wkts
             })
 
-            # Swap at over end
             bat_idx_strike, bat_idx_non = bat_idx_non, bat_idx_strike
 
-        return score, wkts, over_data, dict(fallback_counter)
+        return score, wkts, over_data, dict(outcome_model.fallback_tally)
 
     # -------------- Run simulations --------------
     total = max(1, int(payload.simulations))

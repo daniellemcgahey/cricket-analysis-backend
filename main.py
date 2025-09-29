@@ -1786,6 +1786,11 @@ def _table_has_column(cur, table: str, col: str) -> bool:
     cur.execute(f"PRAGMA table_info({table})")
     return any((r["name"] == col) for r in cur.fetchall())
 
+def _in_placeholders(seq):
+    # returns "?, ?, ?" (at least one "?"); if empty, returns "NULL" (always false)
+    n = len(seq)
+    return ",".join(["?"] * n) if n > 0 else "NULL"
+
 @app.get("/probable-xi")
 def probable_xi(country_name: str, team_category: str = None, last_games: int = 4):
     """
@@ -1816,7 +1821,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
     if not squad:
         return {"player_ids": []}
     squad_set = set(squad)
-    ph_squad = ",".join(["?"] * len(squad))
+    ph_squad = _in_placeholders(squad)
 
     # Optional: role column for WK detection
     has_role = _table_has_column(cur, "players", "role")
@@ -1825,7 +1830,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
         cur.execute(f"SELECT player_id, role FROM players WHERE player_id IN ({ph_squad})", squad)
         role_map = {r["player_id"]: (r["role"] or "") for r in cur.fetchall()}
 
-    # 3) Recent matches (NEW: order by last ball rowid, no start_time needed)
+    # 3) Recent matches (order by last ball rowid; no start_time needed)
     cur.execute(f"""
         SELECT i.match_id, MAX(be.rowid) AS last_ball_rowid
         FROM innings i
@@ -1850,12 +1855,12 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
         return {"player_ids": [r["pid"] for r in cur.fetchall()]}
 
     match_ids = [r["match_id"] for r in recent_matches]
-    ph_matches = ",".join(["?"] * len(match_ids))
+    ph_matches = _in_placeholders(match_ids)
 
     # Recency weights from returned order (newest first)
     recency_weights = {rm["match_id"]: max(0.5, 1.0 - 0.1 * idx) for idx, rm in enumerate(recent_matches)}
 
-    # 4) Pull recent balls; compute form
+    # 4) Pull recent balls; compute form  ❗ FIXED PARAM ORDER (matches two IN lists)
     cur.execute(f"""
         SELECT i.match_id,
                be.batter_id, be.bowler_id,
@@ -1864,7 +1869,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
         JOIN innings i ON i.innings_id = be.innings_id
         WHERE i.match_id IN ({ph_matches})
           AND (be.batter_id IN ({ph_squad}) OR be.bowler_id IN ({ph_squad}))
-    """, (*match_ids, *squad))
+    """, (*match_ids, *squad, *squad))   # <-- was missing the 2nd *squad
     rows = cur.fetchall()
 
     form: Dict[int, float] = {}
@@ -1899,7 +1904,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
     bowled_map = {r["pid"]: int(r["balls_bowled"]) for r in cur.fetchall()}
 
     def is_bowler(pid: int) -> bool:
-        return bowled_map.get(pid, 0) >= 30  # tweak if needed
+        return bowled_map.get(pid, 0) >= 30
 
     def is_keeper(pid: int) -> bool:
         if not has_role: return False

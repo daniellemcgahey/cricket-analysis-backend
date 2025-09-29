@@ -1810,8 +1810,8 @@ def probable_xi(country_name: str, team_category: str, last_games: int = 4):
     cur.execute("""
         SELECT p.player_id AS id, p.player_name AS name
         FROM players p
-        WHERE p.country_id = ? AND p.team_category = ?
-    """, (country_id, team_category))
+        WHERE p.country_id = ?
+    """, (country_id))
     squad_rows = cur.fetchall()
     squad = [r["id"] for r in squad_rows]
     if not squad:

@@ -1010,8 +1010,10 @@ def simulate_match(payload: SimulateMatchPayload):
 def simulate_match_v2(payload: SimulateMatchPayload):
     """
     Selection-grade match simulator:
-    - Keeps existing response shape for backward compat.
-    - Adds deep phase/matchup modeling, realistic extras, bowler roles, momentum, and detailed fallbacks logging.
+    - Backward-compatible response shape.
+    - Phase/matchup modeling + zone-aware (your 5x4 grid) + fielding conversion.
+    - Realistic extras & free hits, bowler roles, momentum/spell effects.
+    - Robust to sparse data (safe fallbacks), deterministic with optional seed.
     """
     import os
     import math
@@ -1019,13 +1021,17 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     import sqlite3
     from collections import defaultdict, Counter
 
-    # -------------- DB --------------
+    # ---------------- DB ----------------
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # ───────────────────────── CONFIG (tweak freely) ─────────────────────────
+    # ---------------- PHASE CONSTANTS (define early; used by multiple blocks) ----------------
+    PHASE_COLS = ["is_powerplay", "is_middle_overs", "is_death_overs"]
+
+    # ---------------- CONFIG (tweak freely) ----------------
+    # Danielle's calibrated bins (right-closed intervals to match your snippet)
     LENGTH_BINS = [
         ("Full Toss", (-0.0909,  0.03636)),  # py ∈ (-0.0909, 0.03636]
         ("Yorker",    ( 0.03636, 0.16360)),  # (0.03636, 0.1636]
@@ -1033,15 +1039,15 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         ("Good",      ( 0.31818, 0.545454)), # (0.31818, 0.545454]
         ("Short",     ( 0.545454, 1.00000)), # (0.545454, 1.0]
     ]
-
-    LINE_BINS = [
-        ("Leg",             (0.55,    float("inf"))),  # px > 0.55
-        ("Straight",        (0.44,    0.55)),          # 0.44 < px <= 0.55
-        ("Outside Off",     (0.26,    0.44)),          # 0.26 < px <= 0.44
-        ("Wide Outside Off",(-float("inf"), 0.26)),    # px <= 0.26
+    # px line rules exactly as you supplied
+    LINE_RULES = [
+        ("Leg",             lambda px: px > 0.55),
+        ("Straight",        lambda px: (px > 0.44) and (px <= 0.55)),
+        ("Outside Off",     lambda px: (px > 0.26) and (px <= 0.44)),
+        ("Wide Outside Off",lambda px: px <= 0.26),
     ]
 
-    # Impact magnitudes (kept conservative)
+    # Impacts (kept conservative)
     ZONE_RUN_IMPACT_MAX = 0.10   # ±10% tilt on boundary vs dot mix
     ZONE_WKT_IMPACT_MAX = 0.12   # ±12% tilt on wicket chance
     FIELD_WKT_ALPHA     = 0.20
@@ -1049,30 +1055,36 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     FIELD_HANDS_ALPHA   = 0.08
     MIN_ZONE_SAMPLES    = 25
 
-    # -------------- Utilities --------------
-    RNG = random.Random(payload.__dict__.get("seed", None))  # deterministic if you pass seed
+    # ---------------- Utilities ----------------
+    RNG = random.Random(getattr(payload, "seed", None))
 
-    def q1(x): 
-        i = int(0.25*(len(x)-1)); return sorted(x)[i] if x else 0.0
-    def q3(x): 
-        i = int(0.75*(len(x)-1)); return sorted(x)[i] if x else 0.0
+    def q1(x):
+        if not x: return 0.0
+        s = sorted(x)
+        i = int(0.25 * (len(s) - 1))
+        return float(s[i])
+
+    def q3(x):
+        if not x: return 0.0
+        s = sorted(x)
+        i = int(0.75 * (len(s) - 1))
+        return float(s[i])
+
     def pct(x, p):
         if not x: return 0.0
         s = sorted(x)
-        k = (len(s)-1)*p
-        f = math.floor(k); c = math.ceil(k)
-        if f==c: return float(s[int(k)])
-        return float(s[f] + (s[c]-s[f])*(k-f))
+        k = (len(s) - 1) * p
+        f, c = math.floor(k), math.ceil(k)
+        if f == c:
+            return float(s[int(k)])
+        return float(s[f] + (s[c] - s[f]) * (k - f))
 
     # ---- Phase math (auto for any max_overs) ----
     def compute_phase_col(over_idx, max_overs):
-        # Split like 20ov: 6 PP (30%), 10 middle (50%), 4 death (20%)
         pp = max(1, round(max_overs * 0.30))
         death = max(1, round(max_overs * 0.20))
         if pp + death > max_overs - 1:
-            # keep at least 1 middle
             excess = (pp + death) - (max_overs - 1)
-            # trim from larger component first
             if pp >= death and pp > 1:
                 trim = min(excess, pp - 1); pp -= trim; excess -= trim
             if excess > 0 and death > 1:
@@ -1085,12 +1097,9 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         else:
             return "is_death_overs"
 
-    # ---- Max overs per bowler for reduced matches ----
     def max_overs_per_bowler(max_overs):
-        # ICC T20 law: one-fifth of total overs; if not divisible by 5 -> ceil
         return math.ceil(max_overs / 5)
 
-    # ---- Name helper ----
     def get_player_name(pid):
         cur.execute("SELECT player_name FROM players WHERE player_id=?", (pid,))
         r = cur.fetchone()
@@ -1098,10 +1107,22 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
     # ---- Team strength (expected runs/wickets + BPI) ----
     def get_team_strength(team_player_ids):
-        # Uses the team’s players’ batting/bowling history as a proxy of the team strength.
-        # (You can replace with true team_id if you have it easily)
+        if not team_player_ids:
+            # Safe defaults
+            cur.execute("SELECT AVG(runs) FROM ball_events WHERE runs IS NOT NULL")
+            global_rpb = cur.fetchone()[0] or 1.0
+            cur.execute("SELECT AVG(expected_runs) FROM ball_events WHERE expected_runs IS NOT NULL")
+            global_xrpb = cur.fetchone()[0] or global_rpb
+            cur.execute("SELECT AVG(COALESCE(expected_wicket,0)) FROM ball_events")
+            global_xw = cur.fetchone()[0] or 0.02
+            return {
+                "global_rpb": global_rpb, "global_xrpb": global_xrpb, "global_xw": global_xw,
+                "bat_rpb": global_rpb, "bat_xrpb": global_xrpb, "bat_bpi": 0.0,
+                "bowl_rpb_conc": global_rpb, "bowl_xrpb_conc": global_xrpb, "bowl_xw": global_xw, "bowl_bpi": 0.0
+            }
+
         placeholders = ",".join(["?"] * len(team_player_ids))
-        # Batting side performance (runs and xRuns as batter)
+
         cur.execute(f"""
             SELECT AVG(be.runs) AS rpb_bat,
                    AVG(be.expected_runs) AS x_rpb_bat,
@@ -1111,7 +1132,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         """, team_player_ids)
         br = cur.fetchone()
 
-        # Bowling side conceded (runs and xRuns as bowler)
         cur.execute(f"""
             SELECT AVG(be.runs) AS rpb_conceded,
                    AVG(be.expected_runs) AS x_rpb_conceded,
@@ -1122,55 +1142,47 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         """, team_player_ids)
         cr_ = cur.fetchone()
 
-        # Global baselines
         cur.execute("SELECT AVG(runs) FROM ball_events WHERE runs IS NOT NULL")
         global_rpb = cur.fetchone()[0] or 1.0
         cur.execute("SELECT AVG(expected_runs) FROM ball_events WHERE expected_runs IS NOT NULL")
         global_xrpb = cur.fetchone()[0] or global_rpb
         cur.execute("SELECT AVG(COALESCE(expected_wicket,0)) FROM ball_events")
-        global_xw = cur.fetchone()[0] or 0.02  # ~1 wicket every 50 balls baseline
+        global_xw = cur.fetchone()[0] or 0.02
 
         return {
             "global_rpb": global_rpb,
             "global_xrpb": global_xrpb,
             "global_xw": global_xw,
-            "bat_rpb": br["rpb_bat"] or global_rpb,
-            "bat_xrpb": br["x_rpb_bat"] or global_xrpb,
-            "bat_bpi": br["batting_bpi"] or 0.0,
-            "bowl_rpb_conc": cr_["rpb_conceded"] or global_rpb,
-            "bowl_xrpb_conc": cr_["x_rpb_conceded"] or global_xrpb,
-            "bowl_xw": cr_["x_wkts_per_ball"] or global_xw,
-            "bowl_bpi": cr_["bowling_bpi"] or 0.0,
+            "bat_rpb": (br["rpb_bat"] if br and br["rpb_bat"] is not None else global_rpb),
+            "bat_xrpb": (br["x_rpb_bat"] if br and br["x_rpb_bat"] is not None else global_xrpb),
+            "bat_bpi": (br["batting_bpi"] if br and br["batting_bpi"] is not None else 0.0),
+            "bowl_rpb_conc": (cr_["rpb_conceded"] if cr_ and cr_["rpb_conceded"] is not None else global_rpb),
+            "bowl_xrpb_conc": (cr_["x_rpb_conceded"] if cr_ and cr_["x_rpb_conceded"] is not None else global_xrpb),
+            "bowl_xw": (cr_["x_wkts_per_ball"] if cr_ and cr_["x_wkts_per_ball"] is not None else global_xw),
+            "bowl_bpi": (cr_["bowling_bpi"] if cr_ and cr_["bowling_bpi"] is not None else 0.0),
         }
 
     team_a_strength = get_team_strength(payload.team_a_players)
     team_b_strength = get_team_strength(payload.team_b_players)
 
-    # ───────────────────────── ZONE HELPERS ─────────────────────────
+    # ---------------- ZONE HELPERS ----------------
     def _in_left_open_right_closed(v, lo, hi):
-    # match your style: else/elif chain implies right-closed bins for px and py upper bounds
+        # match your style: right-closed upper bounds
         return (v > lo) and (v <= hi)
 
-    def _bucket(v, bins):
-        for name, (lo, hi) in bins:
-            # For px we mix strict/loose as in your rules; for py we use right-closed
-            if _in_left_open_right_closed(v, lo, hi):
+    def _bucket_py(py):
+        for name, (lo, hi) in LENGTH_BINS:
+            if _in_left_open_right_closed(py, lo, hi):
                 return name
-        # If outside calibrated range, snap to closest
-        return bins[0][0] if v <= bins[0][1][0] else bins[-1][0]
+        return LENGTH_BINS[0][0] if py <= LENGTH_BINS[0][1][0] else LENGTH_BINS[-1][0]
+
+    def _bucket_px(px):
+        for name, rule in LINE_RULES:
+            if rule(px): return name
+        return "Straight"
 
     def zone_from_xy(px, py):
-        length = _bucket(py, LENGTH_BINS)
-        # px rules: the first bin ("Leg") is strictly px > 0.55; others are chained ranges.
-        if px > 0.55:
-            line = "Leg"
-        elif (px > 0.44) and (px <= 0.55):
-            line = "Straight"
-        elif (px > 0.26) and (px <= 0.44):
-            line = "Outside Off"
-        else:
-            line = "Wide Outside Off"
-        return f"{length} | {line}"   # e.g., "Good | Outside Off"
+        return f"{_bucket_py(py)} | {_bucket_px(px)}"  # e.g., "Good | Outside Off"
 
     def fetch_zone_counts_bowler_phase(bowler_id, phase_col):
         cur.execute(f"""
@@ -1178,7 +1190,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-            AND be.bowler_id = ? AND i.{phase_col}=1
+              AND be.bowler_id = ? AND i.{phase_col} = 1
         """, (bowler_id,))
         cnt = Counter()
         for r in cur.fetchall():
@@ -1188,75 +1200,83 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     def fetch_batter_zone_perf_phase(batter_id, phase_col):
         cur.execute(f"""
             SELECT be.pitch_x AS px, be.pitch_y AS py,
-                COALESCE(be.expected_runs, be.runs, 0) AS xr,
-                COALESCE(be.expected_wicket, 0) AS xw
+                   COALESCE(be.expected_runs, be.runs, 0) AS xr,
+                   COALESCE(be.expected_wicket, 0) AS xw
             FROM ball_events be
             JOIN innings i ON be.innings_id = i.innings_id
             WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-            AND be.batter_id = ? AND i.{phase_col}=1
+              AND be.batter_id = ? AND i.{phase_col} = 1
         """, (batter_id,))
         acc = {}
         for r in cur.fetchall():
             z = zone_from_xy(r["px"], r["py"])
-            d = acc.setdefault(z, {"xr_sum":0.0, "xw_sum":0.0, "n":0})
+            d = acc.setdefault(z, {"xr_sum": 0.0, "xw_sum": 0.0, "n": 0})
             d["xr_sum"] += (r["xr"] or 0.0)
             d["xw_sum"] += (r["xw"] or 0.0)
             d["n"] += 1
         for z, d in acc.items():
             n = max(1, d["n"])
-            d["xr"] = d["xr_sum"]/n
-            d["xw"] = d["xw_sum"]/n
+            d["xr"] = d["xr_sum"] / n
+            d["xw"] = d["xw_sum"] / n
         return acc
 
-    # Global zone priors (phase-level) for sparsity fallback
-    GLOBAL_ZONE_PRIOR = {ph: Counter() for ph in PHASE_COLS}
-    for ph in PHASE_COLS:
-        cur.execute(f"""
-            SELECT be.pitch_x AS px, be.pitch_y AS py
-            FROM ball_events be
-            JOIN innings i ON be.innings_id = i.innings_id
-            WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
-            AND i.{ph}=1
-        """)
-        for r in cur.fetchall():
-            GLOBAL_ZONE_PRIOR[ph][zone_from_xy(r["px"], r["py"])] += 1
+    # Lazy global zone priors to avoid ordering bugs / empty DBs
+    _GLOBAL_ZONE_PRIOR_CACHE = None
+    def _ensure_global_zone_prior():
+        nonlocal _GLOBAL_ZONE_PRIOR_CACHE
+        if _GLOBAL_ZONE_PRIOR_CACHE is not None:
+            return _GLOBAL_ZONE_PRIOR_CACHE
+        priors = {ph: Counter() for ph in PHASE_COLS}
+        for ph in PHASE_COLS:
+            cur.execute(f"""
+                SELECT be.pitch_x AS px, be.pitch_y AS py
+                FROM ball_events be
+                JOIN innings i ON be.innings_id = i.innings_id
+                WHERE be.pitch_x IS NOT NULL AND be.pitch_y IS NOT NULL
+                  AND i.{ph} = 1
+            """)
+            for r in cur.fetchall():
+                priors[ph][zone_from_xy(r["px"], r["py"])] += 1
+        _GLOBAL_ZONE_PRIOR_CACHE = priors
+        return priors
 
     def normalize_counter(cnt):
         tot = sum(cnt.values()) or 1
-        return {k: (v/tot) for k,v in cnt.items()}
+        return {k: (v / tot) for k, v in cnt.items()}
 
     _BOWLER_ZONE_CACHE = {}
     _BATTER_ZONE_CACHE = {}
+
     def get_bowler_zone_dist(bowler_id, phase_col):
         key = (bowler_id, phase_col)
-        if key in _BOWLER_ZONE_CACHE: return _BOWLER_ZONE_CACHE[key]
+        if key in _BOWLER_ZONE_CACHE:
+            return _BOWLER_ZONE_CACHE[key]
         c = fetch_zone_counts_bowler_phase(bowler_id, phase_col)
         if sum(c.values()) < MIN_ZONE_SAMPLES:
-            c = c + GLOBAL_ZONE_PRIOR[phase_col]
+            priors = _ensure_global_zone_prior()
+            c = c + priors.get(phase_col, Counter())
+        # final safety: ensure non-empty
+        if not c:
+            c = Counter({"Good | Straight": 1})
         dist = normalize_counter(c)
         _BOWLER_ZONE_CACHE[key] = dist
         return dist
 
     def get_batter_zone_perf(batter_id, phase_col):
         key = (batter_id, phase_col)
-        if key in _BATTER_ZONE_CACHE: return _BATTER_ZONE_CACHE[key]
+        if key in _BATTER_ZONE_CACHE:
+            return _BATTER_ZONE_CACHE[key]
         perf = fetch_batter_zone_perf_phase(batter_id, phase_col)
         _BATTER_ZONE_CACHE[key] = perf
         return perf
 
-    # -------------- Probability engines --------------
-    # We model a single "delivery outcome" with keys:
-    #  - 'WIDE' (illegal, +1 run; very rare 2+ are folded into 1 occurrence)
-    #  - 'NO_BALL' (illegal, +1 run; next ball = free hit)
-    #  - 'WICKET' (legal)
-    #  - 'RUN_0'...'RUN_6' (legal; includes byes/leg-byes folded into run buckets)
-    OUTCOME_KEYS = ["WIDE", "NO_BALL", "WICKET"] + [f"RUN_{r}" for r in range(0,7)]
+    # ---------------- Probability engines ----------------
+    OUTCOME_KEYS = ["WIDE", "NO_BALL", "WICKET"] + [f"RUN_{r}" for r in range(0, 7)]
 
     def empty_counts():
         return Counter({k: 0 for k in OUTCOME_KEYS})
 
     def fetch_counts_where(where_sql, params):
-        # Aggregate *deliveries* to outcome buckets
         counts = empty_counts()
         cur.execute(f"""
             SELECT runs, wides, no_balls, byes, leg_byes, dismissal_type
@@ -1265,15 +1285,12 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             WHERE {where_sql}
         """, params)
         for row in cur.fetchall():
-            # Illegal first
             if (row["wides"] or 0) > 0:
                 counts["WIDE"] += 1
                 continue
             if (row["no_balls"] or 0) > 0:
                 counts["NO_BALL"] += 1
                 continue
-
-            # Legal delivery
             if row["dismissal_type"]:
                 counts["WICKET"] += 1
             else:
@@ -1282,27 +1299,14 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 counts[f"RUN_{runs_total}"] += 1
         return counts
 
-    # Global×phase priors
-    PHASE_COLS = ["is_powerplay", "is_middle_overs", "is_death_overs"]
-    GLOBAL_PHASE_COUNTS = {}
-    for ph in PHASE_COLS:
-        GLOBAL_PHASE_COUNTS[ph] = fetch_counts_where(f"i.{ph}=1", ())
+    GLOBAL_PHASE_COUNTS = {ph: fetch_counts_where(f"i.{ph}=1", ()) for ph in PHASE_COLS}
 
     def blend_dirichlet(children, priors, weights):
-        """
-        Blend multiple count dicts using pseudo-counts (Dirichlet-like smoothing).
-        children: list of Counter
-        priors: list of Counter (same length) – usually more general data
-        weights: list of floats – how many 'virtual balls' we give each prior level
-        Returns probabilities dict over OUTCOME_KEYS.
-        """
         agg = Counter()
         for c in children:
             agg.update(c)
-        # If no data at all, start from zero
         smoothed = Counter(agg)
         for pr, w in zip(priors, weights):
-            # Add w * normalized prior
             total_pr = sum(pr.values()) or 1
             for k in OUTCOME_KEYS:
                 smoothed[k] += w * (pr[k] / total_pr)
@@ -1310,15 +1314,17 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         return {k: smoothed[k] / total for k in OUTCOME_KEYS}
 
     def get_phase_counts_for_batter(batter_id, phase_col):
-        return fetch_counts_where("be.batter_id=? AND i."+phase_col+"=1", (batter_id,))
+        return fetch_counts_where("be.batter_id=? AND i." + phase_col + "=1", (batter_id,))
 
     def get_phase_counts_for_bowler(bowler_id, phase_col):
-        return fetch_counts_where("be.bowler_id=? AND i."+phase_col+"=1", (bowler_id,))
+        return fetch_counts_where("be.bowler_id=? AND i." + phase_col + "=1", (bowler_id,))
 
     def get_phase_counts_for_matchup(batter_id, bowler_id, phase_col):
-        return fetch_counts_where("be.batter_id=? AND be.bowler_id=? AND i."+phase_col+"=1", (batter_id, bowler_id))
+        return fetch_counts_where(
+            "be.batter_id=? AND be.bowler_id=? AND i." + phase_col + "=1", (batter_id, bowler_id)
+        )
 
-    # Role weights per bowler by phase (learned from % of balls in that phase)
+    # ---- Bowler role weights ----
     def bowler_phase_role_weights(bowler_id):
         totals = {}
         for ph in PHASE_COLS:
@@ -1331,9 +1337,8 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             balls = cur.fetchone()["balls"] or 0
             totals[ph] = balls
         s = sum(totals.values()) or 1
-        return {ph: (totals[ph]/s) for ph in PHASE_COLS}
+        return {ph: (totals[ph] / s) for ph in PHASE_COLS}
 
-    # Overs per game weights for bowlers
     def bowler_usage_weight(bowler_id):
         cur.execute("""
             SELECT COUNT(DISTINCT i.match_id) AS games, COUNT(*) AS balls
@@ -1342,14 +1347,13 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             WHERE be.bowler_id=?
         """, (bowler_id,))
         r = cur.fetchone()
-        if not r or r["games"] == 0: 
+        if not r or (r["games"] or 0) == 0:
             return 1.0
-        return (r["balls"]/6.0) / r["games"]
+        return (r["balls"] / 6.0) / r["games"]
 
-    # -------------- Outcome sampler --------------
+    # ---------------- Outcome sampler ----------------
     class OutcomeModel:
         def __init__(self):
-            # Track how we resolved each ball for diagnostics
             self.fallback_tally = Counter({
                 "matchup_phase": 0,
                 "batter_phase": 0,
@@ -1366,8 +1370,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             n_bowl = sum(c_bowl.values())
             c_global = GLOBAL_PHASE_COUNTS[phase_col]
 
-            # adaptive smoothing: more own data -> less prior
-            # virtual prior balls (you can tweak)
             w_bat = 20.0 if n_match >= 12 else 40.0
             w_bowl = 20.0 if n_bat >= 12 else 40.0
             w_global = 50.0
@@ -1378,7 +1380,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 weights=[w_bat, w_bowl, w_global],
             )
 
-            # record how "deep" we had to go
             if n_match >= 1:
                 self.fallback_tally["matchup_phase"] += 1
             elif n_bat >= 1:
@@ -1391,7 +1392,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             return probs
 
         def sample_outcome(self, probs):
-            # Weighted choice on OUTCOME_KEYS
             r = RNG.random()
             cum = 0.0
             for k in OUTCOME_KEYS:
@@ -1403,32 +1403,23 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
     outcome_model = OutcomeModel()
 
-    # -------------- Bowler selection engine --------------
+    # ---------------- Bowler selection ----------------
     def make_bowler_selector(bowler_ids, max_ov):
         role_weights = {b: bowler_phase_role_weights(b) for b in bowler_ids}
         usage_weights = {b: max(bowler_usage_weight(b), 0.1) for b in bowler_ids}
         cap = max_overs_per_bowler(max_ov)
-
-        state = {
-            "overs_bowled": defaultdict(int),
-            "prev_bowler": None,
-            "cap": cap
-        }
+        state = {"overs_bowled": defaultdict(int), "prev_bowler": None, "cap": cap}
 
         def choose_bowler(phase_col):
-            # eligible: below cap and not the immediate previous bowler
             elig = [b for b in bowler_ids if state["overs_bowled"][b] < state["cap"] and b != state["prev_bowler"]]
             if not elig:
-                # if forced, allow previous bowler but still under cap
                 elig = [b for b in bowler_ids if state["overs_bowled"][b] < state["cap"]]
             if not elig:
                 return None
-
             weights = []
             for b in elig:
-                # phase role preference (0.5..1.5), usage (0.5..1.5), freshness bonus if they haven't bowled yet
-                phase_pref = 0.5 + role_weights[b].get(phase_col, 0.0)  # [0.5..1.5]
-                usage_pref = 0.5 + min(1.0, usage_weights[b] / 4.0)     # scale to ~[0.5..1.5]
+                phase_pref = 0.5 + role_weights[b].get(phase_col, 0.0)
+                usage_pref = 0.5 + min(1.0, usage_weights[b] / 4.0)
                 fresh = 1.15 if state["overs_bowled"][b] == 0 else 1.0
                 weights.append(max(0.05, phase_pref * usage_pref * fresh))
             choice = RNG.choices(elig, weights=weights, k=1)[0]
@@ -1438,42 +1429,34 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
         return choose_bowler
 
-    # -------------- Strength scaling --------------
+    # ---------------- Strength scaling ----------------
     def strength_scalers(batting_strength, bowling_strength):
-        """Return (runs_multiplier, wicket_multiplier) from team strengths."""
-        # Compare batting xRpb vs bowling xRpb conceded, and BPI deltas
         global_xr = batting_strength["global_xrpb"]
         xr_bat = batting_strength["bat_xrpb"]; xr_bowl_conc = bowling_strength["bowl_xrpb_conc"]
-        # small, smooth effect (±10–15%)
-        run_mu = 1.0 + 0.12 * ( (xr_bat - global_xr)/ (global_xr or 1) ) - 0.10 * ( (xr_bowl_conc - global_xr)/(global_xr or 1) )
+        run_mu = 1.0 + 0.12 * ((xr_bat - global_xr) / (global_xr or 1.0)) - 0.10 * ((xr_bowl_conc - global_xr) / (global_xr or 1.0))
         bpi_term = 0.04 * (batting_strength["bat_bpi"] - bowling_strength["bowl_bpi"])
         run_mu *= (1.0 + bpi_term)
 
         xw_global = batting_strength["global_xw"]
-        xw_bowl = bowling_strength["bowl_xw"];  # bowling team's avg expected wicket/ball
-        # higher xw -> higher wicket prob
+        xw_bowl = bowling_strength["bowl_xw"]
         w_mu = 1.0 + 0.20 * ((xw_bowl - xw_global) / (xw_global or 0.02))
-        w_mu *= (1.0 - 0.05 * (batting_strength["bat_bpi"]))  # strong batters resist wickets a little
+        w_mu *= (1.0 - 0.05 * (batting_strength["bat_bpi"]))
 
-        # clamp
         run_mu = max(0.85, min(1.15, run_mu))
         w_mu = max(0.85, min(1.20, w_mu))
         return run_mu, w_mu
-    
-    # ───────────────────────── FIELDING PROFILE ─────────────────────────
-    # Event IDs from your memory:
-    #  2 Catch, 3 Run Out, 14 Stumping, 4 Taken Half Chance, 5 Direct Hit,
-    #  6 Drop Catch, 7 Missed Catch, 8 Missed Run Out, 15 Missed Stumping,
-    #  9 Missed Half Chance, 10 Fumble, 11 Missed Fielding, 13 Boundary Save, 1 Clean Stop
-    FIELD_GOOD = (2,3,4,5,14)
-    FIELD_MISS = (6,7,8,9,15)
-    FIELD_MISC = (10,11)
+
+    # ---------------- Fielding profile ----------------
+    FIELD_GOOD = (2, 3, 4, 5, 14)
+    FIELD_MISS = (6, 7, 8, 9, 15)
+    FIELD_MISC = (10, 11)
     FIELD_SAVE = (13,)
     FIELD_CLEAN = (1,)
 
     def team_fielding_profile(player_ids):
-        placeholders = ",".join(["?"]*len(player_ids))
-        # All fielding events attributed to these players (as fielders)
+        if not player_ids:
+            return {"conversion_mu": 1.0, "clean_mu": 1.0, "save_mu": 0.10}
+        placeholders = ",".join(["?"] * len(player_ids))
         cur.execute(f"""
             SELECT fe.event_id
             FROM fielding_contributions fc
@@ -1481,8 +1464,7 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             WHERE fc.fielder_id IN ({placeholders})
         """, player_ids)
         good = miss = save = clean = misc = 0
-        rows = cur.fetchall()
-        for r in rows:
+        for r in cur.fetchall():
             e = r["event_id"]
             if e in FIELD_GOOD: good += 1
             elif e in FIELD_MISS: miss += 1
@@ -1490,12 +1472,10 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             elif e in FIELD_CLEAN: clean += 1
             elif e in FIELD_MISC: misc += 1
 
-        total_ops = good + miss + max(1, 0)  # avoid zero
-        conversion = good / max(1, (good + miss)) if (good+miss)>0 else 0.5
+        conversion = good / max(1, (good + miss)) if (good + miss) > 0 else 0.5
         clean_hands = clean / max(1, (clean + misc + miss))
         boundary_save = save / max(1, (save + miss + misc))
 
-        # Global baselines
         cur.execute("""
             SELECT 
                 SUM(CASE WHEN event_id IN (2,3,4,5,14) THEN 1 ELSE 0 END) AS g_good,
@@ -1505,98 +1485,93 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 SUM(CASE WHEN event_id IN (13) THEN 1 ELSE 0 END) AS g_save
             FROM ball_fielding_events
         """)
-        g = cur.fetchone()
-        g_conv = ( (g["g_good"] or 0) / max(1, (g["g_good"] or 0) + (g["g_miss"] or 0)) ) if ((g["g_good"] or 0)+(g["g_miss"] or 0))>0 else 0.5
-        g_clean = (g["g_clean"] or 0) / max(1, (g["g_clean"] or 0) + (g["g_misc"] or 0) + (g["g_miss"] or 0))
-        g_save  = (g["g_save"]  or 0) / max(1, (g["g_save"]  or 0) + (g["g_miss"] or 0) + (g["g_misc"] or 0))
+        g = cur.fetchone() or {}
+        g_good = g.get("g_good", 0) if isinstance(g, dict) else (g["g_good"] or 0)
+        g_miss = g.get("g_miss", 0) if isinstance(g, dict) else (g["g_miss"] or 0)
+        g_clean = g.get("g_clean", 0) if isinstance(g, dict) else (g["g_clean"] or 0)
+        g_misc = g.get("g_misc", 0) if isinstance(g, dict) else (g["g_misc"] or 0)
+        g_save = g.get("g_save", 0) if isinstance(g, dict) else (g["g_save"] or 0)
 
-        # Relative deltas (centered around 0)
-        conv_delta  = (conversion - g_conv)
-        clean_delta = (clean_hands - g_clean)
-        save_delta  = (boundary_save - g_save)
+        g_conv = (g_good / max(1, g_good + g_miss)) if (g_good + g_miss) > 0 else 0.5
+        g_clean_rate = g_clean / max(1, g_clean + g_misc + g_miss)
+        g_save_rate = g_save / max(1, g_save + g_miss + g_misc)
+
+        conv_delta = (conversion - g_conv)
+        clean_delta = (clean_hands - g_clean_rate)
+        save_delta = (boundary_save - g_save_rate)
 
         return {
-            "conversion_mu": 1.0 + FIELD_WKT_ALPHA * conv_delta,     # ~[0.8..1.2]
-            "clean_mu":      1.0 + FIELD_HANDS_ALPHA * clean_delta,  # ~[0.92..1.08]
-            "save_mu":       max(0.0, min(1.0, 0.10 + FIELD_SAVE_ALPHA * max(0.0, save_delta)))
-            # save_mu is *fraction of boundary prob* to redirect (0..~0.28 typical)
+            "conversion_mu": 1.0 + FIELD_WKT_ALPHA * conv_delta,          # ~[0.8..1.2]
+            "clean_mu":      1.0 + FIELD_HANDS_ALPHA * clean_delta,       # ~[0.92..1.08]
+            "save_mu":       max(0.0, min(0.30, 0.10 + FIELD_SAVE_ALPHA * max(0.0, save_delta))),
         }
 
-    # -------------- Momentum / spell effects --------------
+    # ---------------- Momentum / spell / context tweaks ----------------
     def apply_context_tweaks(probs, dot_streak, spell_over_idx, phase_col, free_hit,
-                         zone_mul=None, fielding_fx=None):
+                             zone_mul=None, fielding_fx=None):
         p = dict(probs)
 
-        # (A) existing spell/dot/death tweaks (unchanged from previous answer) ...
+        # Spell & momentum
         if spell_over_idx == 2:
-            for k in ["RUN_4","RUN_6","WIDE","NO_BALL"]: p[k] *= 0.92
-            for k in ["RUN_0","RUN_1"]: p[k] *= 1.05
+            for k in ["RUN_4", "RUN_6", "WIDE", "NO_BALL"]: p[k] *= 0.92
+            for k in ["RUN_0", "RUN_1"]: p[k] *= 1.05
         elif spell_over_idx >= 3:
-            for k in ["RUN_4","RUN_6"]: p[k] *= 1.05
+            for k in ["RUN_4", "RUN_6"]: p[k] *= 1.05
         if dot_streak >= 2:
-            for k in ["RUN_4","RUN_6","WICKET"]: p[k] *= 1.06
-            for k in ["RUN_1","RUN_2"]: p[k] *= 0.96
+            for k in ["RUN_4", "RUN_6", "WICKET"]: p[k] *= 1.06
+            for k in ["RUN_1", "RUN_2"]: p[k] *= 0.96
         if phase_col == "is_death_overs":
-            for k in ["RUN_4","RUN_6"]: p[k] *= 1.06
+            for k in ["RUN_4", "RUN_6"]: p[k] *= 1.06
             p["RUN_0"] *= 0.95
         if free_hit:
             p["WICKET"] *= 0.05
 
-        # (B) zone matchup multiplier (tilt boundaries vs dot/wicket)
+        # Zone matchup tilt
         if zone_mul:
-            # zone_mul like {"run_boost": ±x, "wkt_boost": ±y}
-            rb = zone_mul.get("run_boost", 0.0)  # e.g., +0.07
-            wb = zone_mul.get("wkt_boost", 0.0)  # e.g., +0.05
+            rb = zone_mul.get("run_boost", 0.0)
+            wb = zone_mul.get("wkt_boost", 0.0)
             if rb != 0.0:
-                if rb > 0:
-                    p["RUN_4"] *= (1.0 + rb); p["RUN_6"] *= (1.0 + rb)
-                    p["RUN_0"] *= (1.0 - rb/2.0)
-                else:
-                    p["RUN_4"] *= (1.0 + rb); p["RUN_6"] *= (1.0 + rb)
-                    p["RUN_0"] *= (1.0 - rb/3.0)  # rb negative => reduces dots less aggressively
+                p["RUN_4"] *= (1.0 + rb); p["RUN_6"] *= (1.0 + rb)
+                p["RUN_0"] *= (1.0 - (rb/2.0 if rb > 0 else rb/3.0))
             if wb != 0.0:
                 p["WICKET"] *= (1.0 + wb)
 
-        # (C) fielding effects
+        # Fielding effects
         if fielding_fx:
             conv_mu  = max(0.80, min(1.20, fielding_fx.get("conversion_mu", 1.0)))
             clean_mu = max(0.90, min(1.10, fielding_fx.get("clean_mu", 1.0)))
             save_mu  = max(0.0,  min(0.30, fielding_fx.get("save_mu", 0.0)))
 
-            # wickets convert better/worse:
             p["WICKET"] *= conv_mu
+            for bkey, midkey in [("RUN_4", "RUN_2"), ("RUN_6", "RUN_3")]:
+                take = p.get(bkey, 0.0) * save_mu
+                p[bkey] = max(0.0, p.get(bkey, 0.0) - take)
+                p[midkey] = p.get(midkey, 0.0) + take
 
-            # boundary saves: redirect a fraction of 4/6 mass to 2/3 (keeping total prob)
-            for bkey, midkey in [("RUN_4","RUN_2"), ("RUN_6","RUN_3")]:
-                take = p[bkey] * save_mu
-                p[bkey] -= take
-                p[midkey] += take
-
-            # clean hands: small dot/1s tilt (cleaner hands => a few more dots, fewer cheap singles)
-            # and if not clean, allow a few 1s from dots
             if clean_mu >= 1.0:
-                shift = (clean_mu - 1.0) * 0.10  # max 1% abs
-                take = min(p["RUN_1"] * shift, p["RUN_1"])
-                p["RUN_1"] -= take; p["RUN_0"] += take
+                shift = (clean_mu - 1.0) * 0.10
+                take = min(p.get("RUN_1", 0.0) * shift, p.get("RUN_1", 0.0))
+                p["RUN_1"] = p.get("RUN_1", 0.0) - take
+                p["RUN_0"] = p.get("RUN_0", 0.0) + take
             else:
                 shift = (1.0 - clean_mu) * 0.10
-                take = min(p["RUN_0"] * shift, p["RUN_0"])
-                p["RUN_0"] -= take; p["RUN_1"] += take
+                take = min(p.get("RUN_0", 0.0) * shift, p.get("RUN_0", 0.0))
+                p["RUN_0"] = p.get("RUN_0", 0.0) - take
+                p["RUN_1"] = p.get("RUN_1", 0.0) + take
 
-        # Renormalize
         s = sum(p.values()) or 1.0
-        for k in p.keys(): p[k] /= s
+        for k in OUTCOME_KEYS:
+            p[k] = p.get(k, 0.0) / s
         return p
 
-    # -------------- Innings simulation --------------
+    # ---------------- Innings simulation ----------------
     def simulate_innings(batting_order, bowling_group, bat_strength, bowl_strength, max_ov):
         choose_bowler = make_bowler_selector(bowling_group, max_ov)
         run_mu, w_mu = strength_scalers(bat_strength, bowl_strength)
-
-        # NEW: fielding profile for this bowling team (XI on field)
         fielding_fx = team_fielding_profile(bowling_group)
 
-        score = wkts = legal_balls = 0
+        score = 0
+        wkts = 0
         over_data = []
         free_hit_next = False
         bat_idx_strike, bat_idx_non = 0, 1
@@ -1606,10 +1581,12 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         bowler_spell_len = defaultdict(int)
 
         for over in range(max_ov):
-            if wkts >= 10 or bat_idx_strike >= len(batting_order): break
+            if wkts >= 10 or bat_idx_strike >= len(batting_order):
+                break
             phase_col = compute_phase_col(over, max_ov)
             bowler = choose_bowler(phase_col)
-            if bowler is None: break
+            if bowler is None:
+                break
 
             bowler_name = get_player_name(bowler)
             if current_bowler != bowler:
@@ -1618,37 +1595,38 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             else:
                 bowler_spell_len[bowler] += 1
 
-            # PREP: sample zones from this bowler’s phase dist
             bowler_zone_dist = get_bowler_zone_dist(bowler, phase_col)
+            # safety: if empty for some reason
+            if not bowler_zone_dist:
+                bowler_zone_dist = {"Good | Straight": 1.0}
             zone_keys, zone_wts = zip(*bowler_zone_dist.items())
 
-            runs_this_over = wkts_this_over = balls_this_over = 0
+            runs_this_over = 0
+            wkts_this_over = 0
+            balls_this_over = 0
 
             while balls_this_over < 6:
-                if wkts >= 10 or bat_idx_strike >= len(batting_order): break
+                if wkts >= 10 or bat_idx_strike >= len(batting_order):
+                    break
                 striker = batting_order[bat_idx_strike]
 
-                # Base outcome probs
                 probs_base = outcome_model.get_probs(striker, bowler, phase_col)
 
-                # Sample a zone for THIS ball from bowler’s phase distribution
+                # Sample zone for this ball
                 z = RNG.choices(zone_keys, weights=zone_wts, k=1)[0]
-                bperf = get_batter_zone_perf(striker, phase_col).get(z, None)
+                bperf = get_batter_zone_perf(striker, phase_col).get(z)
 
-                # Compute zone multipliers
                 zone_mul = None
                 if bperf:
-                    # compare to team/global baselines
                     xr_global = bat_strength["global_xrpb"]
                     xw_global = bat_strength["global_xw"] or 0.02
                     xr_rel = (bperf["xr"] - xr_global) / (xr_global or 1.0)
                     xw_rel = (bperf["xw"] - xw_global) / (xw_global or 0.02)
                     zone_mul = {
-                        "run_boost": max(-ZONE_RUN_IMPACT_MAX, min(ZONE_RUN_IMPACT_MAX, xr_rel * ZONE_RUN_IMPACT_MAX*1.2)),
-                        "wkt_boost": max(-ZONE_WKT_IMPACT_MAX, min(ZONE_WKT_IMPACT_MAX, xw_rel * ZONE_WKT_IMPACT_MAX*1.2)),
+                        "run_boost": max(-ZONE_RUN_IMPACT_MAX, min(ZONE_RUN_IMPACT_MAX, xr_rel * ZONE_RUN_IMPACT_MAX * 1.2)),
+                        "wkt_boost": max(-ZONE_WKT_IMPACT_MAX, min(ZONE_WKT_IMPACT_MAX, xw_rel * ZONE_WKT_IMPACT_MAX * 1.2)),
                     }
 
-                # Apply all tweaks (spell, dots, death, free hit, zone, fielding)
                 probs = apply_context_tweaks(
                     probs_base,
                     dot_streak=dot_streak,
@@ -1662,21 +1640,21 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 outcome = outcome_model.sample_outcome(probs)
 
                 if outcome == "WIDE":
-                    score += 1; runs_this_over += 1
+                    score += 1
+                    runs_this_over += 1
                     continue
                 if outcome == "NO_BALL":
-                    score += 1; runs_this_over += 1
+                    score += 1
+                    runs_this_over += 1
                     free_hit_next = True
                     continue
 
                 # LEGAL
                 free_hit_next = False
                 balls_this_over += 1
-                legal_balls += 1
 
                 if outcome == "WICKET":
-                    # convert with team wicket multiplier too
-                    if RNG.random() < (0.92 * w_mu):  # keep your mild “escape” logic
+                    if RNG.random() < (0.92 * w_mu):  # mild "escape" logic
                         wkts += 1
                         wkts_this_over += 1
                         dismissed.add(striker)
@@ -1689,13 +1667,13 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                         dot_streak += 1
                 else:
                     r = int(outcome.split("_")[1])
-                    # keep strength scaling on runs:
                     if r >= 4:
                         scaled = int(round(r * run_mu))
                     else:
                         low_adj = 0.02 if run_mu > 1.0 else -0.02
                         scaled = max(0, min(6, r + (1 if (RNG.random() < low_adj) else 0)))
-                    score += scaled; runs_this_over += scaled
+                    score += scaled
+                    runs_this_over += scaled
                     if scaled % 2 == 1:
                         bat_idx_strike, bat_idx_non = bat_idx_non, bat_idx_strike
                     dot_streak = 0 if scaled > 0 else (dot_streak + 1)
@@ -1713,44 +1691,38 @@ def simulate_match_v2(payload: SimulateMatchPayload):
 
         return score, wkts, over_data, dict(outcome_model.fallback_tally)
 
-    # -------------- Run simulations --------------
+    # ---------------- Run simulations ----------------
     total = max(1, int(payload.simulations))
     sim_runs_a, sim_runs_b = [], []
     sim_wkts_a, sim_wkts_b = 0, 0
-    last_overs_a, last_overs_b = None, None
+    last_overs_a = last_overs_b = None
     wins_a = wins_b = 0
-    margins_runs_a = []
-    margins_wkts_b = []
+    margins_runs_a, margins_wkts_b = [], []
     fallback_usage_accum = Counter()
 
     for _ in range(total):
-        # Innings A then B
         a_score, a_wkts, a_overs, fb1 = simulate_innings(
             payload.team_a_players, payload.team_b_players, team_a_strength, team_b_strength, payload.max_overs
         )
         b_score, b_wkts, b_overs, fb2 = simulate_innings(
             payload.team_b_players, payload.team_a_players, team_b_strength, team_a_strength, payload.max_overs
         )
+
         last_overs_a, last_overs_b = a_overs, b_overs
-        sim_runs_a.append(a_score)
-        sim_runs_b.append(b_score)
-        sim_wkts_a += a_wkts
-        sim_wkts_b += b_wkts
-        fallback_usage_accum.update(fb1)
-        fallback_usage_accum.update(fb2)
+        sim_runs_a.append(a_score); sim_runs_b.append(b_score)
+        sim_wkts_a += a_wkts; sim_wkts_b += b_wkts
+        fallback_usage_accum.update(fb1); fallback_usage_accum.update(fb2)
 
         if a_score > b_score:
-            wins_a += 1
-            margins_runs_a.append(a_score - b_score)
+            wins_a += 1; margins_runs_a.append(a_score - b_score)
         elif b_score > a_score:
-            wins_b += 1
-            margins_wkts_b.append(max(0, 10 - b_wkts))
+            wins_b += 1; margins_wkts_b.append(max(0, 10 - b_wkts))
 
-    # -------------- Summaries --------------
-    avg_a = round(sum(sim_runs_a) / total, 1)
-    avg_b = round(sum(sim_runs_b) / total, 1)
-    prob_a = round((wins_a / total) * 100, 1)
-    prob_b = round((wins_b / total) * 100, 1)
+    # ---------------- Summaries ----------------
+    avg_a = round(sum(sim_runs_a) / total, 1) if total else 0.0
+    avg_b = round(sum(sim_runs_b) / total, 1) if total else 0.0
+    prob_a = round((wins_a / total) * 100, 1) if total else 0.0
+    prob_b = round((wins_b / total) * 100, 1) if total else 0.0
 
     margin_a = f"{round(sum(margins_runs_a)/len(margins_runs_a), 1)} runs" if margins_runs_a else "N/A"
     margin_b = f"{round(sum(margins_wkts_b)/len(margins_wkts_b), 1)} wickets" if margins_wkts_b else "N/A"
@@ -1761,7 +1733,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         "Draw"
     )
 
-    # Extra distribution metrics (kept additive, non-breaking)
     dist_a = {
         "p10": round(pct(sim_runs_a, 0.10), 1),
         "median": round(pct(sim_runs_a, 0.50), 1),
@@ -1775,14 +1746,9 @@ def simulate_match_v2(payload: SimulateMatchPayload):
         "iqr": round(q3(sim_runs_b) - q1(sim_runs_b), 1)
     }
 
-    # Fallback diagnostics
     total_balls_considered = sum(fallback_usage_accum.values()) or 1
-    fallback_pct = {
-        k: round(100.0 * v / total_balls_considered, 2)
-        for k, v in fallback_usage_accum.items()
-    }
+    fallback_pct = {k: round(100.0 * v / total_balls_considered, 2) for k, v in fallback_usage_accum.items()}
 
-    # -------------- Response (keeps your original keys) --------------
     return {
         "team_a": {
             "name": payload.team_a_name,
@@ -1791,7 +1757,6 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             "expected_margin": margin_a,
             "last_sim_overs": last_overs_a,
             "wickets": sim_wkts_a,
-            # New, non-breaking:
             "score_distribution": dist_a,
         },
         "team_b": {
@@ -1801,11 +1766,9 @@ def simulate_match_v2(payload: SimulateMatchPayload):
             "expected_margin": margin_b,
             "last_sim_overs": last_overs_b,
             "wickets": sim_wkts_b,
-            # New, non-breaking:
             "score_distribution": dist_b,
         },
         "winner": winner,
-        # New, non-breaking: help you tune data coverage + realism
         "diagnostics": {
             "fallback_usage_percent": fallback_pct,
             "notes": [
@@ -1814,9 +1777,12 @@ def simulate_match_v2(payload: SimulateMatchPayload):
                 "No-ball triggers a free hit (wickets suppressed next legal ball).",
                 "Dot-ball pressure increases boundary/wicket likelihood slightly.",
                 "Spell effects: 2nd over tighter, later overs slightly more hittable.",
+                "Zone model: 5×4 grid using your pitch_x/y thresholds; batter vs-zone tilts per ball.",
+                "Fielding: conversion/clean-hands/boundary-save applied to outcome probabilities.",
             ],
         }
     }
+
 
 
 @app.get("/team-players")

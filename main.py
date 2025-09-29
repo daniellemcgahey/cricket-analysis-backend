@@ -1805,12 +1805,12 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
         return {"player_ids": []}
     country_id = row["country_id"]
 
-    # 2) Squad by country only  ❗ FIX: parameter must be a 1-tuple (country_id,)
+    # 2) Squad by country only
     cur.execute("""
         SELECT p.player_id AS id, p.player_name AS name
         FROM players p
         WHERE p.country_id = ?
-    """, (country_id,))  # <-- comma added
+    """, (country_id,))
     squad_rows = cur.fetchall()
     squad = [r["id"] for r in squad_rows]
     if not squad:
@@ -1825,19 +1825,19 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
         cur.execute(f"SELECT player_id, role FROM players WHERE player_id IN ({ph_squad})", squad)
         role_map = {r["player_id"]: (r["role"] or "") for r in cur.fetchall()}
 
-    # 3) Recent matches where any squad member participated
+    # 3) Recent matches (NEW: order by last ball rowid, no start_time needed)
     cur.execute(f"""
-        SELECT DISTINCT i.match_id, MAX(i.start_time) AS ts
+        SELECT i.match_id, MAX(be.rowid) AS last_ball_rowid
         FROM innings i
         JOIN ball_events be ON be.innings_id = i.innings_id
         WHERE (be.batter_id IN ({ph_squad}) OR be.bowler_id IN ({ph_squad}))
         GROUP BY i.match_id
-        ORDER BY ts DESC
+        ORDER BY last_ball_rowid DESC
         LIMIT ?
     """, (*squad, *squad, last_games))
     recent_matches = cur.fetchall()
 
-    # Fallback: by appearances if no recent matches
+    # Fallback: appearances if no recent matches
     if not recent_matches:
         cur.execute(f"""
             SELECT batter_id AS pid, COUNT(*) AS balls
@@ -1852,7 +1852,7 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
     match_ids = [r["match_id"] for r in recent_matches]
     ph_matches = ",".join(["?"] * len(match_ids))
 
-    # Recency weights: latest highest
+    # Recency weights from returned order (newest first)
     recency_weights = {rm["match_id"]: max(0.5, 1.0 - 0.1 * idx) for idx, rm in enumerate(recent_matches)}
 
     # 4) Pull recent balls; compute form

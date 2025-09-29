@@ -1779,6 +1779,185 @@ def simulate_match_v2(payload: SimulateMatchPayload):
     }
 
 
+ALLOWED_CATEGORIES = {"Men", "Women", "U19 Men", "U19 Women"}
+
+
+def _table_has_column(cur, table: str, col: str) -> bool:
+    cur.execute(f"PRAGMA table_info({table})")
+    return any((r["name"] == col) for r in cur.fetchall())
+
+@app.get("/probable-xi")
+def probable_xi(
+    country_name: str,
+    team_category: str,
+    last_games: int = 4
+):
+    # ---- validate inputs
+    if team_category not in ALLOWED_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Invalid team_category. Must be one of {sorted(ALLOWED_CATEGORIES)}")
+    last_games = max(1, min(10, int(last_games)))  # keep sane bounds
+
+    conn = _db()
+    cur = conn.cursor()
+
+    # ---- 1) Squad (by country + category)
+    cur.execute("""
+        SELECT p.player_id AS id, p.player_name AS name
+        FROM players p
+        WHERE p.country_name = ? AND p.team_category = ?
+    """, (country_name, team_category))
+    squad_rows = cur.fetchall()
+    squad = [r["id"] for r in squad_rows]
+    if not squad:
+        return {"player_ids": []}
+    squad_set = set(squad)
+    ph_squad = ",".join(["?"] * len(squad))
+
+    # Optional: detect if you have a role column to help with WK selection
+    has_role = _table_has_column(cur, "players", "role")
+    role_map = {}
+    if has_role:
+        cur.execute(f"""
+            SELECT player_id, role FROM players
+            WHERE player_id IN ({ph_squad})
+        """, squad)
+        role_map = {r["player_id"]: (r["role"] or "") for r in cur.fetchall()}
+
+    # ---- 2) Recent matches involving these players (batting OR bowling)
+    cur.execute(f"""
+        SELECT DISTINCT i.match_id, MAX(i.start_time) AS ts
+        FROM innings i
+        JOIN ball_events be ON be.innings_id = i.innings_id
+        WHERE (be.batter_id IN ({ph_squad}) OR be.bowler_id IN ({ph_squad}))
+        GROUP BY i.match_id
+        ORDER BY ts DESC
+        LIMIT ?
+    """, (*squad, *squad, last_games))
+    recent_matches = cur.fetchall()
+
+    # Fallback: if no recent matches, return top XI by overall appearances
+    if not recent_matches:
+        cur.execute(f"""
+            SELECT batter_id AS pid, COUNT(*) AS balls
+            FROM ball_events
+            WHERE batter_id IN ({ph_squad})
+            GROUP BY batter_id
+            ORDER BY balls DESC
+            LIMIT 11
+        """, squad)
+        return {"player_ids": [r["pid"] for r in cur.fetchall()]}
+
+    match_ids = [r["match_id"] for r in recent_matches]
+    ph_matches = ",".join(["?"] * len(match_ids))
+
+    # ---- 3) Build a recency weight map (latest gets highest weight)
+    # newest match first ⇒ weights: 1.0, 0.9, 0.8, ...
+    recency_weights = {}
+    for idx, r in enumerate(recent_matches):
+        recency_weights[r["match_id"]] = max(0.5, 1.0 - 0.1 * idx)
+
+    # ---- 4) Pull *all* recent balls (once), aggregate in Python with recency weights
+    cur.execute(f"""
+        SELECT i.match_id,
+               be.batter_id, be.bowler_id,
+               be.runs, be.dismissal_type
+        FROM ball_events be
+        JOIN innings i ON i.innings_id = be.innings_id
+        WHERE i.match_id IN ({ph_matches})
+          AND (be.batter_id IN ({ph_squad}) OR be.bowler_id IN ({ph_squad}))
+    """, (*match_ids, *squad))
+    rows = cur.fetchall()
+
+    # ---- 5) Aggregate form per player with recency weights
+    # Batting impact: runs + 6*four + 9*six
+    # Bowling impact: +22*wicket  - 2*boundary_conceded
+    # (You can tune those coefficients later.)
+    form: Dict[int, float] = {}
+    appearances: Dict[int, int] = {}  # count of any involvement (bat/bowl balls)
+    for r in rows:
+        mid = r["match_id"]
+        w = recency_weights.get(mid, 1.0)
+
+        runs = int(r["runs"] or 0)
+        is_wicket = 1 if r["dismissal_type"] else 0
+        is_boundary = 1 if runs in (4, 6) else 0
+
+        bat = r["batter_id"]
+        if bat in squad_set:
+            form[bat] = form.get(bat, 0.0) + w * (runs + (6 if runs == 4 else 0) + (9 if runs == 6 else 0))
+            appearances[bat] = appearances.get(bat, 0) + 1
+
+        bowl = r["bowler_id"]
+        if bowl in squad_set:
+            bowl_score = 22 * is_wicket - 2 * is_boundary
+            form[bowl] = form.get(bowl, 0.0) + w * bowl_score
+            appearances[bowl] = appearances.get(bowl, 0) + 1
+
+    # If some squad members have 0 rows in last N matches, give tiny prior so ties are deterministic but low
+    tiny_prior = 0.0001
+    for pid in squad:
+        form.setdefault(pid, tiny_prior)
+
+    # ---- 6) Rank by form (desc)
+    ranked = sorted(squad, key=lambda pid: form.get(pid, 0.0), reverse=True)
+
+    # ---- 7) Balance helpers (uses only data you likely have)
+    # Bowling options: count historical balls bowled overall (not just last N)
+    cur.execute(f"""
+        SELECT bowler_id AS pid, COUNT(*) AS balls_bowled
+        FROM ball_events
+        WHERE bowler_id IN ({ph_squad})
+        GROUP BY bowler_id
+    """, squad)
+    bowled_map = {r["pid"]: int(r["balls_bowled"]) for r in cur.fetchall()}
+    def is_bowler(pid: int) -> bool:
+        return bowled_map.get(pid, 0) >= 30  # tweak threshold if you like
+
+    # Wicketkeepers: only if you *do* have players.role
+    def is_keeper(pid: int) -> bool:
+        if not has_role: return False
+        role = (role_map.get(pid, "") or "").lower()
+        return "wk" in role or "wicket" in role
+
+    # ---- 8) Take top 11, then enforce: ≥1 WK (if role exists), ≥5 bowlers
+    xi = ranked[:11]
+
+    # Enforce WK (only if role exists in schema)
+    if has_role and not any(is_keeper(pid) for pid in xi):
+        keepers = [pid for pid in ranked if is_keeper(pid)]
+        if keepers:
+            wk_choice = keepers[0]
+            # replace the lowest-ranked non-WK in XI
+            for i in range(10, -1, -1):
+                if not is_keeper(xi[i]):
+                    xi[i] = wk_choice
+                    break
+
+    # Enforce ≥5 bowling options
+    def bowl_count(lst: List[int]) -> int:
+        return sum(1 for pid in lst if is_bowler(pid))
+    if bowl_count(xi) < 5:
+        # candidates outside XI that are bowlers, in rank order
+        bowlers_outside = [pid for pid in ranked if pid not in xi and is_bowler(pid)]
+        j = 0
+        # replace lowest-ranked non-bowlers until we reach 5 or run out
+        for i in range(10, -1, -1):
+            if bowl_count(xi) >= 5 or j >= len(bowlers_outside):
+                break
+            if not is_bowler(xi[i]):
+                xi[i] = bowlers_outside[j]
+                j += 1
+
+    # Final de-dup + cap at 11 (paranoia)
+    seen = set()
+    xi_dedup = []
+    for pid in xi:
+        if pid not in seen:
+            xi_dedup.append(pid); seen.add(pid)
+        if len(xi_dedup) == 11: break
+
+    return {"player_ids": xi_dedup}
+
 
 @app.get("/team-players")
 def get_players_for_team(country_name: str, team_category: Optional[str] = None):

@@ -53,6 +53,33 @@ class ColorSquare(Flowable):
         self.canv.setFillColor(self.fill_color)
         self.canv.rect(0, 0, self.size, self.size, fill=1, stroke=1)
 
+
+# ---------- Config: targets/operators (extensible) ----------
+MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
+    # You can tune this anytime:
+    # operator can be one of: >=, >, ==, <=, <, !=
+    "bat_pp_scoring_shot_pct": {"target": 45.0, "operator": ">="},
+}
+
+# ---------- Pydantic response models ----------
+class KPIItem(BaseModel):
+    key: str
+    label: str
+    unit: str = "%"
+    bucket: str = "Batting"
+    phase: str = "Powerplay"
+    operator: str = ">="
+    target: float
+    actual: Optional[float] = None
+    ok: Optional[bool] = None
+    notes: Optional[str] = None
+    source: Optional[Dict[str, Any]] = None
+
+class MatchKPIsResponse(BaseModel):
+    match: Dict[str, Any]
+    kpis: list[KPIItem]
+
+
 class ComparisonPayload(BaseModel):
     country1: str
     country2: str
@@ -9959,7 +9986,145 @@ def generate_team_pdf_report(data: dict):
     buffer.seek(0)
     return buffer
 
+def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {k: row[k] for k in row.keys()}
 
+def _compare(actual: Optional[float], operator: str, target: float) -> Optional[bool]:
+    if actual is None or math.isnan(actual):
+        return None
+    if operator == ">=": return actual >= target
+    if operator == ">":  return actual >  target
+    if operator == "==": return actual == target
+    if operator == "<=": return actual <= target
+    if operator == "<":  return actual <  target
+    if operator == "!=": return actual != target
+    # default
+    return actual >= target
+
+# ---------- Utility: identify Brasil team string for a match ----------
+def _get_match_and_brasil_team(conn: sqlite3.Connection, match_id: str) -> tuple[Dict[str, Any], str]:
+    q = """
+        SELECT 
+            m.match_id,
+            t.tournament_name AS tournament,
+            m.team_a      AS team_a_id,
+            c1.country_name AS team_a,
+            m.team_b      AS team_b_id,
+            c2.country_name AS team_b,
+            m.match_date
+        FROM matches m
+        JOIN countries   c1 ON m.team_a = c1.country_id
+        JOIN countries   c2 ON m.team_b = c2.country_id
+        JOIN tournaments t  ON m.tournament_id = t.tournament_id
+        WHERE m.match_id = ?
+    """
+    row = conn.execute(q, (match_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Match not found")
+
+    match = _row_to_dict(row)
+    a = (match.get("team_a") or "")
+    b = (match.get("team_b") or "")
+    is_brasil_a = True if ("bra" in a.lower() or "brá" in a.lower()) else False
+    is_brasil_b = True if ("bra" in b.lower() or "brá" in b.lower()) else False
+
+    if not (is_brasil_a or is_brasil_b):
+        # we only do KPIs for Brasil matches per your spec
+        raise HTTPException(status_code=400, detail="This match does not include Brasil")
+
+    brasil_team_name = a if is_brasil_a else b
+    return match, brasil_team_name
+
+# ---------- Core compute: Scoring Shot % (Batting • Powerplay) ----------
+def _compute_bat_pp_scoring_shot_pct(conn: sqlite3.Connection, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Assumptions (tweak to your schema as needed):
+      - Table: balls
+      - Columns:
+          match_id TEXT
+          batting_team TEXT
+          over INTEGER  (1..20)
+          ball INTEGER
+          runs_bat INTEGER
+          byes INTEGER, leg_byes INTEGER
+          wides INTEGER, no_balls INTEGER
+      - Definition:
+          * Phase Powerplay: overs 1..6
+          * Legal balls: wides = 0 AND no_balls = 0   (i.e., exclude illegals)
+          * Scoring shot: (runs_bat > 0) OR ((byes + leg_byes) > 0)
+    """
+
+    # If your columns differ, edit here (e.g., byes->byes_runs, leg_byes->lb_runs)
+    sql = """
+      SELECT
+        SUM(CASE 
+              WHEN (wides = 0 AND no_balls = 0) 
+               AND ((runs_bat > 0) OR ((COALESCE(byes,0) + COALESCE(leg_byes,0)) > 0))
+            THEN 1 ELSE 0 END) AS scoring_shots,
+        SUM(CASE 
+              WHEN (wides = 0 AND no_balls = 0) 
+            THEN 1 ELSE 0 END) AS legal_balls
+      FROM balls
+      WHERE match_id = ?
+        AND LOWER(batting_team) = LOWER(?)
+        AND over BETWEEN 1 AND 6
+    """
+
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    if not row:
+        return {"actual": None, "source": {"scoring_shots": 0, "legal_balls": 0}}
+
+    scoring_shots = row["scoring_shots"] or 0
+    legal_balls   = row["legal_balls"] or 0
+
+    actual_pct = None
+    if legal_balls > 0:
+        actual_pct = round(100.0 * float(scoring_shots) / float(legal_balls), 1)
+
+    return {"actual": actual_pct, "source": {"scoring_shots": scoring_shots, "legal_balls": legal_balls}}
+
+# ---------- Endpoint: Men KPIs for a match ----------
+@app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
+def men_match_kpis(match_id: str = Query(..., description="Match ID from /matches")):
+    conn = _db()
+    try:
+        match, brasil_team = _get_match_and_brasil_team(conn, match_id)
+
+        # --- Compute our first KPI ---
+        comp = _compute_bat_pp_scoring_shot_pct(conn, match_id, brasil_team)
+
+        # target/operator registry
+        tconf = MEN_KPI_TARGETS["bat_pp_scoring_shot_pct"]
+        operator = tconf.get("operator", ">=")
+        target   = float(tconf.get("target", 45.0))
+        actual   = comp["actual"]
+
+        kpi_item = KPIItem(
+            key="bat_pp_scoring_shot_pct",
+            label="Scoring Shot % (Batting • Powerplay)",
+            unit="%",
+            bucket="Batting",
+            phase="Powerplay",
+            operator=operator,
+            target=target,
+            actual=actual,
+            ok=_compare(actual, operator, target),
+            notes="Scoring shot = runs off bat OR byes/leg-byes on legal deliveries (overs 1–6).",
+            source=comp.get("source", {})
+        )
+
+        return MatchKPIsResponse(
+            match={
+                "id": match["match_id"],
+                "home": match["team_a"],
+                "away": match["team_b"],
+                "date": match["match_date"],
+                "tournament": match.get("tournament"),
+            },
+            kpis=[kpi_item]
+        )
+    finally:
+        conn.close()
 
 
 

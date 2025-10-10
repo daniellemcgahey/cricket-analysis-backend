@@ -60,6 +60,7 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     # operator can be one of: >=, >, ==, <=, <, !=
     "bat_pp_scoring_shot_pct": {"target": 45.0, "operator": ">="},
     "bat_middle_twos_count":   {"target": 15,   "operator": ">="},
+    "bat_middle_scoring_shot_pct":{"target": 50.0, "operator": ">="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10094,7 +10095,37 @@ def _compute_bat_middle_twos_count(conn: sqlite3.Connection, match_id: str, bras
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     twos = int(row["twos"] or 0)
-    return {"actual": float(twos), "source": {"table": "ball_events+innings", "twos": twos, "overs": "7-16"}}
+    return {"actual": float(twos), "source": {"table": "ball_events+innings", "twos": twos, "overs": "7-15"}}
+
+def _compute_bat_middle_scoring_shot_pct(conn: sqlite3.Connection, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Scoring Shot % for Brasil batting in Middle Overs (7–15).
+    Legacy definition: scoring shot = runs > 0
+    Denominator: all balls (no special exclusion of wides/no-balls).
+    """
+    sql = """
+        SELECT 
+            COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 7 AND 15
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    total_balls   = (row["total_balls"]   if row and row["total_balls"]   is not None else 0)
+    scoring_shots = (row["scoring_shots"] if row and row["scoring_shots"] is not None else 0)
+    actual_pct = round((scoring_shots / total_balls) * 100.0, 1) if total_balls > 0 else None
+    return {
+        "actual": actual_pct,
+        "source": {
+            "table": "ball_events+innings",
+            "scoring_shots": scoring_shots,
+            "total_balls": total_balls,
+            "overs": "7-15"
+        }
+    }
 
 
 # ---------- Endpoint: Men KPIs for a match ----------
@@ -10136,6 +10167,22 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             actual=comp2["actual"],
             ok=_compare(comp2["actual"], tconf2.get("operator", ">="), float(tconf2.get("target", 15))),
             source=comp2.get("source", {})
+        ))
+
+        # --- KPI 3: Scoring Shot % (Batting • Middle Overs) ---
+        comp3 = _compute_bat_middle_scoring_shot_pct(conn, match_id, brasil_team)
+        tconf3 = MEN_KPI_TARGETS["bat_middle_scoring_shot_pct"]
+        kpis.append(KPIItem(
+            key="bat_middle_scoring_shot_pct",
+            label="Scoring Shot %",
+            unit="%",
+            bucket="Batting",
+            phase="Middle Overs",
+            operator=tconf3.get("operator", ">="),
+            target=float(tconf3.get("target", 50.0)),
+            actual=comp3["actual"],
+            ok=_compare(comp3["actual"], tconf3.get("operator", ">="), float(tconf3.get("target", 50.0))),
+            source=comp3.get("source", {})
         ))
 
         return MatchKPIsResponse(

@@ -59,6 +59,7 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     # You can tune this anytime:
     # operator can be one of: >=, >, ==, <=, <, !=
     "bat_pp_scoring_shot_pct": {"target": 45.0, "operator": ">="},
+    "bat_middle_twos_count":   {"target": 15,   "operator": ">="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10071,6 +10072,31 @@ def _compute_bat_pp_scoring_shot_pct(conn: sqlite3.Connection, match_id: str, br
         "definition": "scoring shot = runs > 0 (matches legacy)"
     }
 
+def _compute_bat_middle_twos_count(conn: sqlite3.Connection, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Count of 'twos' for Brasil batting in Middle Overs (7–15).
+    Two = (runs off the bat == 2) OR (byes + leg_byes == 2).
+    Wides/no-balls are not counted as twos.
+    """
+    sql = """
+        SELECT
+            SUM(
+                CASE 
+                  WHEN (be.runs = 2) OR ((COALESCE(be.byes,0) + COALESCE(be.leg_byes,0)) = 2)
+                  THEN 1 ELSE 0
+                END
+            ) AS twos
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 7 AND 15
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    twos = int(row["twos"] or 0)
+    return {"actual": float(twos), "source": {"table": "ball_events+innings", "twos": twos, "overs": "7-16"}}
+
+
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
 def men_match_kpis(match_id: str = Query(..., description="Match ID from /matches")):
@@ -10078,27 +10104,39 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
     try:
         match, brasil_team = _get_match_and_brasil_team(conn, match_id)
 
-        # Compute KPI
-        comp = _compute_bat_pp_scoring_shot_pct(conn, match_id, brasil_team)
+        kpis: list[KPIItem] = []
 
-        # target/operator
-        tconf = MEN_KPI_TARGETS["bat_pp_scoring_shot_pct"]
-        operator = tconf.get("operator", ">=")
-        target   = float(tconf.get("target", 45.0))
-        actual   = comp["actual"]
-
-        kpi_item = KPIItem(
+        # --- KPI 1: Scoring Shot % (Batting • Powerplay) ---
+        comp1 = _compute_bat_pp_scoring_shot_pct(conn, match_id, brasil_team)
+        tconf1 = MEN_KPI_TARGETS["bat_pp_scoring_shot_pct"]
+        kpis.append(KPIItem(
             key="bat_pp_scoring_shot_pct",
             label="Scoring Shot %",
             unit="%",
             bucket="Batting",
             phase="Powerplay",
-            operator=operator,
-            target=target,
-            actual=actual,
-            ok=_compare(actual, operator, target),
-            source=comp.get("source", {})
-        )
+            operator=tconf1.get("operator", ">="),
+            target=float(tconf1.get("target", 45.0)),
+            actual=comp1["actual"],
+            ok=_compare(comp1["actual"], tconf1.get("operator", ">="), float(tconf1.get("target", 45.0))),
+            source=comp1.get("source", {})
+        ))
+
+        # --- KPI 2: Twos count (Batting • Middle Overs) ---
+        comp2 = _compute_bat_middle_twos_count(conn, match_id, brasil_team)
+        tconf2 = MEN_KPI_TARGETS["bat_middle_twos_count"]
+        kpis.append(KPIItem(
+            key="bat_middle_twos_count",
+            label="Twos",
+            unit="",  # plain count
+            bucket="Batting",
+            phase="Middle Overs",
+            operator=tconf2.get("operator", ">="),
+            target=float(tconf2.get("target", 15)),
+            actual=comp2["actual"],
+            ok=_compare(comp2["actual"], tconf2.get("operator", ">="), float(tconf2.get("target", 15))),
+            source=comp2.get("source", {})
+        ))
 
         return MatchKPIsResponse(
             match={
@@ -10108,7 +10146,7 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
                 "date": match["match_date"],
                 "tournament": match.get("tournament"),
             },
-            kpis=[kpi_item]
+            kpis=kpis
         )
     finally:
         conn.close()

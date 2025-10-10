@@ -10021,67 +10021,55 @@ def _get_match_and_brasil_team(conn: sqlite3.Connection, match_id: str) -> tuple
     row = conn.execute(q, (match_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Match not found")
-
     match = _row_to_dict(row)
+
     a = (match.get("team_a") or "")
     b = (match.get("team_b") or "")
-    is_brasil_a = True if ("bra" in a.lower() or "brá" in a.lower()) else False
-    is_brasil_b = True if ("bra" in b.lower() or "brá" in b.lower()) else False
-
+    is_brasil_a = bool(__import__("re").search(r"bra[sz]il", a, __import__("re").I))
+    is_brasil_b = bool(__import__("re").search(r"bra[sz]il", b, __import__("re").I))
     if not (is_brasil_a or is_brasil_b):
-        # we only do KPIs for Brasil matches per your spec
         raise HTTPException(status_code=400, detail="This match does not include Brasil")
 
-    brasil_team_name = a if is_brasil_a else b
+    brasil_team_name = a if is_brasil_a else b   # this exact string is stored in i.batting_team
     return match, brasil_team_name
 
 # ---------- Core compute: Scoring Shot % (Batting • Powerplay) ----------
 def _compute_bat_pp_scoring_shot_pct(conn: sqlite3.Connection, match_id: str, brasil_team: str) -> Dict[str, Any]:
     """
-    Assumptions (tweak to your schema as needed):
-      - Table: balls
-      - Columns:
-          match_id TEXT
-          batting_team TEXT
-          over INTEGER  (1..20)
-          ball INTEGER
-          runs_bat INTEGER
-          byes INTEGER, leg_byes INTEGER
-          wides INTEGER, no_balls INTEGER
-      - Definition:
-          * Phase Powerplay: overs 1..6
-          * Legal balls: wides = 0 AND no_balls = 0   (i.e., exclude illegals)
-          * Scoring shot: (runs_bat > 0) OR ((byes + leg_byes) > 0)
+    Matches your old logic style:
+      - scoring shot = runs > 0
+      - denominator = total balls (no explicit exclusion of wides/no-balls in old KPI)
+      - phase: Powerplay (prefer is_powerplay=1, also accept overs 1..6)
+    Data sources: ball_events (be) + innings (i)
     """
-
-    # If your columns differ, edit here (e.g., byes->byes_runs, leg_byes->lb_runs)
     sql = """
-      SELECT
-        SUM(CASE 
-              WHEN (wides = 0 AND no_balls = 0) 
-               AND ((runs_bat > 0) OR ((COALESCE(byes,0) + COALESCE(leg_byes,0)) > 0))
-            THEN 1 ELSE 0 END) AS scoring_shots,
-        SUM(CASE 
-              WHEN (wides = 0 AND no_balls = 0) 
-            THEN 1 ELSE 0 END) AS legal_balls
-      FROM balls
-      WHERE match_id = ?
-        AND LOWER(batting_team) = LOWER(?)
-        AND over BETWEEN 1 AND 6
+        SELECT 
+            COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND (
+                be.is_powerplay = 1
+                OR be.over_number BETWEEN 1 AND 6
+              )
     """
-
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
-    if not row:
-        return {"actual": None, "source": {"scoring_shots": 0, "legal_balls": 0}}
+    total_balls = (row["total_balls"] if row and row["total_balls"] is not None else 0)
+    scoring_shots = (row["scoring_shots"] if row and row["scoring_shots"] is not None else 0)
 
-    scoring_shots = row["scoring_shots"] or 0
-    legal_balls   = row["legal_balls"] or 0
-
-    actual_pct = None
-    if legal_balls > 0:
-        actual_pct = round(100.0 * float(scoring_shots) / float(legal_balls), 1)
-
-    return {"actual": actual_pct, "source": {"scoring_shots": scoring_shots, "legal_balls": legal_balls}}
+    actual_pct = round((scoring_shots / total_balls) * 100.0, 1) if total_balls > 0 else None
+    return {
+        "actual": actual_pct,
+        "source": {
+            "table": "ball_events+innings",
+            "powerplay_filter": "is_powerplay=1 OR over_number BETWEEN 1 AND 6",
+            "scoring_shots": scoring_shots,
+            "total_balls": total_balls
+        },
+        "definition": "scoring shot = runs > 0 (matches legacy)"
+    }
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -10090,10 +10078,10 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
     try:
         match, brasil_team = _get_match_and_brasil_team(conn, match_id)
 
-        # --- Compute our first KPI ---
+        # Compute KPI
         comp = _compute_bat_pp_scoring_shot_pct(conn, match_id, brasil_team)
 
-        # target/operator registry
+        # target/operator
         tconf = MEN_KPI_TARGETS["bat_pp_scoring_shot_pct"]
         operator = tconf.get("operator", ">=")
         target   = float(tconf.get("target", 45.0))
@@ -10109,7 +10097,7 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             target=target,
             actual=actual,
             ok=_compare(actual, operator, target),
-            notes="Scoring shot = runs off bat OR byes/leg-byes on legal deliveries (overs 1–6).",
+            notes=comp.get("definition"),
             source=comp.get("source", {})
         )
 

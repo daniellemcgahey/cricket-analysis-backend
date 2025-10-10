@@ -10089,7 +10089,7 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
 
         kpi_item = KPIItem(
             key="bat_pp_scoring_shot_pct",
-            label="Scoring Shot % (Batting • Powerplay)",
+            label="Scoring Shot %",
             unit="%",
             bucket="Batting",
             phase="Powerplay",
@@ -10097,7 +10097,6 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             target=target,
             actual=actual,
             ok=_compare(actual, operator, target),
-            notes=comp.get("definition"),
             source=comp.get("source", {})
         )
 

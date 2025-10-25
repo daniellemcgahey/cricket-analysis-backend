@@ -10782,45 +10782,28 @@ def _has_column(conn, table: str, col: str) -> bool:
 
 def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dict:
     """
-    Clean Hands % = clean / opportunities * 100 (match-wide).
-    - If `bfe.clean_hands` (0/1) exists → use AVG(clean_hands).
-    - Else if `bfe.is_misfield` (0/1) exists → treat opportunities = all bfe rows, clean = (1 - is_misfield).
-    - Else: return NA (schema doesn’t encode clean/misfield yet).
+    Clean Hands % (match-wide):
+      - Clean = count of bfe.event_id = 1  (clean pick up/stop)
+      - Opportunities = all fielding events for Brasil while bowling in this match
+        (Optionally, exclude catch/runout coded events; see commented WHERE filter)
     """
-    has_clean = _has_column(conn, "ball_fielding_events", "clean_hands")
-    has_misf  = _has_column(conn, "ball_fielding_events", "is_misfield")
-
-    base_join = """
+    row = conn.execute("""
+        SELECT
+          COUNT(*) AS opps,
+          SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) AS clean
         FROM ball_fielding_events bfe
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ?
-    """
+          -- If you prefer only ground-ball opportunities, uncomment and adjust:
+          -- AND bfe.event_id IN (1, /* add other ground/stop ids here if any */)
+    """, (match_id, brasil_team)).fetchone()
 
-    if has_clean:
-        row = conn.execute(f"""
-            SELECT
-              COUNT(*) AS opps,
-              SUM(CASE WHEN COALESCE(bfe.clean_hands,0)=1 THEN 1 ELSE 0 END) AS clean
-            {base_join}
-        """, (match_id, brasil_team)).fetchone()
-        opps = int(row["opps"] or 0); clean = int(row["clean"] or 0)
-        actual = round(clean * 100.0 / opps, 1) if opps > 0 else None
-        return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "mode": "clean_hands"}}
+    opps  = int(row["opps"] or 0)
+    clean = int(row["clean"] or 0)
+    actual = round(clean * 100.0 / opps, 1) if opps > 0 else "NA"
+    return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "event_clean_id": 1}}
 
-    if has_misf:
-        row = conn.execute(f"""
-            SELECT
-              COUNT(*) AS opps,
-              SUM(CASE WHEN COALESCE(bfe.is_misfield,0)=1 THEN 1 ELSE 0 END) AS misfields
-            {base_join}
-        """, (match_id, brasil_team)).fetchone()
-        opps = int(row["opps"] or 0); misf = int(row["misfields"] or 0)
-        clean = max(0, opps - misf)
-        actual = round(clean * 100.0 / opps, 1) if opps > 0 else None
-        return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "misfields": misf, "mode": "is_misfield"}}
-
-    return {"actual": "NA", "source": {"reason": "no clean/misfield column"}}
 
 
 def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -> dict:

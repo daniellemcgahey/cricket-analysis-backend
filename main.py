@@ -10870,7 +10870,7 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
         tBW = MEN_KPI_TARGETS["bowl_pp_wickets"]
         kpis.append(KPIItem(
             key="bowl_pp_wickets",
-            label="PP Wickets",
+            label="End Powerplay Wickets",
             unit="",
             bucket="Bowling",
             phase="Powerplay",
@@ -10886,7 +10886,7 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
         tBRC = MEN_KPI_TARGETS["bowl_pp_runs_conc"]
         kpis.append(KPIItem(
             key="bowl_pp_runs_conc",
-            label="PP Runs Conceded",
+            label="End Powerplay Runs Conceded",
             unit="",
             bucket="Bowling",
             phase="Powerplay",

@@ -75,6 +75,10 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bat_match_total_runs":           {"target": 155.0,  "operator": ">="},
     "bowl_pp_wickets":       {"target": 3.0,  "operator": ">="},  # Wickets in PP
     "bowl_pp_runs_conc":     {"target": 40.0, "operator": "<"}, 
+    "bowl_mid_dot_clusters":   {"target": 6.0,   "operator": ">="},  # clusters (streaks of ≥3 dots) in overs 6–14
+    "bowl_middle_wickets_cum": {"target": 6.0,   "operator": ">="},  # wickets by end of over 14 (overs 0–14)
+    "bowl_middle_runs_cum":    {"target": 100.0, "operator": "<="}, 
+    "bat_mid_overs10_14_no_wicket": {"target": "Yes", "operator": "=="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10518,6 +10522,99 @@ def _compute_bowl_pp_runs_conceded(conn, match_id: str, brasil_team: str) -> dic
     runs = int(row["runs_conceded"] or 0)
     return {"actual": float(runs), "source": {"runs_conceded": runs, "overs": "0-5"}}
 
+def _compute_bowl_mid_dot_clusters(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Middle Overs (6–14): count 'dot clusters' = streaks of ≥3 consecutive dot balls.
+    Dot = legal delivery with no run: runs=0 AND wides=0 AND no_balls=0.
+    Each streak of length >=3 counts as ONE cluster (non-overlapping).
+    """
+    rows = conn.execute("""
+        SELECT be.over_number,
+               be.ball_number,
+               CASE WHEN COALESCE(be.runs,0)=0
+                         AND COALESCE(be.wides,0)=0
+                         AND COALESCE(be.no_balls,0)=0
+                    THEN 1 ELSE 0 END AS is_dot
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND be.over_number BETWEEN 6 AND 14
+        ORDER BY be.over_number, be.ball_number
+    """, (match_id, brasil_team)).fetchall()
+
+    clusters = 0
+    run_len = 0
+    for r in rows:
+        if int(r["is_dot"]) == 1:
+            run_len += 1
+        else:
+            if run_len >= 3:
+                clusters += 1
+            run_len = 0
+    if run_len >= 3:
+        clusters += 1
+
+    return {"actual": float(clusters), "source": {"clusters": clusters, "overs": "6-14"}}
+
+
+def _compute_bowl_middle_wickets_cum(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • End of Middle Overs: wickets by end of over 14 (i.e., overs 0–14 inclusive).
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND be.over_number BETWEEN 0 AND 14
+          AND be.dismissal_type IS NOT NULL
+    """, (match_id, brasil_team)).fetchone()
+    wkts = int(row["wickets"] or 0)
+    return {"actual": float(wkts), "source": {"wickets": wkts, "overs": "0-14"}}
+
+
+def _compute_bowl_middle_runs_cum(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • End of Middle Overs: runs conceded by end of over 14 (overs 0–14).
+    Everything counts: runs + wides + no_balls + byes + leg_byes.
+    """
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs_conceded
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND be.over_number BETWEEN 0 AND 14
+    """, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs_conceded"] or 0)
+    return {"actual": float(runs), "source": {"runs_conceded": runs, "overs": "0-14"}}
+
+
+def _compute_bat_mid_overs10_14_no_wicket(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Batting • Middle Overs: no wicket falls in overs 10–14 inclusive (0-based).
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS wkts
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 10 AND 14
+          AND be.dismissal_type IS NOT NULL
+    """, (match_id, brasil_team)).fetchone()
+    wkts = int(row["wkts"] or 0)
+    actual = "Yes" if wkts == 0 else "No"
+    return {"actual": actual, "source": {"wickets_10_14": wkts}}
+
+
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -10799,6 +10896,71 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             ok=_compare(compBRC["actual"], tBRC.get("operator", "<"), float(tBRC.get("target", 40.0))),
             source=compBRC.get("source", {})
         ))
+
+        # --- Bowling • Middle: Dot clusters (≥3 consecutive dots) ---
+        compBDC = _compute_bowl_mid_dot_clusters(conn, match_id, brasil_team)
+        tBDC = MEN_KPI_TARGETS["bowl_mid_dot_clusters"]
+        kpis.append(KPIItem(
+            key="bowl_mid_dot_clusters",
+            label="Dot Clusters",
+            unit="",
+            bucket="Bowling",
+            phase="Middle Overs",
+            operator=tBDC.get("operator", ">="),
+            target=float(tBDC.get("target", 6.0)),
+            actual=compBDC["actual"],
+            ok=_compare(compBDC["actual"], tBDC.get("operator", ">="), float(tBDC.get("target", 6.0))),
+            source=compBDC.get("source", {})
+        ))
+
+        # --- Bowling • End Middle Over Wickets (0–14) ---
+        compBWM = _compute_bowl_middle_wickets_cum(conn, match_id, brasil_team)
+        tBWM = MEN_KPI_TARGETS["bowl_middle_wickets_cum"]
+        kpis.append(KPIItem(
+            key="bowl_middle_wickets_cum",
+            label="End Middle Over Wickets",
+            unit="",
+            bucket="Bowling",
+            phase="Middle Overs",
+            operator=tBWM.get("operator", ">="),
+            target=float(tBWM.get("target", 6.0)),
+            actual=compBWM["actual"],
+            ok=_compare(compBWM["actual"], tBWM.get("operator", ">="), float(tBWM.get("target", 6.0))),
+            source=compBWM.get("source", {})
+        ))
+
+        # --- Bowling • End Middle Over Runs Conceded (0–14) ---
+        compBMR = _compute_bowl_middle_runs_cum(conn, match_id, brasil_team)
+        tBMR = MEN_KPI_TARGETS["bowl_middle_runs_cum"]
+        kpis.append(KPIItem(
+            key="bowl_middle_runs_cum",
+            label="End Middle Over Runs",
+            unit="",
+            bucket="Bowling",
+            phase="Middle Overs",
+            operator=tBMR.get("operator", "<="),
+            target=float(tBMR.get("target", 100.0)),
+            actual=compBMR["actual"],
+            ok=_compare(compBMR["actual"], tBMR.get("operator", "<="), float(tBMR.get("target", 100.0))),
+            source=compBMR.get("source", {})
+        ))
+
+        # --- Batting • No wicket in overs 10–14 ---
+        compBNW = _compute_bat_mid_overs10_14_no_wicket(conn, match_id, brasil_team)
+        tBNW = MEN_KPI_TARGETS["bat_mid_overs10_14_no_wicket"]
+        kpis.append(KPIItem(
+            key="bat_mid_overs10_14_no_wicket",
+            label="No wicket (10–14)",
+            unit="",
+            bucket="Batting",
+            phase="Middle Overs",
+            operator=tBNW.get("operator", "=="),
+            target=tBNW.get("target", "Yes"),
+            actual=compBNW["actual"],
+            ok=_compare(compBNW["actual"], tBNW.get("operator", "=="), tBNW.get("target", "Yes")),
+            source=compBNW.get("source", {})
+        ))
+
 
 
         return MatchKPIsResponse(

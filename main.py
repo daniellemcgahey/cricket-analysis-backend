@@ -61,6 +61,10 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bat_pp_scoring_shot_pct": {"target": 45.0, "operator": ">="},
     "bat_middle_twos_count":   {"target": 15,   "operator": ">="},
     "bat_middle_scoring_shot_pct":{"target": 50.0, "operator": ">="},
+    "bat_pp_wickets_cum":          {"target": 2.0,  "operator": "<="},
+    "bat_pp_runs_cum":             {"target": 45.0, "operator": ">="},
+    "bat_middle_wickets_cum":      {"target": 4.0,  "operator": "<="},
+    "bat_middle_runs_cum":         {"target": 110.0,"operator": ">="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10127,6 +10131,81 @@ def _compute_bat_middle_scoring_shot_pct(conn: sqlite3.Connection, match_id: str
         }
     }
 
+def _compute_bat_pp_wickets_cum(conn, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Wickets lost by end of Powerplay (overs 1–6) while Brasil batting.
+    """
+    sql = """
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 1 AND 6)
+          AND be.dismissal_type IS NOT NULL
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    wickets = int(row["wickets"] or 0)
+    return {"actual": float(wickets), "source": {"table": "ball_events+innings", "wickets": wickets, "overs": "1-6"}}
+
+def _compute_bat_pp_runs_cum(conn, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Runs by end of Powerplay (overs 1–6) — everything counts: runs + wides + no_balls + byes + leg_byes.
+    """
+    sql = """
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 1 AND 6)
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs"] or 0)
+    return {"actual": float(runs), "source": {"table": "ball_events+innings", "runs": runs, "overs": "1-6"}}
+
+def _compute_bat_middle_wickets_cum(conn, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Wickets lost by end of Middle Overs (overs 1–16) while Brasil batting.
+    """
+    sql = """
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 1 AND 16
+          AND be.dismissal_type IS NOT NULL
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    wickets = int(row["wickets"] or 0)
+    return {"actual": float(wickets), "source": {"table": "ball_events+innings", "wickets": wickets, "overs": "1-16"}}
+
+def _compute_bat_middle_runs_cum(conn, match_id: str, brasil_team: str) -> Dict[str, Any]:
+    """
+    Runs by end of Middle Overs (overs 1–16) — everything counts.
+    """
+    sql = """
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 1 AND 16
+    """
+    row = conn.execute(sql, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs"] or 0)
+    return {"actual": float(runs), "source": {"table": "ball_events+innings", "runs": runs, "overs": "1-16"}}
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -10183,6 +10262,70 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             actual=comp3["actual"],
             ok=_compare(comp3["actual"], tconf3.get("operator", ">="), float(tconf3.get("target", 50.0))),
             source=comp3.get("source", {})
+        ))
+
+        # --- KPI 4: End Powerplay Wickets (Batting) ---
+        comp4 = _compute_bat_pp_wickets_cum(conn, match_id, brasil_team)
+        t4 = MEN_KPI_TARGETS["bat_pp_wickets_cum"]
+        kpis.append(KPIItem(
+            key="bat_pp_wickets_cum",
+            label="End Powerplay Wickets",
+            unit="",
+            bucket="Batting",
+            phase="Powerplay",
+            operator=t4.get("operator", "<="),
+            target=float(t4.get("target", 2.0)),
+            actual=comp4["actual"],
+            ok=_compare(comp4["actual"], t4.get("operator", "<="), float(t4.get("target", 2.0))),
+            source=comp4.get("source", {})
+        ))
+
+        # --- KPI 5: End Powerplay Runs (Batting) ---
+        comp5 = _compute_bat_pp_runs_cum(conn, match_id, brasil_team)
+        t5 = MEN_KPI_TARGETS["bat_pp_runs_cum"]
+        kpis.append(KPIItem(
+            key="bat_pp_runs_cum",
+            label="End Powerplay Runs",
+            unit="",
+            bucket="Batting",
+            phase="Powerplay",
+            operator=t5.get("operator", ">="),
+            target=float(t5.get("target", 45.0)),
+            actual=comp5["actual"],
+            ok=_compare(comp5["actual"], t5.get("operator", ">="), float(t5.get("target", 45.0))),
+            source=comp5.get("source", {})
+        ))
+
+        # --- KPI 6: End Middle Over Wickets (Batting) ---
+        comp6 = _compute_bat_middle_wickets_cum(conn, match_id, brasil_team)
+        t6 = MEN_KPI_TARGETS["bat_middle_wickets_cum"]
+        kpis.append(KPIItem(
+            key="bat_middle_wickets_cum",
+            label="End Middle Over Wickets",
+            unit="",
+            bucket="Batting",
+            phase="Middle Overs",
+            operator=t6.get("operator", "<="),
+            target=float(t6.get("target", 4.0)),
+            actual=comp6["actual"],
+            ok=_compare(comp6["actual"], t6.get("operator", "<="), float(t6.get("target", 4.0))),
+            source=comp6.get("source", {})
+        ))
+
+        # --- KPI 7: End Middle Over Run (Batting) ---
+        comp7 = _compute_bat_middle_runs_cum(conn, match_id, brasil_team)
+        t7 = MEN_KPI_TARGETS["bat_middle_runs_cum"]
+        kpis.append(KPIItem(
+            key="bat_middle_runs_cum",
+            label="End Middle Over Run",  # (using your exact label)
+            unit="",
+            bucket="Batting",
+            phase="Middle Overs",
+            operator=t7.get("operator", ">="),
+            target=float(t7.get("target", 110.0)),
+            actual=comp7["actual"],
+            ok=_compare(comp7["actual"], t7.get("operator", ">="), float(t7.get("target", 110.0))),
+            source=comp7.get("source", {})
         ))
 
         return MatchKPIsResponse(

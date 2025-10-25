@@ -10419,13 +10419,15 @@ def _compute_bat_match_total_runs(conn, match_id: str, brasil_team: str) -> dict
 def _compute_bat_match_top4_50_sr100(conn, match_id: str, brasil_team: str) -> dict:
     """
     One of the top 4 batters (by first ball faced) scores 50+ with SR > 100.
-    - Runs off the bat: be.runs
-    - Balls faced: legal deliveries faced by that batter (wides=0 AND no_balls=0)
-    - Batting order inferred by the earliest (over_number, ball_number) the batter appears on strike.
-    - Uses flexible batter key: COALESCE of common id/name columns. Adjust if your schema differs.
+    Schema assumptions (yours):
+      - ball_events: batter_id, runs, wides, no_balls, over_number (0..19), ball_number, innings_id
+      - innings: innings_id, match_id, batting_team
+    Rules:
+      - Runs off bat = be.runs
+      - Balls faced = legal balls (wides=0 AND no_balls=0) faced by that batter
+      - Batting order inferred by earliest (over_number, ball_number) faced
     """
-
-    # Find Brasil innings id
+    # Brasil innings
     inn = conn.execute("""
         SELECT i.innings_id
         FROM innings i
@@ -10436,36 +10438,25 @@ def _compute_bat_match_top4_50_sr100(conn, match_id: str, brasil_team: str) -> d
         return {"actual": None, "source": {"reason": "Brasil innings not found"}}
     innings_id = inn["innings_id"]
 
-    # Flexible batter key: rename these if your schema uses different columns
-    # (Keep them all in COALESCE order of preference)
-    batter_key_expr = """
-        COALESCE(
-            CAST(be.batter_id AS TEXT),
-            CAST(be.striker_id AS TEXT),
-            be.batter_name,
-            be.striker
-        )
-    """
-
-    # Aggregate per batter: first appearance (order), runs off bat, balls faced (legal)
-    rows = conn.execute(f"""
+    rows = conn.execute("""
         SELECT
-            {batter_key_expr}                  AS batter_key,
-            MIN(be.over_number * 100 + be.ball_number) AS first_seq,
-            SUM(COALESCE(be.runs,0))          AS runs_bat,
-            SUM(CASE WHEN COALESCE(be.wides,0)=0 AND COALESCE(be.no_balls,0)=0 THEN 1 ELSE 0 END)
-                                               AS balls_faced
+            be.batter_id                                           AS batter_key,
+            MIN(be.over_number * 100 + be.ball_number)             AS first_seq,
+            SUM(COALESCE(be.runs,0))                               AS runs_bat,
+            SUM(
+                CASE WHEN COALESCE(be.wides,0)=0 AND COALESCE(be.no_balls,0)=0
+                     THEN 1 ELSE 0 END
+            )                                                      AS balls_faced
         FROM ball_events be
         WHERE be.innings_id = ?
-          AND {batter_key_expr} IS NOT NULL
-        GROUP BY {batter_key_expr}
+          AND be.batter_id IS NOT NULL
+        GROUP BY be.batter_id
         HAVING balls_faced > 0 OR runs_bat > 0
     """, (innings_id,)).fetchall()
 
     if not rows:
         return {"actual": "No", "source": {"batters": 0}}
 
-    # Convert to simple dicts and sort by first_seq to infer batting order
     batters = []
     for r in rows:
         runs_bat = int(r["runs_bat"] or 0)
@@ -10485,13 +10476,7 @@ def _compute_bat_match_top4_50_sr100(conn, match_id: str, brasil_team: str) -> d
     ok_cnt = sum(1 for b in top4 if b["runs_bat"] >= 50 and b["sr"] > 100.0)
     actual = "Yes" if ok_cnt >= 1 else "No"
 
-    return {
-        "actual": actual,
-        "source": {
-            "ok_cnt_top4": ok_cnt,
-            "top4": top4  # handy for debugging; remove if you prefer leaner payloads
-        }
-    }
+    return {"actual": actual, "source": {"ok_cnt_top4": ok_cnt}}
 
 
 

@@ -68,6 +68,11 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bat_match_bat_20_overs":        {"target": "Yes", "operator": "=="},  # Bat 20 overs?
     "bat_death_scoring_shot_pct":    {"target": 80.0, "operator": ">="},   # Scoring Shot % (16–20)
     "bat_death_runs":                {"target": 50.0, "operator": ">="},   # Runs in overs 16–20 (everything counts)
+    "bat_match_top4_50_sr100":        {"target": "Yes",  "operator": "=="},
+    "bat_match_partnership_ge60":     {"target": "Yes",  "operator": "=="},
+    "bat_match_two_partnerships_ge40":{"target": "Yes",  "operator": "=="},
+    "bat_match_scoring_shot_pct":     {"target": 45.0,   "operator": ">="},
+    "bat_match_total_runs":           {"target": 155.0,  "operator": ">="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10346,6 +10351,149 @@ def _compute_bat_death_runs(conn, match_id: str, brasil_team: str) -> dict:
     runs = int(row["runs"] or 0)
     return {"actual": float(runs), "source": {"runs": runs, "overs": "16-20"}}
 
+def _compute_bat_match_partnership_ge60(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Partnership table is assumed to have: partnerships(innings_id, runs).
+    We check for any partnership with runs >= 60 in Brasil innings.
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS n60
+        FROM partnerships p
+        JOIN innings i ON p.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND COALESCE(p.runs,0) >= 60
+    """, (match_id, brasil_team)).fetchone()
+    n60 = int(row["n60"] or 0)
+    actual = "Yes" if n60 >= 1 else "No"
+    return {"actual": actual, "source": {"partnerships_ge60": n60}}
+
+
+def _compute_bat_match_two_partnerships_ge40(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Count partnerships with runs >= 40 (the >=60 also counts).
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS n40
+        FROM partnerships p
+        JOIN innings i ON p.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND COALESCE(p.runs,0) >= 40
+    """, (match_id, brasil_team)).fetchone()
+    n40 = int(row["n40"] or 0)
+    actual = "Yes" if n40 >= 2 else "No"
+    return {"actual": actual, "source": {"partnerships_ge40": n40}}
+
+def _compute_bat_match_scoring_shot_pct(conn, match_id: str, brasil_team: str) -> dict:
+    row = conn.execute("""
+        SELECT 
+            COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+    """, (match_id, brasil_team)).fetchone()
+    total_balls   = int(row["total_balls"] or 0)
+    scoring_shots = int(row["scoring_shots"] or 0)
+    actual_pct = round((scoring_shots / total_balls) * 100.0, 1) if total_balls > 0 else None
+    return {"actual": actual_pct, "source": {"scoring_shots": scoring_shots, "total_balls": total_balls}}
+
+def _compute_bat_match_total_runs(conn, match_id: str, brasil_team: str) -> dict:
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS total_runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+    """, (match_id, brasil_team)).fetchone()
+    total_runs = int(row["total_runs"] or 0)
+    return {"actual": float(total_runs), "source": {"total_runs": total_runs}}
+
+def _compute_bat_match_top4_50_sr100(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    One of the top 4 batters (by first ball faced) scores 50+ with SR > 100.
+    - Runs off the bat: be.runs
+    - Balls faced: legal deliveries faced by that batter (wides=0 AND no_balls=0)
+    - Batting order inferred by the earliest (over_number, ball_number) the batter appears on strike.
+    - Uses flexible batter key: COALESCE of common id/name columns. Adjust if your schema differs.
+    """
+
+    # Find Brasil innings id
+    inn = conn.execute("""
+        SELECT i.innings_id
+        FROM innings i
+        WHERE i.match_id = ? AND i.batting_team = ?
+        LIMIT 1
+    """, (match_id, brasil_team)).fetchone()
+    if not inn:
+        return {"actual": None, "source": {"reason": "Brasil innings not found"}}
+    innings_id = inn["innings_id"]
+
+    # Flexible batter key: rename these if your schema uses different columns
+    # (Keep them all in COALESCE order of preference)
+    batter_key_expr = """
+        COALESCE(
+            CAST(be.batter_id AS TEXT),
+            CAST(be.striker_id AS TEXT),
+            be.batter_name,
+            be.striker
+        )
+    """
+
+    # Aggregate per batter: first appearance (order), runs off bat, balls faced (legal)
+    rows = conn.execute(f"""
+        SELECT
+            {batter_key_expr}                  AS batter_key,
+            MIN(be.over_number * 100 + be.ball_number) AS first_seq,
+            SUM(COALESCE(be.runs,0))          AS runs_bat,
+            SUM(CASE WHEN COALESCE(be.wides,0)=0 AND COALESCE(be.no_balls,0)=0 THEN 1 ELSE 0 END)
+                                               AS balls_faced
+        FROM ball_events be
+        WHERE be.innings_id = ?
+          AND {batter_key_expr} IS NOT NULL
+        GROUP BY {batter_key_expr}
+        HAVING balls_faced > 0 OR runs_bat > 0
+    """, (innings_id,)).fetchall()
+
+    if not rows:
+        return {"actual": "No", "source": {"batters": 0}}
+
+    # Convert to simple dicts and sort by first_seq to infer batting order
+    batters = []
+    for r in rows:
+        runs_bat = int(r["runs_bat"] or 0)
+        balls_faced = int(r["balls_faced"] or 0)
+        sr = (runs_bat * 100.0 / balls_faced) if balls_faced > 0 else 0.0
+        batters.append({
+            "batter_key": r["batter_key"],
+            "first_seq": int(r["first_seq"] or 10_000),
+            "runs_bat": runs_bat,
+            "balls_faced": balls_faced,
+            "sr": round(sr, 1)
+        })
+
+    batters.sort(key=lambda x: x["first_seq"])
+    top4 = batters[:4]
+
+    ok_cnt = sum(1 for b in top4 if b["runs_bat"] >= 50 and b["sr"] > 100.0)
+    actual = "Yes" if ok_cnt >= 1 else "No"
+
+    return {
+        "actual": actual,
+        "source": {
+            "ok_cnt_top4": ok_cnt,
+            "top4": top4  # handy for debugging; remove if you prefer leaner payloads
+        }
+    }
+
+
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -10515,6 +10663,87 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             ok=_compare(compDR["actual"], tDR.get("operator", ">="), float(tDR.get("target", 50.0))),
             source=compDR.get("source", {})
         ))
+
+        # --- KPI: Top 4 has 50+ with SR>100 (Batting • Match) ---
+        compT4 = _compute_bat_match_top4_50_sr100(conn, match_id, brasil_team)
+        tT4 = MEN_KPI_TARGETS["bat_match_top4_50_sr100"]
+        kpis.append(KPIItem(
+            key="bat_match_top4_50_sr100",
+            label="Top 4: 50+ @ SR>100",
+            unit="",
+            bucket="Batting",
+            phase="Match",
+            operator=tT4.get("operator", "=="),
+            target=tT4.get("target", "Yes"),
+            actual=compT4["actual"],
+            ok=_compare(compT4["actual"], tT4.get("operator", "=="), tT4.get("target", "Yes")),
+            source=compT4.get("source", {})
+        ))
+
+        # --- KPI: ≥1 partnership ≥60 (Batting • Match) ---
+        compP60 = _compute_bat_match_partnership_ge60(conn, match_id, brasil_team)
+        tP60 = MEN_KPI_TARGETS["bat_match_partnership_ge60"]
+        kpis.append(KPIItem(
+            key="bat_match_partnership_ge60",
+            label="1 Partnership ≥60",
+            unit="",
+            bucket="Batting",
+            phase="Match",
+            operator=tP60.get("operator", "=="),
+            target=tP60.get("target", "Yes"),
+            actual=compP60["actual"],
+            ok=_compare(compP60["actual"], tP60.get("operator", "=="), tP60.get("target", "Yes")),
+            source=compP60.get("source", {})
+        ))
+
+        # --- KPI: ≥2 partnerships ≥40 (Batting • Match) ---
+        compP40x2 = _compute_bat_match_two_partnerships_ge40(conn, match_id, brasil_team)
+        tP40x2 = MEN_KPI_TARGETS["bat_match_two_partnerships_ge40"]
+        kpis.append(KPIItem(
+            key="bat_match_two_partnerships_ge40",
+            label="2 Partnerships ≥40",
+            unit="",
+            bucket="Batting",
+            phase="Match",
+            operator=tP40x2.get("operator", "=="),
+            target=tP40x2.get("target", "Yes"),
+            actual=compP40x2["actual"],
+            ok=_compare(compP40x2["actual"], tP40x2.get("operator", "=="), tP40x2.get("target", "Yes")),
+            source=compP40x2.get("source", {})
+        ))
+
+        # --- KPI: Match Scoring Shot % (Batting • Match) ---
+        compMSS = _compute_bat_match_scoring_shot_pct(conn, match_id, brasil_team)
+        tMSS = MEN_KPI_TARGETS["bat_match_scoring_shot_pct"]
+        kpis.append(KPIItem(
+            key="bat_match_scoring_shot_pct",
+            label="Scoring Shot %",
+            unit="%",
+            bucket="Batting",
+            phase="Match",
+            operator=tMSS.get("operator", ">="),
+            target=float(tMSS.get("target", 45.0)),
+            actual=compMSS["actual"],
+            ok=_compare(compMSS["actual"], tMSS.get("operator", ">="), float(tMSS.get("target", 45.0))),
+            source=compMSS.get("source", {})
+        ))
+
+        # --- KPI: Total Match Runs (Batting • Match) ---
+        compTR = _compute_bat_match_total_runs(conn, match_id, brasil_team)
+        tTR = MEN_KPI_TARGETS["bat_match_total_runs"]
+        kpis.append(KPIItem(
+            key="bat_match_total_runs",
+            label="Total Runs",
+            unit="",
+            bucket="Batting",
+            phase="Match",
+            operator=tTR.get("operator", ">="),
+            target=float(tTR.get("target", 155.0)),
+            actual=compTR["actual"],
+            ok=_compare(compTR["actual"], tTR.get("operator", ">="), float(tTR.get("target", 155.0))),
+            source=compTR.get("source", {})
+        ))
+
 
         return MatchKPIsResponse(
             match={

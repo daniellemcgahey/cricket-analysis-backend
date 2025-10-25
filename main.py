@@ -10781,12 +10781,6 @@ def _has_column(conn, table: str, col: str) -> bool:
 
 
 def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dict:
-    """
-    Clean Hands % (match-wide):
-      - Clean = count of bfe.event_id = 1  (clean pick up/stop)
-      - Opportunities = all fielding events for Brasil while bowling in this match
-        (Optionally, exclude catch/runout coded events; see commented WHERE filter)
-    """
     row = conn.execute("""
         SELECT
           COUNT(*) AS opps,
@@ -10795,8 +10789,6 @@ def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dic
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ? AND i.bowling_team = ?
-          -- If you prefer only ground-ball opportunities, uncomment and adjust:
-          -- AND bfe.event_id IN (1, /* add other ground/stop ids here if any */)
     """, (match_id, brasil_team)).fetchone()
 
     opps  = int(row["opps"] or 0)
@@ -10806,20 +10798,10 @@ def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dic
 
 
 
+
 def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -> dict:
-    """
-    Catching % on NON half-chances only (match-wide).
-    - Chances = event_id IN (2,6,7)
-      * 2 = catch taken
-      * 6,7 = catchable chance (from your earlier mapping)
-    - If `bfe.is_half_chance` exists, restrict to is_half_chance=0.
-      Otherwise, compute on all chances and return “NA” when chances==0.
-    """
     has_half = _has_column(conn, "ball_fielding_events", "is_half_chance")
-
-    # Build filters
     extra_half_filter = "AND COALESCE(bfe.is_half_chance,0)=0" if has_half else ""
-
     row = conn.execute(f"""
         SELECT
           SUM(CASE WHEN bfe.event_id IN (2,6,7) THEN 1 ELSE 0 END) AS chances,
@@ -10833,13 +10815,11 @@ def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -
 
     chances = int(row["chances"] or 0)
     taken   = int(row["taken"] or 0)
-
     if chances == 0:
-        # No (non-half) chances → NA (don’t punish)
         return {"actual": "NA", "source": {"chances": 0, "taken": 0, "half_chance_filter": has_half}}
-
     pct = round(taken * 100.0 / chances, 1)
     return {"actual": pct, "source": {"chances": chances, "taken": taken, "half_chance_filter": has_half}}
+
 
 
 def _compute_field_assists_placeholder(conn, match_id: str, brasil_team: str) -> dict:

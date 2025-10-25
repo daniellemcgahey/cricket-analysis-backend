@@ -9997,17 +9997,42 @@ def generate_team_pdf_report(data: dict):
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {k: row[k] for k in row.keys()}
 
-def _compare(actual: Optional[float], operator: str, target: float) -> Optional[bool]:
-    if actual is None or math.isnan(actual):
+def _to_number(x):
+    try:
+        if x is None:
+            return None
+        if isinstance(x, (int, float)):
+            return float(x)
+        return float(str(x).strip())
+    except (ValueError, TypeError):
         return None
-    if operator == ">=": return actual >= target
-    if operator == ">":  return actual >  target
-    if operator == "==": return actual == target
-    if operator == "<=": return actual <= target
-    if operator == "<":  return actual <  target
-    if operator == "!=": return actual != target
-    # default
-    return actual >= target
+
+def _compare(actual, operator, target):
+    # Treat NA/N/A/Not Applicable as not scored
+    if isinstance(actual, str) and actual.strip().lower() in {"na", "n/a", "not applicable"}:
+        return None
+
+    a_num = _to_number(actual)
+    t_num = _to_number(target)
+
+    # Numeric comparison when both are numeric
+    if a_num is not None and t_num is not None:
+        if operator == ">=": return a_num >= t_num
+        if operator == ">":  return a_num >  t_num
+        if operator == "==": return a_num == t_num
+        if operator == "<=": return a_num <= t_num
+        if operator == "<":  return a_num <  t_num
+        if operator == "!=": return a_num != t_num
+        return a_num >= t_num
+
+    # String equality/inequality (e.g., "Yes"/"No")
+    if operator in {"==", "!="}:
+        a_str = "" if actual is None else str(actual)
+        t_str = "" if target is None else str(target)
+        return (a_str == t_str) if operator == "==" else (a_str != t_str)
+
+    # Non-numeric with ordering operator → not scored
+    return None
 
 # ---------- Utility: identify Brasil team string for a match ----------
 def _get_match_and_brasil_team(conn: sqlite3.Connection, match_id: str) -> tuple[Dict[str, Any], str]:

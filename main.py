@@ -84,6 +84,11 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bowl_match_wides":          {"target": 5.0,  "operator": "<="},   # total wides conceded
     "bowl_match_six_dot_streaks":{"target": 2.0,  "operator": ">="},   # streaks of ≥6 consecutive dots
     "bowl_match_start_end_boundaries": {"target": 5.0, "operator": "<"},
+    "field_run_outs_taken":      {"target": 1.0,   "operator": ">="},
+    "field_mid_runout_chances":  {"target": 1.0,   "operator": ">="},
+    "field_clean_hands_pct":     {"target": 78.0,  "operator": ">="},   # %
+    "field_catching_nonhalf_pct":{"target": 100.0, "operator": "=="},   # %
+    "field_assists":             {"target": 2.0,   "operator": ">="},
 }
 
 # ---------- Pydantic response models ----------
@@ -10736,6 +10741,132 @@ def _compute_bowl_match_start_end_boundaries(conn, match_id: str, brasil_team: s
 
     return {"actual": float(count_overs), "source": {"overs_flagged": count_overs}}
 
+def _compute_field_run_outs_taken(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Run outs taken by Brasil in the field (match-wide).
+    Old mapping: event_id = 3 is a run-out taken.
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS taken
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 3
+    """, (match_id, brasil_team)).fetchone()
+    taken = int(row["taken"] or 0)
+    return {"actual": float(taken), "source": {"run_outs_taken": taken}}
+
+
+def _compute_field_mid_runout_chances(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Middle overs (6–14): total run-out chances while fielding.
+    Old mapping: chances = event_id IN (3, 8)  (3=taken; 8=chance only)
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS chances
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+          AND be.over_number BETWEEN 6 AND 14
+          AND bfe.event_id IN (3, 8)
+    """, (match_id, brasil_team)).fetchone()
+    chances = int(row["chances"] or 0)
+    return {"actual": float(chances), "source": {"runout_chances_6_14": chances}}
+
+
+def _has_column(conn, table: str, col: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == col for r in rows)
+
+
+def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Clean Hands % = clean / opportunities * 100 (match-wide).
+    - If `bfe.clean_hands` (0/1) exists → use AVG(clean_hands).
+    - Else if `bfe.is_misfield` (0/1) exists → treat opportunities = all bfe rows, clean = (1 - is_misfield).
+    - Else: return NA (schema doesn’t encode clean/misfield yet).
+    """
+    has_clean = _has_column(conn, "ball_fielding_events", "clean_hands")
+    has_misf  = _has_column(conn, "ball_fielding_events", "is_misfield")
+
+    base_join = """
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """
+
+    if has_clean:
+        row = conn.execute(f"""
+            SELECT
+              COUNT(*) AS opps,
+              SUM(CASE WHEN COALESCE(bfe.clean_hands,0)=1 THEN 1 ELSE 0 END) AS clean
+            {base_join}
+        """, (match_id, brasil_team)).fetchone()
+        opps = int(row["opps"] or 0); clean = int(row["clean"] or 0)
+        actual = round(clean * 100.0 / opps, 1) if opps > 0 else None
+        return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "mode": "clean_hands"}}
+
+    if has_misf:
+        row = conn.execute(f"""
+            SELECT
+              COUNT(*) AS opps,
+              SUM(CASE WHEN COALESCE(bfe.is_misfield,0)=1 THEN 1 ELSE 0 END) AS misfields
+            {base_join}
+        """, (match_id, brasil_team)).fetchone()
+        opps = int(row["opps"] or 0); misf = int(row["misfields"] or 0)
+        clean = max(0, opps - misf)
+        actual = round(clean * 100.0 / opps, 1) if opps > 0 else None
+        return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "misfields": misf, "mode": "is_misfield"}}
+
+    return {"actual": "NA", "source": {"reason": "no clean/misfield column"}}
+
+
+def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Catching % on NON half-chances only (match-wide).
+    - Chances = event_id IN (2,6,7)
+      * 2 = catch taken
+      * 6,7 = catchable chance (from your earlier mapping)
+    - If `bfe.is_half_chance` exists, restrict to is_half_chance=0.
+      Otherwise, compute on all chances and return “NA” when chances==0.
+    """
+    has_half = _has_column(conn, "ball_fielding_events", "is_half_chance")
+
+    # Build filters
+    extra_half_filter = "AND COALESCE(bfe.is_half_chance,0)=0" if has_half else ""
+
+    row = conn.execute(f"""
+        SELECT
+          SUM(CASE WHEN bfe.event_id IN (2,6,7) THEN 1 ELSE 0 END) AS chances,
+          SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END)        AS taken
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+          {extra_half_filter}
+    """, (match_id, brasil_team)).fetchone()
+
+    chances = int(row["chances"] or 0)
+    taken   = int(row["taken"] or 0)
+
+    if chances == 0:
+        # No (non-half) chances → NA (don’t punish)
+        return {"actual": "NA", "source": {"chances": 0, "taken": 0, "half_chance_filter": has_half}}
+
+    pct = round(taken * 100.0 / chances, 1)
+    return {"actual": pct, "source": {"chances": chances, "taken": taken, "half_chance_filter": has_half}}
+
+
+def _compute_field_assists_placeholder(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Placeholder until your DB captures assists explicitly (e.g., bfe.is_assist = 1).
+    Returns NA so it renders and doesn't affect pass rate.
+    """
+    return {"actual": "NA", "source": {"reason": "assist flag not available yet"}}
+
+
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -11161,6 +11292,87 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             ok=_compare(compBSE["actual"], tBSE.get("operator", "<"), float(tBSE.get("target", 5.0))),
             source=compBSE.get("source", {})
         ))
+
+        # --- Fielding • Run Outs Taken (>=1) ---
+        compFRO = _compute_field_run_outs_taken(conn, match_id, brasil_team)
+        tFRO = MEN_KPI_TARGETS["field_run_outs_taken"]
+        kpis.append(KPIItem(
+            key="field_run_outs_taken",
+            label="Run Outs",
+            unit="",
+            bucket="Fielding",
+            phase="Match",
+            operator=tFRO.get("operator", ">="),
+            target=float(tFRO.get("target", 1.0)),
+            actual=compFRO["actual"],
+            ok=_compare(compFRO["actual"], tFRO.get("operator", ">="), float(tFRO.get("target", 1.0))),
+            source=compFRO.get("source", {})
+        ))
+
+        # --- Fielding • Middle Run-Out Chance (>=1) ---
+        compFRM = _compute_field_mid_runout_chances(conn, match_id, brasil_team)
+        tFRM = MEN_KPI_TARGETS["field_mid_runout_chances"]
+        kpis.append(KPIItem(
+            key="field_mid_runout_chances",
+            label="Middle Over Run-Out Chance",
+            unit="",
+            bucket="Fielding",
+            phase="Match",
+            operator=tFRM.get("operator", ">="),
+            target=float(tFRM.get("target", 1.0)),
+            actual=compFRM["actual"],
+            ok=_compare(compFRM["actual"], tFRM.get("operator", ">="), float(tFRM.get("target", 1.0))),
+            source=compFRM.get("source", {})
+        ))
+
+        # --- Fielding • Clean Hands % (>=78%) ---
+        compFCH = _compute_field_clean_hands_pct(conn, match_id, brasil_team)
+        tFCH = MEN_KPI_TARGETS["field_clean_hands_pct"]
+        kpis.append(KPIItem(
+            key="field_clean_hands_pct",
+            label="Clean Hands %",
+            unit="%",
+            bucket="Fielding",
+            phase="Match",
+            operator=tFCH.get("operator", ">="),
+            target=float(tFCH.get("target", 78.0)),
+            actual=compFCH["actual"],
+            ok=_compare(compFCH["actual"], tFCH.get("operator", ">="), float(tFCH.get("target", 78.0))),
+            source=compFCH.get("source", {})
+        ))
+
+        # --- Fielding • Catching % (Non-half chances, target 100%) ---
+        compFCA = _compute_field_catching_nonhalf_pct(conn, match_id, brasil_team)
+        tFCA = MEN_KPI_TARGETS["field_catching_nonhalf_pct"]
+        kpis.append(KPIItem(
+            key="field_catching_nonhalf_pct",
+            label="Catching % (Non-half)",
+            unit="%",
+            bucket="Fielding",
+            phase="Match",
+            operator=tFCA.get("operator", "=="),
+            target=float(tFCA.get("target", 100.0)),
+            actual=compFCA["actual"],
+            ok=_compare(compFCA["actual"], tFCA.get("operator", "=="), float(tFCA.get("target", 100.0))),
+            source=compFCA.get("source", {})
+        ))
+
+        # --- Fielding • Assists (placeholder, target >= 2) ---
+        compFAS = _compute_field_assists_placeholder(conn, match_id, brasil_team)
+        tFAS = MEN_KPI_TARGETS["field_assists"]
+        kpis.append(KPIItem(
+            key="field_assists",
+            label="Fielding Assists",
+            unit="",
+            bucket="Fielding",
+            phase="Match",
+            operator=tFAS.get("operator", ">="),
+            target=float(tFAS.get("target", 2.0)),
+            actual=compFAS["actual"],  # "NA"
+            ok=_compare(compFAS["actual"], tFAS.get("operator", ">="), float(tFAS.get("target", 2.0))),  # -> None
+            source=compFAS.get("source", {})
+        ))
+
 
         return MatchKPIsResponse(
             match={

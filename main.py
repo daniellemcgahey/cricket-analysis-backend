@@ -10756,31 +10756,49 @@ def _compute_field_run_outs_taken(conn, match_id: str, brasil_team: str) -> dict
     taken = int(row["taken"] or 0)
     return {"actual": float(taken), "source": {"run_outs_taken": taken}}
 
+def _has_any_clean_fielding_event(conn, match_id: str, brasil_team: str) -> bool:
+    """
+    Returns True if there is at least one clean fielding event (event_id=1)
+    for Brasil while bowling in this match; otherwise False.
+    """
+    row = conn.execute("""
+        SELECT 1
+        FROM ball_fielding_events bfe
+        JOIN ball_events be ON bfe.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ? AND bfe.event_id = 1
+        LIMIT 1
+    """, (match_id, brasil_team)).fetchone()
+    return row is not None
 
 def _compute_field_mid_runout_chances(conn, match_id: str, brasil_team: str) -> dict:
-    """
-    Middle overs (6–14): total run-out chances while fielding.
-    Old mapping: chances = event_id IN (3, 8)  (3=taken; 8=chance only)
-    """
+    # Assumption gate: no clean events → we assume only fall-of-wicket data is present
+    #                 → middle over run-out chance = 0
+    if not _has_any_clean_fielding_event(conn, match_id, brasil_team):
+        return {"actual": 0.0, "source": {"reason": "no fielding data (no clean events)"}}
+
     row = conn.execute("""
         SELECT COUNT(*) AS chances
         FROM ball_fielding_events bfe
         JOIN ball_events be ON bfe.ball_id = be.ball_id
         JOIN innings i ON be.innings_id = i.innings_id
-        WHERE i.match_id = ? AND i.bowling_team = ?
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
           AND be.over_number BETWEEN 6 AND 14
-          AND bfe.event_id IN (3, 8)
+          AND bfe.event_id IN (3, 8)   -- 3=taken run-out, 8=run-out chance
     """, (match_id, brasil_team)).fetchone()
     chances = int(row["chances"] or 0)
     return {"actual": float(chances), "source": {"runout_chances_6_14": chances}}
-
 
 def _has_column(conn, table: str, col: str) -> bool:
     rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     return any(r[1] == col for r in rows)
 
-
 def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dict:
+    # Assumption gate: no clean events → treat as no fielding data
+    if not _has_any_clean_fielding_event(conn, match_id, brasil_team):
+        return {"actual": "NA", "source": {"reason": "no fielding data (no clean events)"}}
+
     row = conn.execute("""
         SELECT
           COUNT(*) AS opps,
@@ -10796,12 +10814,14 @@ def _compute_field_clean_hands_pct(conn, match_id: str, brasil_team: str) -> dic
     actual = round(clean * 100.0 / opps, 1) if opps > 0 else "NA"
     return {"actual": actual, "source": {"opportunities": opps, "clean": clean, "event_clean_id": 1}}
 
-
-
-
 def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -> dict:
+    # Assumption gate: no clean events → treat catching as NA
+    if not _has_any_clean_fielding_event(conn, match_id, brasil_team):
+        return {"actual": "NA", "source": {"reason": "no fielding data (no clean events)"}}
+
     has_half = _has_column(conn, "ball_fielding_events", "is_half_chance")
     extra_half_filter = "AND COALESCE(bfe.is_half_chance,0)=0" if has_half else ""
+
     row = conn.execute(f"""
         SELECT
           SUM(CASE WHEN bfe.event_id IN (2,6,7) THEN 1 ELSE 0 END) AS chances,
@@ -10820,15 +10840,12 @@ def _compute_field_catching_nonhalf_pct(conn, match_id: str, brasil_team: str) -
     pct = round(taken * 100.0 / chances, 1)
     return {"actual": pct, "source": {"chances": chances, "taken": taken, "half_chance_filter": has_half}}
 
-
-
 def _compute_field_assists_placeholder(conn, match_id: str, brasil_team: str) -> dict:
     """
     Placeholder until your DB captures assists explicitly (e.g., bfe.is_assist = 1).
     Returns NA so it renders and doesn't affect pass rate.
     """
     return {"actual": "NA", "source": {"reason": "assist flag not available yet"}}
-
 
 
 # ---------- Endpoint: Men KPIs for a match ----------

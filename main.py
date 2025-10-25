@@ -65,21 +65,23 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bat_pp_runs_cum":             {"target": 45.0, "operator": ">="},
     "bat_middle_wickets_cum":      {"target": 4.0,  "operator": "<="},
     "bat_middle_runs_cum":         {"target": 110.0,"operator": ">="},
+    "bat_match_bat_20_overs":        {"target": "Yes", "operator": "=="},  # Bat 20 overs?
+    "bat_death_scoring_shot_pct":    {"target": 80.0, "operator": ">="},   # Scoring Shot % (16–20)
+    "bat_death_runs":                {"target": 50.0, "operator": ">="},   # Runs in overs 16–20 (everything counts)
 }
 
 # ---------- Pydantic response models ----------
 class KPIItem(BaseModel):
     key: str
     label: str
-    unit: str = "%"
+    unit: str = ""
     bucket: str = "Batting"
-    phase: str = "Powerplay"
-    operator: str = ">="
-    target: float
-    actual: Optional[float] = None
+    phase: str = "Match"
+    operator: str = "=="
+    target: float | str
+    actual: float | str | None = None
     ok: Optional[bool] = None
-    notes: Optional[str] = None
-    source: Optional[Dict[str, Any]] = None
+    source: Optional[dict] = None
 
 class MatchKPIsResponse(BaseModel):
     match: Dict[str, Any]
@@ -10058,7 +10060,7 @@ def _compute_bat_pp_scoring_shot_pct(conn: sqlite3.Connection, match_id: str, br
           AND i.batting_team = ?
           AND (
                 be.is_powerplay = 1
-                OR be.over_number BETWEEN 1 AND 6
+                OR be.over_number BETWEEN 0 AND 5
               )
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
@@ -10095,7 +10097,7 @@ def _compute_bat_middle_twos_count(conn: sqlite3.Connection, match_id: str, bras
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND be.over_number BETWEEN 7 AND 15
+          AND be.over_number BETWEEN 6 AND 14
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     twos = int(row["twos"] or 0)
@@ -10115,7 +10117,7 @@ def _compute_bat_middle_scoring_shot_pct(conn: sqlite3.Connection, match_id: str
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND be.over_number BETWEEN 7 AND 15
+          AND be.over_number BETWEEN 6 AND 14
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     total_balls   = (row["total_balls"]   if row and row["total_balls"]   is not None else 0)
@@ -10141,7 +10143,7 @@ def _compute_bat_pp_wickets_cum(conn, match_id: str, brasil_team: str) -> Dict[s
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 1 AND 6)
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 0 AND 5)
           AND be.dismissal_type IS NOT NULL
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
@@ -10163,7 +10165,7 @@ def _compute_bat_pp_runs_cum(conn, match_id: str, brasil_team: str) -> Dict[str,
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 1 AND 6)
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 0 AND 5)
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     runs = int(row["runs"] or 0)
@@ -10179,12 +10181,12 @@ def _compute_bat_middle_wickets_cum(conn, match_id: str, brasil_team: str) -> Di
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND be.over_number BETWEEN 1 AND 16
+          AND be.over_number BETWEEN 0 AND 14
           AND be.dismissal_type IS NOT NULL
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     wickets = int(row["wickets"] or 0)
-    return {"actual": float(wickets), "source": {"table": "ball_events+innings", "wickets": wickets, "overs": "1-16"}}
+    return {"actual": float(wickets), "source": {"table": "ball_events+innings", "wickets": wickets, "overs": "1-15"}}
 
 def _compute_bat_middle_runs_cum(conn, match_id: str, brasil_team: str) -> Dict[str, Any]:
     """
@@ -10201,11 +10203,124 @@ def _compute_bat_middle_runs_cum(conn, match_id: str, brasil_team: str) -> Dict[
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
           AND i.batting_team = ?
-          AND be.over_number BETWEEN 1 AND 16
+          AND be.over_number BETWEEN 0 AND 14
     """
     row = conn.execute(sql, (match_id, brasil_team)).fetchone()
     runs = int(row["runs"] or 0)
-    return {"actual": float(runs), "source": {"table": "ball_events+innings", "runs": runs, "overs": "1-16"}}
+    return {"actual": float(runs), "source": {"table": "ball_events+innings", "runs": runs, "overs": "1-15"}}
+
+def _get_innings_rows(conn, match_id: str) -> list[sqlite3.Row]:
+    rows = conn.execute("""
+        SELECT i.innings_id, i.batting_team, i.bowling_team
+        FROM innings i
+        WHERE i.match_id = ?
+        ORDER BY i.innings_id
+    """, (match_id,)).fetchall()
+    return rows or []
+
+def _inn_runs_total(conn, innings_id: int) -> int:
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS total_runs
+        FROM ball_events be
+        WHERE be.innings_id = ?
+    """, (innings_id,)).fetchone()
+    return int(row["total_runs"] or 0)
+
+def _inn_legal_balls(conn, innings_id: int) -> int:
+    row = conn.execute("""
+        SELECT SUM(
+                 CASE WHEN COALESCE(be.wides,0)=0 AND COALESCE(be.no_balls,0)=0
+                      THEN 1 ELSE 0
+                 END
+               ) AS legal_balls
+        FROM ball_events be
+        WHERE be.innings_id = ?
+    """, (innings_id,)).fetchone()
+    return int(row["legal_balls"] or 0)
+
+def _compute_bat_match_bat_20_overs(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Returns actual ∈ {"Yes","No","NA"} and explains source.
+    """
+    inn_rows = _get_innings_rows(conn, match_id)
+    if len(inn_rows) < 1:
+        return {"actual": None, "source": {"reason": "no innings found"}}
+
+    # find Brasil innings, and opponent innings
+    brasil_inn = next((r for r in inn_rows if r["batting_team"] == brasil_team), None)
+    oppo_inn   = next((r for r in inn_rows if r["batting_team"] != brasil_team), None)
+
+    if not brasil_inn:
+        return {"actual": None, "source": {"reason": "Brasil innings not found"}}
+
+    brasil_inn_id = brasil_inn["innings_id"]
+    oppo_inn_id   = oppo_inn["innings_id"] if oppo_inn else None
+
+    # who batted first? (smaller innings_id)
+    brasil_batted_second = False
+    if oppo_inn_id is not None:
+        brasil_batted_second = (brasil_inn_id > oppo_inn_id)
+
+    legal_balls_bra = _inn_legal_balls(conn, brasil_inn_id)
+
+    # If batted second, compute totals to see if chase succeeded inside 20
+    if brasil_batted_second and oppo_inn_id is not None:
+        runs_bra = _inn_runs_total(conn, brasil_inn_id)
+        runs_opp = _inn_runs_total(conn, oppo_inn_id)
+        chased_inside_20 = (runs_bra > runs_opp and legal_balls_bra < 120)
+        if chased_inside_20:
+            return {"actual": "NA", "source": {
+                "innings": "2nd",
+                "legal_balls": legal_balls_bra,
+                "runs_bra": runs_bra,
+                "runs_opp": runs_opp
+            }}
+
+    # Otherwise apply 20-over completion rule
+    actual = "Yes" if legal_balls_bra >= 120 else "No"
+    return {"actual": actual, "source": {
+        "innings": ("2nd" if brasil_batted_second else "1st"),
+        "legal_balls": legal_balls_bra
+    }}
+
+def _compute_bat_death_scoring_shot_pct(conn, match_id: str, brasil_team: str) -> dict:
+    row = conn.execute("""
+        SELECT 
+            COUNT(*) AS total_balls,
+            SUM(CASE WHEN be.runs > 0 THEN 1 ELSE 0 END) AS scoring_shots
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 15 AND 19
+    """, (match_id, brasil_team)).fetchone()
+    total_balls   = int(row["total_balls"] or 0)
+    scoring_shots = int(row["scoring_shots"] or 0)
+    actual_pct = round((scoring_shots / total_balls) * 100.0, 1) if total_balls > 0 else None
+    return {"actual": actual_pct, "source": {"scoring_shots": scoring_shots, "total_balls": total_balls, "overs": "16-20"}}
+
+def _compute_bat_death_runs(conn, match_id: str, brasil_team: str) -> dict:
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.batting_team = ?
+          AND be.over_number BETWEEN 15 AND 19
+    """, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs"] or 0)
+    return {"actual": float(runs), "source": {"runs": runs, "overs": "16-20"}}
+
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -10326,6 +10441,54 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             actual=comp7["actual"],
             ok=_compare(comp7["actual"], t7.get("operator", ">="), float(t7.get("target", 110.0))),
             source=comp7.get("source", {})
+        ))
+
+        # --- KPI 8: Bat 20 Overs (Batting • Match) ---
+        compB20 = _compute_bat_match_bat_20_overs(conn, match_id, brasil_team)
+        tB20 = MEN_KPI_TARGETS["bat_match_bat_20_overs"]
+        kpis.append(KPIItem(
+            key="bat_match_bat_20_overs",
+            label="Bat 20 overs",
+            unit="",
+            bucket="Batting",
+            phase="Match",
+            operator=tB20.get("operator", "=="),
+            target=tB20.get("target", "Yes"),
+            actual=compB20["actual"],
+            ok=_compare(compB20["actual"], tB20.get("operator", "=="), tB20.get("target", "Yes")),
+            source=compB20.get("source", {})
+        ))
+
+        # --- KPI 9: Scoring Shot % (Batting • Death Overs) ---
+        compDSP = _compute_bat_death_scoring_shot_pct(conn, match_id, brasil_team)
+        tDSP = MEN_KPI_TARGETS["bat_death_scoring_shot_pct"]
+        kpis.append(KPIItem(
+            key="bat_death_scoring_shot_pct",
+            label="Scoring Shot %",
+            unit="%",
+            bucket="Batting",
+            phase="Death Overs",
+            operator=tDSP.get("operator", ">="),
+            target=float(tDSP.get("target", 80.0)),
+            actual=compDSP["actual"],
+            ok=_compare(compDSP["actual"], tDSP.get("operator", ">="), float(tDSP.get("target", 80.0))),
+            source=compDSP.get("source", {})
+        ))
+
+        # --- KPI 10: Death Runs (Batting • Death Overs) ---
+        compDR = _compute_bat_death_runs(conn, match_id, brasil_team)
+        tDR = MEN_KPI_TARGETS["bat_death_runs"]
+        kpis.append(KPIItem(
+            key="bat_death_runs",
+            label="Death Runs",
+            unit="",
+            bucket="Batting",
+            phase="Death Overs",
+            operator=tDR.get("operator", ">="),
+            target=float(tDR.get("target", 50.0)),
+            actual=compDR["actual"],
+            ok=_compare(compDR["actual"], tDR.get("operator", ">="), float(tDR.get("target", 50.0))),
+            source=compDR.get("source", {})
         ))
 
         return MatchKPIsResponse(

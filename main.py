@@ -79,6 +79,11 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bowl_middle_wickets_cum": {"target": 6.0,   "operator": ">="},  # wickets by end of over 14 (overs 0–14)
     "bowl_middle_runs_cum":    {"target": 100.0, "operator": "<="}, 
     "bat_mid_overs10_14_no_wicket": {"target": "Yes", "operator": "=="},
+    "bowl_death_runs_conc":      {"target": 40.0, "operator": "<"},
+    "bowl_match_no_balls":       {"target": 0.0,  "operator": "=="},   # total no-balls conceded
+    "bowl_match_wides":          {"target": 5.0,  "operator": "<="},   # total wides conceded
+    "bowl_match_six_dot_streaks":{"target": 2.0,  "operator": ">="},   # streaks of ≥6 consecutive dots
+    "bowl_match_start_end_boundaries": {"target": 5.0, "operator": "<"},
 }
 
 # ---------- Pydantic response models ----------
@@ -10557,7 +10562,6 @@ def _compute_bowl_mid_dot_clusters(conn, match_id: str, brasil_team: str) -> dic
 
     return {"actual": float(clusters), "source": {"clusters": clusters, "overs": "6-14"}}
 
-
 def _compute_bowl_middle_wickets_cum(conn, match_id: str, brasil_team: str) -> dict:
     """
     Bowling • End of Middle Overs: wickets by end of over 14 (i.e., overs 0–14 inclusive).
@@ -10573,7 +10577,6 @@ def _compute_bowl_middle_wickets_cum(conn, match_id: str, brasil_team: str) -> d
     """, (match_id, brasil_team)).fetchone()
     wkts = int(row["wickets"] or 0)
     return {"actual": float(wkts), "source": {"wickets": wkts, "overs": "0-14"}}
-
 
 def _compute_bowl_middle_runs_cum(conn, match_id: str, brasil_team: str) -> dict:
     """
@@ -10596,7 +10599,6 @@ def _compute_bowl_middle_runs_cum(conn, match_id: str, brasil_team: str) -> dict
     runs = int(row["runs_conceded"] or 0)
     return {"actual": float(runs), "source": {"runs_conceded": runs, "overs": "0-14"}}
 
-
 def _compute_bat_mid_overs10_14_no_wicket(conn, match_id: str, brasil_team: str) -> dict:
     """
     Batting • Middle Overs: no wicket falls in overs 10–14 inclusive (0-based).
@@ -10614,6 +10616,125 @@ def _compute_bat_mid_overs10_14_no_wicket(conn, match_id: str, brasil_team: str)
     actual = "Yes" if wkts == 0 else "No"
     return {"actual": actual, "source": {"wickets_10_14": wkts}}
 
+def _compute_bowl_death_runs_conc(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Death (15–19): runs conceded; everything counts.
+    """
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs_conceded
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND be.over_number BETWEEN 15 AND 19
+    """, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs_conceded"] or 0)
+    return {"actual": float(runs), "source": {"runs_conceded": runs, "overs": "15-19"}}
+
+def _compute_bowl_match_no_balls(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Match: total no-balls conceded.
+    """
+    row = conn.execute("""
+        SELECT COALESCE(SUM(be.no_balls),0) AS nb
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, brasil_team)).fetchone()
+    nb = int(row["nb"] or 0)
+    return {"actual": float(nb), "source": {"no_balls": nb}}
+
+def _compute_bowl_match_wides(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Match: total wides conceded.
+    """
+    row = conn.execute("""
+        SELECT COALESCE(SUM(be.wides),0) AS wd
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+    """, (match_id, brasil_team)).fetchone()
+    wd = int(row["wd"] or 0)
+    return {"actual": float(wd), "source": {"wides": wd}}
+
+def _compute_bowl_match_six_dot_streaks(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Match: count streaks of ≥6 consecutive dot balls (non-overlapping).
+    Dot = legal delivery with zero runs: runs=0 AND wides=0 AND no_balls=0.
+    """
+    rows = conn.execute("""
+        SELECT be.over_number, be.ball_number,
+               CASE WHEN COALESCE(be.runs,0)=0
+                         AND COALESCE(be.wides,0)=0
+                         AND COALESCE(be.no_balls,0)=0
+                    THEN 1 ELSE 0 END AS is_dot
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ? AND i.bowling_team = ?
+        ORDER BY be.over_number, be.ball_number
+    """, (match_id, brasil_team)).fetchall()
+
+    streaks = 0
+    run_len = 0
+    for r in rows:
+        if int(r["is_dot"]) == 1:
+            run_len += 1
+        else:
+            if run_len >= 6:
+                streaks += 1
+            run_len = 0
+    if run_len >= 6:
+        streaks += 1
+
+    return {"actual": float(streaks), "source": {"six_dot_streaks": streaks}}
+
+def _compute_bowl_match_start_end_boundaries(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Bowling • Match: count overs where the FIRST legal ball OR LAST legal ball conceded a boundary (runs >= 4 off the bat).
+    - 'Legal' = wides=0 AND no_balls=0.
+    - Boundary = be.runs >= 4 (consistent with earlier KPIs).
+    """
+    # First legal ball per over for the bowling side
+    first_rows = conn.execute("""
+        WITH legal AS (
+            SELECT be.over_number, be.ball_number, be.runs
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ? AND i.bowling_team = ?
+              AND COALESCE(be.wides,0)=0 AND COALESCE(be.no_balls,0)=0
+        ),
+        first_per_over AS (
+            SELECT l.over_number,
+                   MIN(l.ball_number) AS first_ball
+            FROM legal l
+            GROUP BY l.over_number
+        ),
+        last_per_over AS (
+            SELECT l.over_number,
+                   MAX(l.ball_number) AS last_ball
+            FROM legal l
+            GROUP BY l.over_number
+        )
+        SELECT f.over_number,
+               (SELECT l1.runs FROM legal l1 WHERE l1.over_number=f.over_number AND l1.ball_number=f.first_ball) AS first_runs,
+               (SELECT l2.runs FROM legal l2 WHERE l2.over_number=f.over_number AND l2.ball_number=lp.last_ball) AS last_runs
+        FROM first_per_over f
+        JOIN last_per_over lp ON lp.over_number = f.over_number
+    """, (match_id, brasil_team)).fetchall()
+
+    count_overs = 0
+    for r in first_rows:
+        first_boundary = (int(r["first_runs"] or 0) >= 4)
+        last_boundary  = (int(r["last_runs"]  or 0) >= 4)
+        if first_boundary or last_boundary:
+            count_overs += 1
+
+    return {"actual": float(count_overs), "source": {"overs_flagged": count_overs}}
 
 
 # ---------- Endpoint: Men KPIs for a match ----------
@@ -10961,7 +11082,85 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             source=compBNW.get("source", {})
         ))
 
+        # --- Bowling • Death: Runs Conceded (<40) ---
+        compBDR = _compute_bowl_death_runs_conc(conn, match_id, brasil_team)
+        tBDR = MEN_KPI_TARGETS["bowl_death_runs_conc"]
+        kpis.append(KPIItem(
+            key="bowl_death_runs_conc",
+            label="Death Runs Conceded",
+            unit="",
+            bucket="Bowling",
+            phase="Death Overs",
+            operator=tBDR.get("operator", "<"),
+            target=float(tBDR.get("target", 40.0)),
+            actual=compBDR["actual"],
+            ok=_compare(compBDR["actual"], tBDR.get("operator", "<"), float(tBDR.get("target", 40.0))),
+            source=compBDR.get("source", {})
+        ))
 
+        # --- Bowling • Match: No-Balls (==0) ---
+        compBNB = _compute_bowl_match_no_balls(conn, match_id, brasil_team)
+        tBNB = MEN_KPI_TARGETS["bowl_match_no_balls"]
+        kpis.append(KPIItem(
+            key="bowl_match_no_balls",
+            label="No-Balls",
+            unit="",
+            bucket="Bowling",
+            phase="Match",
+            operator=tBNB.get("operator", "=="),
+            target=float(tBNB.get("target", 0.0)),
+            actual=compBNB["actual"],
+            ok=_compare(compBNB["actual"], tBNB.get("operator", "=="), float(tBNB.get("target", 0.0))),
+            source=compBNB.get("source", {})
+        ))
+
+        # --- Bowling • Match: Wides (<=5) ---
+        compBWD = _compute_bowl_match_wides(conn, match_id, brasil_team)
+        tBWD = MEN_KPI_TARGETS["bowl_match_wides"]
+        kpis.append(KPIItem(
+            key="bowl_match_wides",
+            label="Wides",
+            unit="",
+            bucket="Bowling",
+            phase="Match",
+            operator=tBWD.get("operator", "<="),
+            target=float(tBWD.get("target", 5.0)),
+            actual=compBWD["actual"],
+            ok=_compare(compBWD["actual"], tBWD.get("operator", "<="), float(tBWD.get("target", 5.0))),
+            source=compBWD.get("source", {})
+        ))
+
+        # --- Bowling • Match: 6 Consecutive Dot Balls (>=2) ---
+        compBSD = _compute_bowl_match_six_dot_streaks(conn, match_id, brasil_team)
+        tBSD = MEN_KPI_TARGETS["bowl_match_six_dot_streaks"]
+        kpis.append(KPIItem(
+            key="bowl_match_six_dot_streaks",
+            label="6 Consecutive Dots",
+            unit="",
+            bucket="Bowling",
+            phase="Match",
+            operator=tBSD.get("operator", ">="),
+            target=float(tBSD.get("target", 2.0)),
+            actual=compBSD["actual"],
+            ok=_compare(compBSD["actual"], tBSD.get("operator", ">="), float(tBSD.get("target", 2.0))),
+            source=compBSD.get("source", {})
+        ))
+
+        # --- Bowling • Match: Start/End Boundaries (<5 overs) ---
+        compBSE = _compute_bowl_match_start_end_boundaries(conn, match_id, brasil_team)
+        tBSE = MEN_KPI_TARGETS["bowl_match_start_end_boundaries"]
+        kpis.append(KPIItem(
+            key="bowl_match_start_end_boundaries",
+            label="Start/End Boundaries",
+            unit="",
+            bucket="Bowling",
+            phase="Match",
+            operator=tBSE.get("operator", "<"),
+            target=float(tBSE.get("target", 5.0)),
+            actual=compBSE["actual"],
+            ok=_compare(compBSE["actual"], tBSE.get("operator", "<"), float(tBSE.get("target", 5.0))),
+            source=compBSE.get("source", {})
+        ))
 
         return MatchKPIsResponse(
             match={

@@ -73,6 +73,8 @@ MEN_KPI_TARGETS: Dict[str, Dict[str, Any]] = {
     "bat_match_two_partnerships_ge40":{"target": "Yes",  "operator": "=="},
     "bat_match_scoring_shot_pct":     {"target": 45.0,   "operator": ">="},
     "bat_match_total_runs":           {"target": 155.0,  "operator": ">="},
+    "bowl_pp_wickets":       {"target": 3.0,  "operator": ">="},  # Wickets in PP
+    "bowl_pp_runs_conc":     {"target": 40.0, "operator": "<"}, 
 }
 
 # ---------- Pydantic response models ----------
@@ -10478,6 +10480,43 @@ def _compute_bat_match_top4_50_sr100(conn, match_id: str, brasil_team: str) -> d
 
     return {"actual": actual, "source": {"ok_cnt_top4": ok_cnt}}
 
+def _compute_bowl_pp_wickets(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Brasil BOWLING in Powerplay (overs 0–5).
+    Wickets = any dismissal_type IS NOT NULL.
+    """
+    row = conn.execute("""
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 0 AND 5)
+          AND be.dismissal_type IS NOT NULL
+    """, (match_id, brasil_team)).fetchone()
+    wkts = int(row["wickets"] or 0)
+    return {"actual": float(wkts), "source": {"wickets": wkts, "overs": "0-5"}}
+
+def _compute_bowl_pp_runs_conceded(conn, match_id: str, brasil_team: str) -> dict:
+    """
+    Brasil BOWLING in Powerplay (overs 0–5).
+    Runs conceded: everything counts (runs + wides + no_balls + byes + leg_byes).
+    """
+    row = conn.execute("""
+        SELECT
+          COALESCE(SUM(be.runs),0)
+        + COALESCE(SUM(be.wides),0)
+        + COALESCE(SUM(be.no_balls),0)
+        + COALESCE(SUM(be.byes),0)
+        + COALESCE(SUM(be.leg_byes),0) AS runs_conceded
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND i.bowling_team = ?
+          AND (be.is_powerplay = 1 OR be.over_number BETWEEN 0 AND 5)
+    """, (match_id, brasil_team)).fetchone()
+    runs = int(row["runs_conceded"] or 0)
+    return {"actual": float(runs), "source": {"runs_conceded": runs, "overs": "0-5"}}
 
 
 # ---------- Endpoint: Men KPIs for a match ----------
@@ -10727,6 +10766,38 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
             actual=compTR["actual"],
             ok=_compare(compTR["actual"], tTR.get("operator", ">="), float(tTR.get("target", 155.0))),
             source=compTR.get("source", {})
+        ))
+
+        # --- KPI: Bowling • PP Wickets ---
+        compBW = _compute_bowl_pp_wickets(conn, match_id, brasil_team)
+        tBW = MEN_KPI_TARGETS["bowl_pp_wickets"]
+        kpis.append(KPIItem(
+            key="bowl_pp_wickets",
+            label="PP Wickets",
+            unit="",
+            bucket="Bowling",
+            phase="Powerplay",
+            operator=tBW.get("operator", ">="),
+            target=float(tBW.get("target", 3.0)),
+            actual=compBW["actual"],
+            ok=_compare(compBW["actual"], tBW.get("operator", ">="), float(tBW.get("target", 3.0))),
+            source=compBW.get("source", {})
+        ))
+
+        # --- KPI: Bowling • PP Runs Conceded (strict < 40) ---
+        compBRC = _compute_bowl_pp_runs_conceded(conn, match_id, brasil_team)
+        tBRC = MEN_KPI_TARGETS["bowl_pp_runs_conc"]
+        kpis.append(KPIItem(
+            key="bowl_pp_runs_conc",
+            label="PP Runs Conceded",
+            unit="",
+            bucket="Bowling",
+            phase="Powerplay",
+            operator=tBRC.get("operator", "<"),
+            target=float(tBRC.get("target", 40.0)),
+            actual=compBRC["actual"],
+            ok=_compare(compBRC["actual"], tBRC.get("operator", "<"), float(tBRC.get("target", 40.0))),
+            source=compBRC.get("source", {})
         ))
 
 

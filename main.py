@@ -10775,7 +10775,7 @@ def _compute_field_mid_runout_chances(conn, match_id: str, brasil_team: str) -> 
     # Assumption gate: no clean events → we assume only fall-of-wicket data is present
     #                 → middle over run-out chance = 0
     if not _has_any_clean_fielding_event(conn, match_id, brasil_team):
-        return {"actual": 0.0, "source": {"reason": "no fielding data (no clean events)"}}
+        return {"actual": "NA", "source": {"reason": "no fielding data (no clean events)"}}
 
     row = conn.execute("""
         SELECT COUNT(*) AS chances

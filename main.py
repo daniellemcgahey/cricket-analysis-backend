@@ -11573,19 +11573,39 @@ def postgame_players(
         conn.close()
 
 def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id: int) -> dict:
-    # Aggregate batting for this player in this match/team
     row = conn.execute("""
         SELECT
-          COUNT(*) AS balls,
+          -- Balls faced for batter:
+          -- any delivery where batter is on strike and it is NOT a wide
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides, 0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
+
+          -- Runs off the bat
           SUM(COALESCE(be.runs,0)) AS runs,
+
           SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
           SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
-          SUM(COALESCE(be.dot_balls,0)) AS dot_balls,
+
+          -- DOTS for batter:
+          -- ball faced (no wide) AND runs off bat = 0
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
           SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
 
           AVG(be.batting_intent_score) AS avg_intent,
           SUM(COALESCE(be.batting_bpi,0)) AS total_bpi,
 
+          -- Phase runs are off the bat only (per player)
           SUM(CASE WHEN be.is_powerplay     = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_pp,
           SUM(CASE WHEN be.is_middle_overs  = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_mid,
           SUM(CASE WHEN be.is_death_overs   = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_death
@@ -11610,7 +11630,7 @@ def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id
     dot_balls = int(row["dot_balls"] or 0)
     boundary_balls = int(row["boundary_balls"] or 0)
 
-    sr = round(runs * 100.0 / balls, 1) if balls > 0 else None
+    strike_rate = round(runs * 100.0 / balls, 1) if balls > 0 else None
     boundary_pct = round(boundary_balls * 100.0 / balls, 1) if balls > 0 else None
     dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
 
@@ -11626,7 +11646,7 @@ def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id
     """, (match_id, team_id, player_id)).fetchone()
     batting_position = int(bp_row["batting_position"]) if bp_row and bp_row["batting_position"] is not None else None
 
-    # Dismissal info (ball-based)
+    # Dismissal from ball_events (on-ball)
     dism_row = conn.execute("""
         SELECT dismissal_type, over_number
         FROM ball_events be
@@ -11647,7 +11667,7 @@ def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id
         elif dtype:
             dismissal_str = dtype
 
-    # Also check non_ball_dismissals if no ball-based dismissal
+    # Fall back to non_ball_dismissals
     if not dismissal_str:
         nbd = conn.execute("""
             SELECT dismissal_type, over_number
@@ -11677,7 +11697,7 @@ def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id
         "balls": balls,
         "fours": fours,
         "sixes": sixes,
-        "strike_rate": sr,
+        "strike_rate": strike_rate,
         "batting_position": batting_position,
         "boundary_percentage": boundary_pct,
         "dot_ball_percentage": dot_pct,
@@ -11686,29 +11706,53 @@ def _compute_player_batting_summary(conn, match_id: int, team_id: int, player_id
         "batting_bpi": float(total_bpi) if total_bpi is not None else None,
         "dismissal": dismissal_str,
         "source": {
-            "balls": balls,
+            "balls_faced_excl_wides": balls,
             "runs": runs,
             "fours": fours,
             "sixes": sixes,
-            "dot_balls": dot_balls,
+            "dot_balls_batter": dot_balls,
             "boundary_balls": boundary_balls,
         },
     }
 
+
 def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id: int) -> dict:
-    # Bowler runs conceded = runs off the bat + wides + no-balls
+    # Core bowling aggregates for this player in this match + team
     row = conn.execute("""
         SELECT
-          COUNT(*) AS balls,
+          -- Legal balls for bowler/overs: anything that's NOT a wide or no-ball
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_legal,
+
+          -- Bowler runs conceded = bat runs + wides + no-balls
           SUM(
             COALESCE(be.runs,0)
             + COALESCE(be.wides,0)
             + COALESCE(be.no_balls,0)
           ) AS runs_conc,
-          SUM(COALESCE(be.dot_balls,0)) AS dot_balls,
+
+          -- DOTS for bowler: legal ball AND no runs off bat AND no wides/no-balls
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
+          -- Boundaries off the bat (for "boundary balls" count)
           SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+
           SUM(COALESCE(be.wides,0)) AS wides,
           SUM(COALESCE(be.no_balls,0)) AS no_balls,
+
+          -- Simple wicket credit: any dismissal on this ball (you can refine using dismissal_type later)
           SUM(CASE WHEN be.dismissed_player_id IS NOT NULL THEN 1 ELSE 0 END) AS wickets
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
@@ -11717,10 +11761,10 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
           AND be.bowler_id = ?
     """, (match_id, team_id, player_id)).fetchone()
 
-    if not row or (row["balls"] or 0) == 0:
+    if not row or (row["balls_legal"] or 0) == 0:
         return {"has_data": False, "source": {"reason": "no bowling events"}}
 
-    balls = int(row["balls"] or 0)
+    balls_legal = int(row["balls_legal"] or 0)
     runs_conc = int(row["runs_conc"] or 0)
     dot_balls = int(row["dot_balls"] or 0)
     boundary_balls = int(row["boundary_balls"] or 0)
@@ -11728,11 +11772,11 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
     no_balls = int(row["no_balls"] or 0)
     wickets = int(row["wickets"] or 0)
 
-    overs = _balls_to_overs(balls)
-    econ = round(runs_conc / overs, 2) if overs and overs > 0 else None
-    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+    overs = _balls_to_overs(balls_legal)
+    economy = round(runs_conc / overs, 2) if overs and overs > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls_legal, 1) if balls_legal > 0 else None
 
-    # Maidens: overs where bowler conceded 0 (using the same bowler-run definition)
+    # Maidens: overs where bowler conceded 0 (using same bowler-run definition)
     maiden_row = conn.execute("""
         SELECT COUNT(*) AS maidens
         FROM (
@@ -11754,21 +11798,46 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
     """, (match_id, team_id, player_id)).fetchone()
     maidens = int(maiden_row["maidens"] or 0)
 
-    # Phase breakdown (again, bowler runs only = runs + wides + no_balls)
+    # Phase breakdown using same "bowler runs" definition and legal balls
     phase_rows = conn.execute("""
         SELECT
-          SUM(CASE WHEN be.is_powerplay    = 1 THEN 1 ELSE 0 END) AS balls_pp,
-          SUM(CASE WHEN be.is_powerplay    = 1 THEN
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-          ELSE 0 END) AS runs_pp,
-          SUM(CASE WHEN be.is_middle_overs = 1 THEN 1 ELSE 0 END) AS balls_mid,
-          SUM(CASE WHEN be.is_middle_overs = 1 THEN
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-          ELSE 0 END) AS runs_mid
+          -- Powerplay
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1 THEN
+                COALESCE(be.runs,0)
+                + COALESCE(be.wides,0)
+                + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_pp,
+
+          -- Middle overs
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1 THEN
+                COALESCE(be.runs,0)
+                + COALESCE(be.wides,0)
+                + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_mid
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
@@ -11794,7 +11863,7 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
         middle_overs_econ=mo_econ,
     )
 
-    # Intent conceded + BPI unchanged
+    # Intent conceded + BPI (unchanged)
     row2 = conn.execute("""
         SELECT
           AVG(be.batting_intent_score) AS avg_intent_conceded,
@@ -11815,7 +11884,7 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
         "maidens": maidens,
         "runs_conceded": runs_conc,
         "wickets": wickets,
-        "economy": econ,
+        "economy": economy,
         "dot_ball_percentage": dot_pct,
         "boundary_balls": boundary_balls,
         "wides": wides,
@@ -11824,14 +11893,15 @@ def _compute_player_bowling_summary(conn, match_id: int, team_id: int, player_id
         "bowling_intent_conceded": float(avg_intent_conc) if avg_intent_conc is not None else None,
         "bowling_bpi": float(total_bpi) if total_bpi is not None else None,
         "source": {
-            "balls": balls,
+            "legal_balls": balls_legal,
             "runs_conceded_bowler_only": runs_conc,
-            "dot_balls": dot_balls,
+            "dot_balls_bowler": dot_balls,
             "boundary_balls": boundary_balls,
             "wides": wides,
             "no_balls": no_balls,
         },
     }
+
 
 
 def _compute_player_fielding_summary(conn, match_id: int, team_id: int, player_id: int) -> dict:

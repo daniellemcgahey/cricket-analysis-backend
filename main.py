@@ -337,13 +337,17 @@ class PlayerSummaryPlayersResponse(BaseModel):
 
 class BattingPhaseBreakdown(BaseModel):
     powerplay_runs: Optional[int] = None
+    powerplay_balls: Optional[int] = None
     powerplay_scoring_shot_pct: Optional[float] = None
 
     middle_overs_runs: Optional[int] = None
+    middle_overs_balls: Optional[int] = None
     middle_overs_scoring_shot_pct: Optional[float] = None
 
     death_overs_runs: Optional[int] = None
+    death_overs_balls: Optional[int] = None
     death_overs_scoring_shot_pct: Optional[float] = None
+
 
 
 class PlayerBattingSummary(BaseModel):
@@ -11801,12 +11805,18 @@ def _compute_player_batting_summary(conn, match_id: int, player_id: int) -> dict
 
     phase_breakdown = BattingPhaseBreakdown(
         powerplay_runs=int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
+        powerplay_balls=balls_pp or None,
         powerplay_scoring_shot_pct=ss_pp,
+
         middle_overs_runs=int(row["runs_mid"] or 0) if row["runs_mid"] is not None else None,
+        middle_overs_balls=balls_mid or None,
         middle_overs_scoring_shot_pct=ss_mid,
+
         death_overs_runs=int(row["runs_death"] or 0) if row["runs_death"] is not None else None,
+        death_overs_balls=balls_death or None,
         death_overs_scoring_shot_pct=ss_death,
     )
+
 
     return {
         "has_data": True,

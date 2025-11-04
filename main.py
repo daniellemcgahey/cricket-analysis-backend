@@ -318,6 +318,103 @@ class DoDontResponse(BaseModel):
     do: Dict[str, Any]
     dont: Dict[str, Any]
 
+class PlayerSummaryTeam(BaseModel):
+    id: str          # we'll just use team name as ID for now
+    name: str
+
+class PlayerSummaryTeamsResponse(BaseModel):
+    match_id: str
+    teams: list[PlayerSummaryTeam]
+
+class PlayerSummaryPlayer(BaseModel):
+    id: int
+    name: str
+
+class PlayerSummaryPlayersResponse(BaseModel):
+    match_id: str
+    team_id: str         # team name
+    players: list[PlayerSummaryPlayer]
+
+class PlayerBattingSummary(BaseModel):
+    has_data: bool = False
+
+    runs: Optional[int] = None
+    balls: Optional[int] = None
+    fours: Optional[int] = None
+    sixes: Optional[int] = None
+    strike_rate: Optional[float] = None
+    batting_position: Optional[int] = None  # fill later from scorecard if you want
+
+    boundary_percentage: Optional[float] = None
+    dot_ball_percentage: Optional[float] = None
+
+    powerplay_runs: Optional[int] = None
+    middle_overs_runs: Optional[int] = None
+    death_overs_runs: Optional[int] = None
+
+    batting_intent_score: Optional[float] = None
+    batting_bpi: Optional[float] = None
+
+    dismissal: Optional[str] = None  # "c Smith b Jones (17.3)" or "Not out"
+
+    source: dict[str, Any] | None = None
+
+class PlayerBowlingSummary(BaseModel):
+    has_data: bool = False
+
+    overs: Optional[float] = None
+    maidens: Optional[int] = None
+    runs_conceded: Optional[int] = None
+    wickets: Optional[int] = None
+    economy: Optional[float] = None
+
+    dot_ball_percentage: Optional[float] = None
+    boundary_balls: Optional[int] = None
+    wides: Optional[int] = None
+    no_balls: Optional[int] = None
+
+    powerplay_overs: Optional[float] = None
+    powerplay_econ: Optional[float] = None
+    middle_overs_overs: Optional[float] = None
+    middle_overs_econ: Optional[float] = None
+
+    bowling_intent_conceded: Optional[float] = None
+    bowling_bpi: Optional[float] = None
+
+    source: dict[str, Any] | None = None
+
+class PlayerFieldingSummary(BaseModel):
+    has_data: bool = False
+
+    balls_fielded: Optional[int] = None
+
+    catches_taken: Optional[int] = None
+    drops: Optional[int] = None
+    missed_catches: Optional[int] = None
+
+    run_outs_direct: Optional[int] = None
+    run_outs_assist: Optional[int] = None
+
+    clean_pickups: Optional[int] = None
+    fumbles: Optional[int] = None
+    overthrows_conceded: Optional[int] = None
+
+    clean_hands_pct: Optional[float] = None
+    conversion_rate: Optional[float] = None
+
+    wk_catches: Optional[int] = None
+    wk_stumpings: Optional[int] = None
+
+    source: dict[str, Any] | None = None
+
+class PlayerSummaryResponse(BaseModel):
+    match: dict[str, Any]
+    player: dict[str, Any]
+    batting: PlayerBattingSummary
+    bowling: PlayerBowlingSummary
+    fielding: PlayerFieldingSummary
+
+
 def _db():
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
     conn = sqlite3.connect(db_path)
@@ -10384,7 +10481,6 @@ def _compute_bat_match_partnership_ge60(conn, match_id: str, brasil_team: str) -
     actual = "Yes" if n60 >= 1 else "No"
     return {"actual": actual, "source": {"partnerships_ge60": n60}}
 
-
 def _compute_bat_match_two_partnerships_ge40(conn, match_id: str, brasil_team: str) -> dict:
     """
     Count partnerships with runs >= 40 (the >=60 also counts).
@@ -10846,7 +10942,6 @@ def _compute_field_assists_placeholder(conn, match_id: str, brasil_team: str) ->
     Returns NA so it renders and doesn't affect pass rate.
     """
     return {"actual": "NA", "source": {"reason": "assist flag not available yet"}}
-
 
 # ---------- Endpoint: Men KPIs for a match ----------
 @app.get("/postgame/men/match-kpis", response_model=MatchKPIsResponse)
@@ -11367,7 +11462,412 @@ def men_match_kpis(match_id: str = Query(..., description="Match ID from /matche
     finally:
         conn.close()
 
+def _safe_div(num, den):
+    if den in (0, None):
+        return None
+    return num / den
 
+def _balls_to_overs(balls: int | None) -> float | None:
+    """
+    Convert integer balls -> xx.y overs.
+    14 balls -> 2.2 overs.
+    """
+    if not balls or balls <= 0:
+        return None
+    overs = balls // 6
+    rem = balls % 6
+    return overs + rem / 10.0
+
+def _get_match_row(conn, match_id: str) -> dict:
+    row = conn.execute("""
+        SELECT
+          m.match_id,
+          m.team_a,
+          m.team_b,
+          m.match_date,
+          COALESCE(t.name, m.tournament) AS tournament
+        FROM matches m
+        LEFT JOIN tournaments t ON m.tournament_id = t.tournament_id
+        WHERE m.match_id = ?
+    """, (match_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Match not found")
+    return dict(row)
+
+@app.get("/postgame/teams", response_model=PlayerSummaryTeamsResponse)
+def postgame_teams(match_id: str = Query(..., description="Match ID from /matches")):
+    conn = _db()
+    try:
+        match = _get_match_row(conn, match_id)
+
+        teams = [
+            PlayerSummaryTeam(id=match["team_a"], name=match["team_a"]),
+            PlayerSummaryTeam(id=match["team_b"], name=match["team_b"]),
+        ]
+
+        return PlayerSummaryTeamsResponse(
+            match_id=match_id,
+            teams=teams,
+        )
+    finally:
+        conn.close()
+
+@app.get("/postgame/players", response_model=PlayerSummaryPlayersResponse)
+def postgame_players(
+    match_id: str = Query(..., description="Match ID from /matches"),
+    team_id: str = Query(..., description="Team name from /postgame/teams"),
+):
+    conn = _db()
+    try:
+        # Collect players who batted, bowled, or fielded for this team
+        # Adjust column names if needed.
+        rows = conn.execute("""
+            WITH team_ball_events AS (
+              SELECT be.*
+              FROM ball_events be
+              JOIN innings i ON be.innings_id = i.innings_id
+              WHERE i.match_id = ?
+                AND (i.batting_team = ? OR i.bowling_team = ?)
+            )
+            SELECT DISTINCT p.player_id, p.player_name
+            FROM team_ball_events tbe
+            JOIN players p
+              ON p.player_id = tbe.batter_id
+              OR p.player_id = tbe.bowler_id
+        """, (match_id, team_id, team_id)).fetchall()
+
+        # If you want to include fielders from ball_fielding_events, you can add another UNION ALL to the CTE later.
+
+        players: list[PlayerSummaryPlayer] = []
+        for r in rows:
+            players.append(PlayerSummaryPlayer(
+                id=int(r["player_id"]),
+                name=r["player_name"],
+            ))
+
+        # order by name
+        players.sort(key=lambda p: p.name)
+
+        return PlayerSummaryPlayersResponse(
+            match_id=match_id,
+            team_id=team_id,
+            players=players,
+        )
+    finally:
+        conn.close()
+
+def _compute_player_batting_summary(conn, match_id: str, player_id: int) -> dict:
+    row = conn.execute("""
+        SELECT
+          COUNT(*) AS balls,
+          SUM(COALESCE(be.runs_batter,0)) AS runs,
+          SUM(CASE WHEN be.runs_batter = 4 THEN 1 ELSE 0 END) AS fours,
+          SUM(CASE WHEN be.runs_batter = 6 THEN 1 ELSE 0 END) AS sixes,
+          SUM(CASE WHEN be.runs_total = 0 THEN 1 ELSE 0 END) AS dot_balls,
+          SUM(CASE WHEN be.runs_batter IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+          AVG(be.batting_intent_score) AS avg_intent,
+          SUM(COALESCE(be.batting_bpi, 0)) AS total_bpi,
+          SUM(CASE WHEN be.phase = 'Powerplay'     THEN COALESCE(be.runs_batter,0) ELSE 0 END) AS runs_pp,
+          SUM(CASE WHEN be.phase = 'Middle Overs'  THEN COALESCE(be.runs_batter,0) ELSE 0 END) AS runs_mid,
+          SUM(CASE WHEN be.phase = 'Death Overs'   THEN COALESCE(be.runs_batter,0) ELSE 0 END) AS runs_death
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.batter_id = ?
+    """, (match_id, player_id)).fetchone()
+
+    if not row or (row["balls"] or 0) == 0 and (row["runs"] or 0) == 0:
+        return {
+            "has_data": False,
+            "source": {"reason": "no batting events for this player in this match"},
+        }
+
+    balls = int(row["balls"] or 0)
+    runs  = int(row["runs"] or 0)
+    fours = int(row["fours"] or 0)
+    sixes = int(row["sixes"] or 0)
+    dot_balls = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+
+    sr = round(runs * 100.0 / balls, 1) if balls > 0 else None
+    boundary_pct = round(boundary_balls * 100.0 / balls, 1) if balls > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+
+    avg_intent = row["avg_intent"]
+    total_bpi = row["total_bpi"]
+
+    # For now, leave batting_position & dismissal to be plugged in later from scorecard tables
+    batting_position = None
+    dismissal_str = None  # e.g. "c Smith b Jones (17.3)"
+
+    return {
+        "has_data": True,
+        "runs": runs,
+        "balls": balls,
+        "fours": fours,
+        "sixes": sixes,
+        "strike_rate": sr,
+        "batting_position": batting_position,
+        "boundary_percentage": boundary_pct,
+        "dot_ball_percentage": dot_pct,
+        "powerplay_runs": int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
+        "middle_overs_runs": int(row["runs_mid"] or 0) if row["runs_mid"] is not None else None,
+        "death_overs_runs": int(row["runs_death"] or 0) if row["runs_death"] is not None else None,
+        "batting_intent_score": float(avg_intent) if avg_intent is not None else None,
+        "batting_bpi": float(total_bpi) if total_bpi is not None else None,
+        "dismissal": dismissal_str,
+        "source": {
+            "balls": balls,
+            "runs": runs,
+            "fours": fours,
+            "sixes": sixes,
+            "dot_balls": dot_balls,
+            "boundary_balls": boundary_balls,
+        },
+    }
+
+def _compute_player_bowling_summary(conn, match_id: str, player_id: int) -> dict:
+    row = conn.execute("""
+        SELECT
+          COUNT(*) AS balls,
+          SUM(COALESCE(be.runs_total,0)) AS runs_conc,
+          SUM(CASE WHEN be.runs_total = 0 THEN 1 ELSE 0 END) AS dot_balls,
+          SUM(CASE WHEN be.runs_batter IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+          SUM(CASE WHEN be.extras_type = 'wide' THEN 1 ELSE 0 END) AS wides,
+          SUM(CASE WHEN be.extras_type = 'no_ball' THEN 1 ELSE 0 END) AS no_balls,
+          SUM(CASE WHEN be.wicket_against_bowler = 1 THEN 1 ELSE 0 END) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+    """, (match_id, player_id)).fetchone()
+
+    if not row or (row["balls"] or 0) == 0:
+        return {
+            "has_data": False,
+            "source": {"reason": "no bowling events for this player in this match"},
+        }
+
+    balls = int(row["balls"] or 0)
+    runs_conc = int(row["runs_conc"] or 0)
+    dot_balls = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+    wides = int(row["wides"] or 0)
+    no_balls = int(row["no_balls"] or 0)
+    wickets = int(row["wickets"] or 0)
+
+    overs = _balls_to_overs(balls)
+    econ = round(runs_conc / overs, 2) if overs and overs > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+
+    # Maidens: group by over_number and sum runs_total
+    maiden_rows = conn.execute("""
+        SELECT be.over_number
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+        GROUP BY be.over_number
+        HAVING SUM(COALESCE(be.runs_total,0)) = 0
+    """, (match_id, player_id)).fetchall()
+    maidens = len(maiden_rows)
+
+    # Phase breakdown (Powerplay / Middle Overs)
+    phase_rows = conn.execute("""
+        SELECT
+          be.phase,
+          COUNT(*) AS balls,
+          SUM(COALESCE(be.runs_total,0)) AS runs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+        GROUP BY be.phase
+    """, (match_id, player_id)).fetchall()
+
+    phase_map = {r["phase"]: {"balls": int(r["balls"]), "runs": int(r["runs"])} for r in phase_rows}
+
+    pp = phase_map.get("Powerplay")
+    mo = phase_map.get("Middle Overs")
+
+    pp_overs = _balls_to_overs(pp["balls"]) if pp else None
+    mo_overs = _balls_to_overs(mo["balls"]) if mo else None
+
+    pp_econ = round(pp["runs"] / pp_overs, 2) if pp and pp_overs and pp_overs > 0 else None
+    mo_econ = round(mo["runs"] / mo_overs, 2) if mo and mo_overs and mo_overs > 0 else None
+
+    # Intent conceded + BPI
+    row2 = conn.execute("""
+        SELECT
+          AVG(be.batting_intent_score) AS avg_intent_conceded,
+          SUM(COALESCE(be.bowling_bpi,0)) AS total_bpi
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+    """, (match_id, player_id)).fetchone()
+
+    avg_intent_conc = row2["avg_intent_conceded"]
+    total_bpi = row2["total_bpi"]
+
+    return {
+        "has_data": True,
+        "overs": overs,
+        "maidens": maidens,
+        "runs_conceded": runs_conc,
+        "wickets": wickets,
+        "economy": econ,
+        "dot_ball_percentage": dot_pct,
+        "boundary_balls": boundary_balls,
+        "wides": wides,
+        "no_balls": no_balls,
+        "powerplay_overs": pp_overs,
+        "powerplay_econ": pp_econ,
+        "middle_overs_overs": mo_overs,
+        "middle_overs_econ": mo_econ,
+        "bowling_intent_conceded": float(avg_intent_conc) if avg_intent_conc is not None else None,
+        "bowling_bpi": float(total_bpi) if total_bpi is not None else None,
+        "source": {
+            "balls": balls,
+            "runs_conceded": runs_conc,
+            "dot_balls": dot_balls,
+            "boundary_balls": boundary_balls,
+            "wides": wides,
+            "no_balls": no_balls,
+        },
+    }
+
+def _compute_player_fielding_summary(conn, match_id: str, player_id: int) -> dict:
+    # Join contributions -> ball events -> fielding events
+    rows = conn.execute("""
+        SELECT
+          fc.ball_id,
+          bfe.event_id
+        FROM fielding_contributions fc
+        JOIN ball_events be ON fc.ball_id = be.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN ball_fielding_events bfe ON bfe.ball_id = be.ball_id
+        WHERE i.match_id = ?
+          AND fc.fielder_id = ?
+    """, (match_id, player_id)).fetchall()
+
+    if not rows:
+        return {
+            "has_data": False,
+            "source": {"reason": "no fielding contributions for this player in this match"},
+        }
+
+    ball_ids = {r["ball_id"] for r in rows}
+    balls_fielded = len(ball_ids)
+
+    counts: dict[int, int] = {}
+    for r in rows:
+        eid = int(r["event_id"])
+        counts[eid] = counts.get(eid, 0) + 1
+
+    clean_pickups   = counts.get(1, 0)
+    catches_taken   = counts.get(2, 0)
+    run_outs        = counts.get(3, 0)
+    taken_half      = counts.get(4, 0)
+    direct_hits     = counts.get(5, 0)
+    drops           = counts.get(6, 0)
+    missed_catches  = counts.get(7, 0)
+    missed_runouts  = counts.get(8, 0)
+    missed_half     = counts.get(9, 0)
+    fumbles         = counts.get(10, 0)
+    missed_fielding = counts.get(11, 0)
+    overthrows      = counts.get(12, 0)
+    boundary_saves  = counts.get(13, 0)
+    stumpings       = counts.get(14, 0)
+    missed_stump    = counts.get(15, 0)
+
+    clean_hands_pct = None
+    if balls_fielded > 0:
+        clean_hands_pct = round(clean_pickups * 100.0 / balls_fielded, 1)
+
+    dismissals = catches_taken + run_outs + taken_half + stumpings
+    misses = drops + missed_catches + missed_runouts + missed_half + missed_stump
+
+    conversion_rate = None
+    if (dismissals + misses) > 0:
+        conversion_rate = round(dismissals * 100.0 / (dismissals + misses), 1)
+
+    # WK metrics – you can later gate this by fielding_style = 'WK Normal'/'WK Dive'
+    wk_catches = None
+    wk_stumpings = stumpings or None
+
+    return {
+        "has_data": True,
+        "balls_fielded": balls_fielded,
+        "catches_taken": catches_taken,
+        "drops": drops,
+        "missed_catches": missed_catches,
+        "run_outs_direct": direct_hits,
+        "run_outs_assist": run_outs,
+        "clean_pickups": clean_pickups,
+        "fumbles": fumbles,
+        "overthrows_conceded": overthrows,
+        "clean_hands_pct": clean_hands_pct,
+        "conversion_rate": conversion_rate,
+        "wk_catches": wk_catches,
+        "wk_stumpings": wk_stumpings,
+        "source": {
+            "event_counts": counts,
+            "balls_fielded": balls_fielded,
+            "dismissals": dismissals,
+            "misses": misses,
+        },
+    }
+
+@app.get("/postgame/player-summary", response_model=PlayerSummaryResponse)
+def postgame_player_summary(
+    match_id: str = Query(..., description="Match ID from /matches"),
+    team_id: str = Query(..., description="Team name from /postgame/teams"),
+    player_id: int = Query(..., description="Player ID from /postgame/players"),
+    team_category: str | None = Query(None, description="Team category (Men/Women/U19/etc.)"),
+):
+    conn = _db()
+    try:
+        match = _get_match_row(conn, match_id)
+
+        player_row = conn.execute("""
+            SELECT player_id, player_name
+            FROM players
+            WHERE player_id = ?
+        """, (player_id,)).fetchone()
+        if not player_row:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        player = {
+            "id": int(player_row["player_id"]),
+            "name": player_row["player_name"],
+            "team": team_id,
+            "category": team_category,
+        }
+
+        bat_dict = _compute_player_batting_summary(conn, match_id, player_id)
+        bowl_dict = _compute_player_bowling_summary(conn, match_id, player_id)
+        field_dict = _compute_player_fielding_summary(conn, match_id, player_id)
+
+        batting = PlayerBattingSummary(**bat_dict)
+        bowling = PlayerBowlingSummary(**bowl_dict)
+        fielding = PlayerFieldingSummary(**field_dict)
+
+        return PlayerSummaryResponse(
+            match={
+                "id": match["match_id"],
+                "home": match["team_a"],
+                "away": match["team_b"],
+                "date": match["match_date"],
+                "tournament": match.get("tournament"),
+            },
+            player=player,
+            batting=batting,
+            bowling=bowling,
+            fielding=fielding,
+        )
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

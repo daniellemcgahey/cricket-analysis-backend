@@ -370,47 +370,51 @@ class PlayerBattingSummary(BaseModel):
 
 class BowlingPhaseBreakdown(BaseModel):
     powerplay_overs: Optional[float] = None
-    powerplay_maidens: Optional[int] = None
+    powerplay_dot_balls: Optional[int] = None
     powerplay_runs: Optional[int] = None
     powerplay_wickets: Optional[int] = None
     powerplay_econ: Optional[float] = None
     powerplay_dot_ball_pct: Optional[float] = None
 
     middle_overs_overs: Optional[float] = None
-    middle_overs_maidens: Optional[int] = None
+    middle_overs_dot_balls: Optional[int] = None
     middle_overs_runs: Optional[int] = None
     middle_overs_wickets: Optional[int] = None
     middle_overs_econ: Optional[float] = None
     middle_overs_dot_ball_pct: Optional[float] = None
 
     death_overs_overs: Optional[float] = None
-    death_overs_maidens: Optional[int] = None
+    death_overs_dot_balls: Optional[int] = None
     death_overs_runs: Optional[int] = None
     death_overs_wickets: Optional[int] = None
     death_overs_econ: Optional[float] = None
     death_overs_dot_ball_pct: Optional[float] = None
 
 
+
 class PlayerBowlingSummary(BaseModel):
-  has_data: bool = False
+    has_data: bool = False
 
-  overs: Optional[float] = None
-  maidens: Optional[int] = None
-  runs_conceded: Optional[int] = None
-  wickets: Optional[int] = None
-  economy: Optional[float] = None
+    overs: Optional[float] = None
+    maidens: Optional[int] = None           # still available if you ever want it
+    runs_conceded: Optional[int] = None
+    wickets: Optional[int] = None
+    economy: Optional[float] = None
 
-  dot_ball_percentage: Optional[float] = None
-  boundary_balls: Optional[int] = None
-  wides: Optional[int] = None
-  no_balls: Optional[int] = None
+    dot_balls: Optional[int] = None         # ⬅️ NEW: total dot balls
+    dot_ball_percentage: Optional[float] = None
 
-  phase_breakdown: Optional[BowlingPhaseBreakdown] = None
+    boundary_balls: Optional[int] = None
+    wides: Optional[int] = None
+    no_balls: Optional[int] = None
 
-  bowling_intent_conceded: Optional[float] = None
-  bowling_bpi: Optional[float] = None
+    phase_breakdown: Optional[BowlingPhaseBreakdown] = None
 
-  source: Optional[dict[str, Any]] = None
+    bowling_intent_conceded: Optional[float] = None
+    bowling_bpi: Optional[float] = None
+
+    source: Optional[dict[str, Any]] = None
+
 
 class PlayerFieldingSummary(BaseModel):
   has_data: bool = False
@@ -11830,7 +11834,6 @@ def _compute_player_batting_summary(conn, match_id: int, player_id: int) -> dict
         },
     }
 
-
 def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict:
     # Overall aggregates
     row = conn.execute("""
@@ -11875,13 +11878,13 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
     if not row or (row["balls_legal"] or 0) == 0:
         return {"has_data": False, "source": {"reason": "no bowling events"}}
 
-    balls_legal   = int(row["balls_legal"] or 0)
-    runs_conc     = int(row["runs_conc"] or 0)
-    dot_balls     = int(row["dot_balls"] or 0)
+    balls_legal    = int(row["balls_legal"] or 0)
+    runs_conc      = int(row["runs_conc"] or 0)
+    dot_balls      = int(row["dot_balls"] or 0)
     boundary_balls = int(row["boundary_balls"] or 0)
-    wides         = int(row["wides"] or 0)
-    no_balls      = int(row["no_balls"] or 0)
-    wickets       = int(row["wickets"] or 0)
+    wides          = int(row["wides"] or 0)
+    no_balls       = int(row["no_balls"] or 0)
+    wickets        = int(row["wickets"] or 0)
 
     overs = _balls_to_overs(balls_legal)
     economy = round(runs_conc / overs, 2) if overs and overs > 0 else None
@@ -12016,19 +12019,19 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
     dots_death  = int(phase_rows["dots_death"] or 0)  if phase_rows else 0
     wkts_death  = int(phase_rows["wkts_death"] or 0)  if phase_rows else 0
 
-    pp_overs   = _balls_to_overs(balls_pp)
-    mid_overs  = _balls_to_overs(balls_mid)
+    pp_overs    = _balls_to_overs(balls_pp)
+    mid_overs   = _balls_to_overs(balls_mid)
     death_overs = _balls_to_overs(balls_death)
 
-    pp_econ    = round(runs_pp / pp_overs, 2)   if pp_overs   and pp_overs > 0   else None
-    mid_econ   = round(runs_mid / mid_overs, 2) if mid_overs  and mid_overs > 0  else None
-    death_econ = round(runs_death / death_overs, 2) if death_overs and death_overs > 0 else None
+    pp_econ     = round(runs_pp / pp_overs, 2)    if pp_overs    and pp_overs > 0    else None
+    mid_econ    = round(runs_mid / mid_overs, 2)  if mid_overs   and mid_overs > 0   else None
+    death_econ  = round(runs_death / death_overs, 2) if death_overs and death_overs > 0 else None
 
     pp_dot_pct    = round(dots_pp * 100.0 / balls_pp, 1)    if balls_pp    > 0 else None
     mid_dot_pct   = round(dots_mid * 100.0 / balls_mid, 1)  if balls_mid   > 0 else None
     death_dot_pct = round(dots_death * 100.0 / balls_death, 1) if balls_death > 0 else None
 
-    # -------- Maidens per phase (and total) --------
+    # Maidens (still computed if you ever want them)
     over_rows = conn.execute("""
         SELECT
           be.over_number,
@@ -12036,10 +12039,7 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
             COALESCE(be.runs,0)
             + COALESCE(be.wides,0)
             + COALESCE(be.no_balls,0)
-          ) AS over_runs,
-          MAX(CASE WHEN be.is_powerplay    = 1 THEN 1 ELSE 0 END) AS is_pp,
-          MAX(CASE WHEN be.is_middle_overs = 1 THEN 1 ELSE 0 END) AS is_mid,
-          MAX(CASE WHEN be.is_death_overs  = 1 THEN 1 ELSE 0 END) AS is_death
+          ) AS over_runs
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         WHERE i.match_id = ?
@@ -12047,19 +12047,12 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
         GROUP BY be.over_number
     """, (match_id, player_id)).fetchall()
 
-    maidens_total = maidens_pp = maidens_mid = maidens_death = 0
+    maidens_total = 0
     for r in over_rows:
-        over_runs = int(r["over_runs"] or 0)
-        if over_runs == 0:
+        if int(r["over_runs"] or 0) == 0:
             maidens_total += 1
-            if r["is_pp"]:
-                maidens_pp += 1
-            if r["is_mid"]:
-                maidens_mid += 1
-            if r["is_death"]:
-                maidens_death += 1
 
-    # Intent conceded + BPI (unchanged)
+    # Intent conceded + BPI
     row2 = conn.execute("""
         SELECT
           AVG(be.batting_intent_score) AS avg_intent_conceded,
@@ -12075,21 +12068,21 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
 
     phase_breakdown = BowlingPhaseBreakdown(
         powerplay_overs=pp_overs,
-        powerplay_maidens=maidens_pp,
+        powerplay_dot_balls=dots_pp if balls_pp else None,
         powerplay_runs=runs_pp if balls_pp else None,
         powerplay_wickets=wkts_pp if balls_pp else None,
         powerplay_econ=pp_econ,
         powerplay_dot_ball_pct=pp_dot_pct,
 
         middle_overs_overs=mid_overs,
-        middle_overs_maidens=maidens_mid,
+        middle_overs_dot_balls=dots_mid if balls_mid else None,
         middle_overs_runs=runs_mid if balls_mid else None,
         middle_overs_wickets=wkts_mid if balls_mid else None,
         middle_overs_econ=mid_econ,
         middle_overs_dot_ball_pct=mid_dot_pct,
 
         death_overs_overs=death_overs,
-        death_overs_maidens=maidens_death,
+        death_overs_dot_balls=dots_death if balls_death else None,
         death_overs_runs=runs_death if balls_death else None,
         death_overs_wickets=wkts_death if balls_death else None,
         death_overs_econ=death_econ,
@@ -12099,10 +12092,11 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
     return {
         "has_data": True,
         "overs": overs,
-        "maidens": maidens_total,
+        "maidens": maidens_total,   # not used in figures anymore
         "runs_conceded": runs_conc,
         "wickets": wickets,
         "economy": economy,
+        "dot_balls": dot_balls,     # ⬅️ NEW overall dot-ball count
         "dot_ball_percentage": dot_pct,
         "boundary_balls": boundary_balls,
         "wides": wides,
@@ -12121,6 +12115,7 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
             "no_balls": no_balls,
         },
     }
+
 
 def _compute_player_fielding_summary(conn, match_id: int, player_id: int) -> dict:
   rows = conn.execute("""

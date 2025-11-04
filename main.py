@@ -336,9 +336,15 @@ class PlayerSummaryPlayersResponse(BaseModel):
   players: List[PlayerSummaryPlayer]
 
 class BattingPhaseBreakdown(BaseModel):
-  powerplay_runs: Optional[int] = None
-  middle_overs_runs: Optional[int] = None
-  death_overs_runs: Optional[int] = None
+    powerplay_runs: Optional[int] = None
+    powerplay_scoring_shot_pct: Optional[float] = None
+
+    middle_overs_runs: Optional[int] = None
+    middle_overs_scoring_shot_pct: Optional[float] = None
+
+    death_overs_runs: Optional[int] = None
+    death_overs_scoring_shot_pct: Optional[float] = None
+
 
 class PlayerBattingSummary(BaseModel):
   has_data: bool = False
@@ -363,10 +369,27 @@ class PlayerBattingSummary(BaseModel):
   source: Optional[dict[str, Any]] = None
 
 class BowlingPhaseBreakdown(BaseModel):
-  powerplay_overs: Optional[float] = None
-  powerplay_econ: Optional[float] = None
-  middle_overs_overs: Optional[float] = None
-  middle_overs_econ: Optional[float] = None
+    powerplay_overs: Optional[float] = None
+    powerplay_maidens: Optional[int] = None
+    powerplay_runs: Optional[int] = None
+    powerplay_wickets: Optional[int] = None
+    powerplay_econ: Optional[float] = None
+    powerplay_dot_ball_pct: Optional[float] = None
+
+    middle_overs_overs: Optional[float] = None
+    middle_overs_maidens: Optional[int] = None
+    middle_overs_runs: Optional[int] = None
+    middle_overs_wickets: Optional[int] = None
+    middle_overs_econ: Optional[float] = None
+    middle_overs_dot_ball_pct: Optional[float] = None
+
+    death_overs_overs: Optional[float] = None
+    death_overs_maidens: Optional[int] = None
+    death_overs_runs: Optional[int] = None
+    death_overs_wickets: Optional[int] = None
+    death_overs_econ: Optional[float] = None
+    death_overs_dot_ball_pct: Optional[float] = None
+
 
 class PlayerBowlingSummary(BaseModel):
   has_data: bool = False
@@ -11573,322 +11596,531 @@ def postgame_players(
     conn.close()
 
 def _compute_player_batting_summary(conn, match_id: int, player_id: int) -> dict:
-  row = conn.execute("""
-    SELECT
-      -- Balls faced: batter on strike and NOT a wide
-      SUM(
-        CASE
-          WHEN COALESCE(be.wides, 0) = 0 THEN 1
-          ELSE 0
-        END
-      ) AS balls,
+    row = conn.execute("""
+        SELECT
+          -- Balls faced: batter on strike and NOT a wide
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides, 0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
 
-      -- Runs off the bat
-      SUM(COALESCE(be.runs,0)) AS runs,
+          -- Runs off the bat
+          SUM(COALESCE(be.runs,0)) AS runs,
 
-      SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
-      SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+          SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
+          SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
 
-      -- Dot balls for batter: ball faced AND runs=0
-      SUM(
-        CASE
-          WHEN COALESCE(be.wides,0) = 0
-               AND COALESCE(be.runs,0) = 0
-          THEN 1 ELSE 0
-        END
-      ) AS dot_balls,
+          -- Dot balls for batter: ball faced AND runs=0
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
 
-      SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+          SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
 
-      AVG(be.batting_intent_score) AS avg_intent,
-      SUM(COALESCE(be.batting_bpi,0)) AS total_bpi,
+          AVG(be.batting_intent_score) AS avg_intent,
+          SUM(COALESCE(be.batting_bpi,0)) AS total_bpi,
 
-      SUM(CASE WHEN be.is_powerplay    = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_pp,
-      SUM(CASE WHEN be.is_middle_overs = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_mid,
-      SUM(CASE WHEN be.is_death_overs  = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_death
-    FROM ball_events be
-    JOIN innings i ON be.innings_id = i.innings_id
-    WHERE i.match_id = ?
-      AND be.batter_id = ?
-  """, (match_id, player_id)).fetchone()
+          -- Phase runs (off the bat)
+          SUM(CASE WHEN be.is_powerplay    = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_pp,
+          SUM(CASE WHEN be.is_middle_overs = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_mid,
+          SUM(CASE WHEN be.is_death_overs  = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_death,
 
-  if not row:
-    return {"has_data": False, "source": {"reason": "no batting events row"}}
+          -- Phase balls & dots (for Scoring Shot %)
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_pp,
 
-  balls = int(row["balls"] or 0)
-  runs  = int(row["runs"] or 0)
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_mid,
 
-  if balls == 0 and runs == 0:
-    return {"has_data": False, "source": {"reason": "no batting events"}}
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_death
 
-  fours = int(row["fours"] or 0)
-  sixes = int(row["sixes"] or 0)
-  dot_balls = int(row["dot_balls"] or 0)
-  boundary_balls = int(row["boundary_balls"] or 0)
-
-  strike_rate = round(runs * 100.0 / balls, 1) if balls > 0 else None
-  boundary_pct = round(boundary_balls * 100.0 / balls, 1) if balls > 0 else None
-  dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
-
-  avg_intent = row["avg_intent"]
-  total_bpi = row["total_bpi"]
-
-  # Batting position (from player_match_roles)
-  bp_row = conn.execute("""
-    SELECT batting_position
-    FROM player_match_roles
-    WHERE match_id = ? AND player_id = ?
-    LIMIT 1
-  """, (match_id, player_id)).fetchone()
-  batting_position = int(bp_row["batting_position"]) if bp_row and bp_row["batting_position"] is not None else None
-
-  # Dismissal (ball-based)
-  dism_row = conn.execute("""
-    SELECT dismissal_type, over_number
-    FROM ball_events be
-    JOIN innings i ON be.innings_id = i.innings_id
-    WHERE i.match_id = ?
-      AND be.dismissed_player_id = ?
-    ORDER BY be.over_number
-    LIMIT 1
-  """, (match_id, player_id)).fetchone()
-
-  dismissal_str = None
-  if dism_row:
-    dtype = dism_row["dismissal_type"]
-    over = dism_row["over_number"]
-    if dtype and over is not None:
-      dismissal_str = f"{dtype} (over {over})"
-    elif dtype:
-      dismissal_str = dtype
-
-  # Fallback: non-ball dismissals
-  if not dismissal_str:
-    nbd = conn.execute("""
-      SELECT dismissal_type, over_number
-      FROM non_ball_dismissals
-      WHERE match_id = ?
-        AND player_id = ?
-      ORDER BY over_number
-      LIMIT 1
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.batter_id = ?
     """, (match_id, player_id)).fetchone()
-    if nbd:
-      dtype = nbd["dismissal_type"]
-      over = nbd["over_number"]
-      if dtype and over is not None:
-        dismissal_str = f"{dtype} (over {over})"
-      elif dtype:
-        dismissal_str = dtype
 
-  phase_breakdown = BattingPhaseBreakdown(
-    powerplay_runs = int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
-    middle_overs_runs = int(row["runs_mid"] or 0) if row["runs_mid"] is not None else None,
-    death_overs_runs = int(row["runs_death"] or 0) if row["runs_death"] is not None else None,
-  )
+    if not row:
+        return {"has_data": False, "source": {"reason": "no batting events row"}}
 
-  return {
-    "has_data": True,
-    "runs": runs,
-    "balls": balls,
-    "fours": fours,
-    "sixes": sixes,
-    "strike_rate": strike_rate,
-    "batting_position": batting_position,
-    "boundary_percentage": boundary_pct,
-    "dot_ball_percentage": dot_pct,
-    "phase_breakdown": phase_breakdown,
-    "batting_intent_score": float(avg_intent) if avg_intent is not None else None,
-    "batting_bpi": float(total_bpi) if total_bpi is not None else None,
-    "dismissal": dismissal_str,
-    "source": {
-      "match_id": match_id,
-      "player_id": player_id,
-      "balls_faced_excl_wides": balls,
-      "runs": runs,
-      "fours": fours,
-      "sixes": sixes,
-      "dot_balls_batter": dot_balls,
-      "boundary_balls": boundary_balls,
-    },
-  }
+    balls = int(row["balls"] or 0)
+    runs  = int(row["runs"] or 0)
+
+    if balls == 0 and runs == 0:
+        return {"has_data": False, "source": {"reason": "no batting events"}}
+
+    fours = int(row["fours"] or 0)
+    sixes = int(row["sixes"] or 0)
+    dot_balls = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+
+    strike_rate = round(runs * 100.0 / balls, 1) if balls > 0 else None
+    boundary_pct = round(boundary_balls * 100.0 / balls, 1) if balls > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+
+    avg_intent = row["avg_intent"]
+    total_bpi = row["total_bpi"]
+
+    # -------- Per-phase scoring shot % --------
+    def ss_pct(balls_phase, dots_phase):
+      if not balls_phase:
+        return None
+      dot_p = dots_phase * 100.0 / balls_phase
+      return round(100.0 - dot_p, 1)
+
+    balls_pp   = int(row["balls_pp"] or 0)
+    dots_pp    = int(row["dots_pp"] or 0)
+    balls_mid  = int(row["balls_mid"] or 0)
+    dots_mid   = int(row["dots_mid"] or 0)
+    balls_death = int(row["balls_death"] or 0)
+    dots_death = int(row["dots_death"] or 0)
+
+    ss_pp    = ss_pct(balls_pp, dots_pp)
+    ss_mid   = ss_pct(balls_mid, dots_mid)
+    ss_death = ss_pct(balls_death, dots_death)
+
+    # Batting position from player_match_roles
+    bp_row = conn.execute("""
+        SELECT batting_position
+        FROM player_match_roles
+        WHERE match_id = ? AND player_id = ?
+        LIMIT 1
+    """, (match_id, player_id)).fetchone()
+    batting_position = int(bp_row["batting_position"]) if bp_row and bp_row["batting_position"] is not None else None
+
+    # -------- Dismissal (nicer text + ball-level over) --------
+    dism_row = conn.execute("""
+        SELECT dismissal_type, over_number, balls_this_over
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.dismissed_player_id = ?
+        ORDER BY be.over_number, be.balls_this_over
+        LIMIT 1
+    """, (match_id, player_id)).fetchone()
+
+    dismissal_str = None
+    if dism_row:
+        dtype_raw = dism_row["dismissal_type"]
+        over = dism_row["over_number"]
+        ball_in_over = dism_row["balls_this_over"]
+
+        dtype = str(dtype_raw).strip().title() if dtype_raw else None  # "bowled" -> "Bowled"
+        over_str = None
+
+        if over is not None and ball_in_over is not None:
+            try:
+                over_int = int(float(over))
+            except (TypeError, ValueError):
+                over_int = None
+            try:
+                ball_int = int(ball_in_over)
+            except (TypeError, ValueError):
+                ball_int = None
+
+            if over_int is not None and ball_int is not None:
+                over_str = f"{over_int}.{ball_int}"
+        elif over is not None:
+            try:
+                over_str = str(int(float(over)))
+            except (TypeError, ValueError):
+                over_str = str(over)
+
+        if dtype and over_str:
+            dismissal_str = f"{dtype} (over {over_str})"
+        elif dtype:
+            dismissal_str = dtype
+
+    # Fallback to non-ball dismissals
+    if not dismissal_str:
+        nbd = conn.execute("""
+            SELECT dismissal_type, over_number
+            FROM non_ball_dismissals
+            WHERE match_id = ?
+              AND player_id = ?
+            ORDER BY over_number
+            LIMIT 1
+        """, (match_id, player_id)).fetchone()
+        if nbd:
+            dtype_raw = nbd["dismissal_type"]
+            over = nbd["over_number"]
+            dtype = str(dtype_raw).strip().title() if dtype_raw else None
+            over_str = str(over) if over is not None else None
+
+            if dtype and over_str:
+                dismissal_str = f"{dtype} (over {over_str})"
+            elif dtype:
+                dismissal_str = dtype
+
+    phase_breakdown = BattingPhaseBreakdown(
+        powerplay_runs=int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
+        powerplay_scoring_shot_pct=ss_pp,
+        middle_overs_runs=int(row["runs_mid"] or 0) if row["runs_mid"] is not None else None,
+        middle_overs_scoring_shot_pct=ss_mid,
+        death_overs_runs=int(row["runs_death"] or 0) if row["runs_death"] is not None else None,
+        death_overs_scoring_shot_pct=ss_death,
+    )
+
+    return {
+        "has_data": True,
+        "runs": runs,
+        "balls": balls,
+        "fours": fours,
+        "sixes": sixes,
+        "strike_rate": strike_rate,
+        "batting_position": batting_position,
+        "boundary_percentage": boundary_pct,
+        "dot_ball_percentage": dot_pct,
+        "phase_breakdown": phase_breakdown,
+        "batting_intent_score": float(avg_intent) if avg_intent is not None else None,
+        "batting_bpi": float(total_bpi) if total_bpi is not None else None,
+        "dismissal": dismissal_str,
+        "source": {
+            "match_id": match_id,
+            "player_id": player_id,
+            "balls_faced_excl_wides": balls,
+            "runs": runs,
+            "fours": fours,
+            "sixes": sixes,
+            "dot_balls_batter": dot_balls,
+            "boundary_balls": boundary_balls,
+        },
+    }
+
 
 def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict:
-  row = conn.execute("""
-    SELECT
-      -- Legal balls for bowler
-      SUM(
-        CASE
-          WHEN COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
-          THEN 1 ELSE 0
-        END
-      ) AS balls_legal,
+    # Overall aggregates
+    row = conn.execute("""
+        SELECT
+          -- Legal balls for bowler
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_legal,
 
-      -- Bowler runs conceded
-      SUM(
-        COALESCE(be.runs,0)
-        + COALESCE(be.wides,0)
-        + COALESCE(be.no_balls,0)
-      ) AS runs_conc,
-
-      -- Dot balls for bowler: legal ball AND runs=0 AND no wides/no-balls
-      SUM(
-        CASE
-          WHEN COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
-               AND COALESCE(be.runs,0) = 0
-          THEN 1 ELSE 0
-        END
-      ) AS dot_balls,
-
-      SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
-      SUM(COALESCE(be.wides,0)) AS wides,
-      SUM(COALESCE(be.no_balls,0)) AS no_balls,
-
-      SUM(CASE WHEN be.dismissed_player_id IS NOT NULL THEN 1 ELSE 0 END) AS wickets
-    FROM ball_events be
-    JOIN innings i ON be.innings_id = i.innings_id
-    WHERE i.match_id = ?
-      AND be.bowler_id = ?
-  """, (match_id, player_id)).fetchone()
-
-  if not row or (row["balls_legal"] or 0) == 0:
-    return {"has_data": False, "source": {"reason": "no bowling events"}}
-
-  balls_legal = int(row["balls_legal"] or 0)
-  runs_conc = int(row["runs_conc"] or 0)
-  dot_balls = int(row["dot_balls"] or 0)
-  boundary_balls = int(row["boundary_balls"] or 0)
-  wides = int(row["wides"] or 0)
-  no_balls = int(row["no_balls"] or 0)
-  wickets = int(row["wickets"] or 0)
-
-  overs = _balls_to_overs(balls_legal)
-  economy = round(runs_conc / overs, 2) if overs and overs > 0 else None
-  dot_pct = round(dot_balls * 100.0 / balls_legal, 1) if balls_legal > 0 else None
-
-  # Maidens: overs where bowler runs conceded = 0
-  maiden_row = conn.execute("""
-    SELECT COUNT(*) AS maidens
-    FROM (
-      SELECT
-        be.over_number,
-        SUM(
-          COALESCE(be.runs,0)
-          + COALESCE(be.wides,0)
-          + COALESCE(be.no_balls,0)
-        ) AS over_runs
-      FROM ball_events be
-      JOIN innings i ON be.innings_id = i.innings_id
-      WHERE i.match_id = ?
-        AND be.bowler_id = ?
-      GROUP BY be.over_number
-      HAVING over_runs = 0
-    ) sub
-  """, (match_id, player_id)).fetchone()
-  maidens = int(maiden_row["maidens"] or 0)
-
-  # Phase breakdown
-  phase_rows = conn.execute("""
-    SELECT
-      SUM(
-        CASE
-          WHEN be.is_powerplay = 1
-               AND COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
-          THEN 1 ELSE 0
-        END
-      ) AS balls_pp,
-      SUM(
-        CASE
-          WHEN be.is_powerplay = 1 THEN
+          -- Bowler runs conceded
+          SUM(
             COALESCE(be.runs,0)
             + COALESCE(be.wides,0)
             + COALESCE(be.no_balls,0)
-          ELSE 0
-        END
-      ) AS runs_pp,
+          ) AS runs_conc,
 
-      SUM(
-        CASE
-          WHEN be.is_middle_overs = 1
-               AND COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
-          THEN 1 ELSE 0
-        END
-      ) AS balls_mid,
-      SUM(
-        CASE
-          WHEN be.is_middle_overs = 1 THEN
+          -- Dot balls for bowler (legal ball & runs=0)
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
+          SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+          SUM(COALESCE(be.wides,0)) AS wides,
+          SUM(COALESCE(be.no_balls,0)) AS no_balls,
+
+          SUM(CASE WHEN be.dismissed_player_id IS NOT NULL THEN 1 ELSE 0 END) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+    """, (match_id, player_id)).fetchone()
+
+    if not row or (row["balls_legal"] or 0) == 0:
+        return {"has_data": False, "source": {"reason": "no bowling events"}}
+
+    balls_legal   = int(row["balls_legal"] or 0)
+    runs_conc     = int(row["runs_conc"] or 0)
+    dot_balls     = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+    wides         = int(row["wides"] or 0)
+    no_balls      = int(row["no_balls"] or 0)
+    wickets       = int(row["wickets"] or 0)
+
+    overs = _balls_to_overs(balls_legal)
+    economy = round(runs_conc / overs, 2) if overs and overs > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls_legal, 1) if balls_legal > 0 else None
+
+    # -------- Per-phase aggregates (balls, runs, dots, wickets) --------
+    phase_rows = conn.execute("""
+        SELECT
+          -- Powerplay
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1 THEN
+                COALESCE(be.runs,0)
+                + COALESCE(be.wides,0)
+                + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND be.dismissed_player_id IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_pp,
+
+          -- Middle overs
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1 THEN
+                COALESCE(be.runs,0)
+                + COALESCE(be.wides,0)
+                + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND be.dismissed_player_id IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_mid,
+
+          -- Death overs
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1 THEN
+                COALESCE(be.runs,0)
+                + COALESCE(be.wides,0)
+                + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND be.dismissed_player_id IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_death
+
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+    """, (match_id, player_id)).fetchone()
+
+    balls_pp    = int(phase_rows["balls_pp"] or 0)    if phase_rows else 0
+    runs_pp     = int(phase_rows["runs_pp"] or 0)     if phase_rows else 0
+    dots_pp     = int(phase_rows["dots_pp"] or 0)     if phase_rows else 0
+    wkts_pp     = int(phase_rows["wkts_pp"] or 0)     if phase_rows else 0
+
+    balls_mid   = int(phase_rows["balls_mid"] or 0)   if phase_rows else 0
+    runs_mid    = int(phase_rows["runs_mid"] or 0)    if phase_rows else 0
+    dots_mid    = int(phase_rows["dots_mid"] or 0)    if phase_rows else 0
+    wkts_mid    = int(phase_rows["wkts_mid"] or 0)    if phase_rows else 0
+
+    balls_death = int(phase_rows["balls_death"] or 0) if phase_rows else 0
+    runs_death  = int(phase_rows["runs_death"] or 0)  if phase_rows else 0
+    dots_death  = int(phase_rows["dots_death"] or 0)  if phase_rows else 0
+    wkts_death  = int(phase_rows["wkts_death"] or 0)  if phase_rows else 0
+
+    pp_overs   = _balls_to_overs(balls_pp)
+    mid_overs  = _balls_to_overs(balls_mid)
+    death_overs = _balls_to_overs(balls_death)
+
+    pp_econ    = round(runs_pp / pp_overs, 2)   if pp_overs   and pp_overs > 0   else None
+    mid_econ   = round(runs_mid / mid_overs, 2) if mid_overs  and mid_overs > 0  else None
+    death_econ = round(runs_death / death_overs, 2) if death_overs and death_overs > 0 else None
+
+    pp_dot_pct    = round(dots_pp * 100.0 / balls_pp, 1)    if balls_pp    > 0 else None
+    mid_dot_pct   = round(dots_mid * 100.0 / balls_mid, 1)  if balls_mid   > 0 else None
+    death_dot_pct = round(dots_death * 100.0 / balls_death, 1) if balls_death > 0 else None
+
+    # -------- Maidens per phase (and total) --------
+    over_rows = conn.execute("""
+        SELECT
+          be.over_number,
+          SUM(
             COALESCE(be.runs,0)
             + COALESCE(be.wides,0)
             + COALESCE(be.no_balls,0)
-          ELSE 0
-        END
-      ) AS runs_mid
-    FROM ball_events be
-    JOIN innings i ON be.innings_id = i.innings_id
-    WHERE i.match_id = ?
-      AND be.bowler_id = ?
-  """, (match_id, player_id)).fetchone()
+          ) AS over_runs,
+          MAX(CASE WHEN be.is_powerplay    = 1 THEN 1 ELSE 0 END) AS is_pp,
+          MAX(CASE WHEN be.is_middle_overs = 1 THEN 1 ELSE 0 END) AS is_mid,
+          MAX(CASE WHEN be.is_death_overs  = 1 THEN 1 ELSE 0 END) AS is_death
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+        GROUP BY be.over_number
+    """, (match_id, player_id)).fetchall()
 
-  balls_pp = int(phase_rows["balls_pp"] or 0) if phase_rows else 0
-  runs_pp = int(phase_rows["runs_pp"] or 0) if phase_rows else 0
-  balls_mid = int(phase_rows["balls_mid"] or 0) if phase_rows else 0
-  runs_mid = int(phase_rows["runs_mid"] or 0) if phase_rows else 0
+    maidens_total = maidens_pp = maidens_mid = maidens_death = 0
+    for r in over_rows:
+        over_runs = int(r["over_runs"] or 0)
+        if over_runs == 0:
+            maidens_total += 1
+            if r["is_pp"]:
+                maidens_pp += 1
+            if r["is_mid"]:
+                maidens_mid += 1
+            if r["is_death"]:
+                maidens_death += 1
 
-  pp_overs = _balls_to_overs(balls_pp)
-  mo_overs = _balls_to_overs(balls_mid)
+    # Intent conceded + BPI (unchanged)
+    row2 = conn.execute("""
+        SELECT
+          AVG(be.batting_intent_score) AS avg_intent_conceded,
+          SUM(COALESCE(be.bowling_bpi,0)) AS total_bpi
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        WHERE i.match_id = ?
+          AND be.bowler_id = ?
+    """, (match_id, player_id)).fetchone()
 
-  pp_econ = round(runs_pp / pp_overs, 2) if pp_overs and pp_overs > 0 else None
-  mo_econ = round(runs_mid / mo_overs, 2) if mo_overs and mo_overs > 0 else None
+    avg_intent_conc = row2["avg_intent_conceded"] if row2 else None
+    total_bpi = row2["total_bpi"] if row2 else None
 
-  phase_breakdown = BowlingPhaseBreakdown(
-    powerplay_overs=pp_overs,
-    powerplay_econ=pp_econ,
-    middle_overs_overs=mo_overs,
-    middle_overs_econ=mo_econ,
-  )
+    phase_breakdown = BowlingPhaseBreakdown(
+        powerplay_overs=pp_overs,
+        powerplay_maidens=maidens_pp,
+        powerplay_runs=runs_pp if balls_pp else None,
+        powerplay_wickets=wkts_pp if balls_pp else None,
+        powerplay_econ=pp_econ,
+        powerplay_dot_ball_pct=pp_dot_pct,
 
-  # Intent conceded + BPI
-  row2 = conn.execute("""
-    SELECT
-      AVG(be.batting_intent_score) AS avg_intent_conceded,
-      SUM(COALESCE(be.bowling_bpi,0)) AS total_bpi
-    FROM ball_events be
-    JOIN innings i ON be.innings_id = i.innings_id
-    WHERE i.match_id = ?
-      AND be.bowler_id = ?
-  """, (match_id, player_id)).fetchone()
+        middle_overs_overs=mid_overs,
+        middle_overs_maidens=maidens_mid,
+        middle_overs_runs=runs_mid if balls_mid else None,
+        middle_overs_wickets=wkts_mid if balls_mid else None,
+        middle_overs_econ=mid_econ,
+        middle_overs_dot_ball_pct=mid_dot_pct,
 
-  avg_intent_conc = row2["avg_intent_conceded"] if row2 else None
-  total_bpi = row2["total_bpi"] if row2 else None
+        death_overs_overs=death_overs,
+        death_overs_maidens=maidens_death,
+        death_overs_runs=runs_death if balls_death else None,
+        death_overs_wickets=wkts_death if balls_death else None,
+        death_overs_econ=death_econ,
+        death_overs_dot_ball_pct=death_dot_pct,
+    )
 
-  return {
-    "has_data": True,
-    "overs": overs,
-    "maidens": maidens,
-    "runs_conceded": runs_conc,
-    "wickets": wickets,
-    "economy": economy,
-    "dot_ball_percentage": dot_pct,
-    "boundary_balls": boundary_balls,
-    "wides": wides,
-    "no_balls": no_balls,
-    "phase_breakdown": phase_breakdown,
-    "bowling_intent_conceded": float(avg_intent_conc) if avg_intent_conc is not None else None,
-    "bowling_bpi": float(total_bpi) if total_bpi is not None else None,
-    "source": {
-      "match_id": match_id,
-      "player_id": player_id,
-      "legal_balls": balls_legal,
-      "runs_conceded_bowler_only": runs_conc,
-      "dot_balls_bowler": dot_balls,
-      "boundary_balls": boundary_balls,
-      "wides": wides,
-      "no_balls": no_balls,
-    },
-  }
+    return {
+        "has_data": True,
+        "overs": overs,
+        "maidens": maidens_total,
+        "runs_conceded": runs_conc,
+        "wickets": wickets,
+        "economy": economy,
+        "dot_ball_percentage": dot_pct,
+        "boundary_balls": boundary_balls,
+        "wides": wides,
+        "no_balls": no_balls,
+        "phase_breakdown": phase_breakdown,
+        "bowling_intent_conceded": float(avg_intent_conc) if avg_intent_conc is not None else None,
+        "bowling_bpi": float(total_bpi) if total_bpi is not None else None,
+        "source": {
+            "match_id": match_id,
+            "player_id": player_id,
+            "legal_balls": balls_legal,
+            "runs_conceded_bowler_only": runs_conc,
+            "dot_balls_bowler": dot_balls,
+            "boundary_balls": boundary_balls,
+            "wides": wides,
+            "no_balls": no_balls,
+        },
+    }
 
 def _compute_player_fielding_summary(conn, match_id: int, player_id: int) -> dict:
   rows = conn.execute("""

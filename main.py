@@ -13600,40 +13600,38 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
     """
     Leaders for one team in a tournament.
 
-    - Batting: runs + SR
-    - Bowling: wickets + economy
-    - Fielding: catches + run outs
-
-    Uses player_match_roles.team_id to associate players to a team,
-    so we don't depend on innings.batting_team / bowling_team strings.
+    Batting:  runs + SR (sorted by runs)
+    Bowling:  wickets + Econ (sorted by wickets)
+    Fielding: catches + run outs (sorted by total dismissals)
     """
 
-    # ---------- Batting leaders ----------
+    # ===== Batting leaders =====
     batting_rows = conn.execute("""
         SELECT
-        p.player_id,
-        p.player_name,
-        SUM(COALESCE(be.runs,0)) AS runs,
-        SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
-        ) AS balls
+          p.player_id,
+          p.player_name,
+          SUM(COALESCE(be.runs, 0)) AS runs,
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls
         FROM ball_events be
-        JOIN innings i ON i.innings_id = be.innings_id
-        JOIN matches m ON m.match_id = i.match_id
-        JOIN players p ON p.player_id = be.batter_id
-        JOIN player_match_roles pmr
-        ON pmr.match_id = m.match_id
-        AND pmr.player_id = p.player_id
+        JOIN innings i
+          ON i.innings_id = be.innings_id
+        JOIN matches m
+          ON m.match_id = i.match_id
+        JOIN players p
+          ON p.player_id = be.batter_id
         WHERE m.tournament_id = :tournament_id
-        AND pmr.team_id = :team_id
+          AND i.batting_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING runs > 0
         ORDER BY runs DESC, balls ASC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
-
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     batting = []
     for r in batting_rows:
@@ -13647,7 +13645,7 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
             "strike_rate": sr,
         })
 
-    # ---------- Bowling leaders ----------
+    # ===== Bowling leaders =====
     bowling_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13655,26 +13653,26 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
           SUM(
             CASE
               WHEN be.dismissal_type IN (
-                   'bowled','lbw','caught','caught_and_bowled',
-                   'stumped','hit_wicket'
+                   'bowled', 'lbw', 'caught', 'caught_and_bowled',
+                   'stumped', 'hit_wicket'
               )
               THEN 1 ELSE 0
             END
           ) AS wickets,
           SUM(
             CASE
-              WHEN COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
+              WHEN COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
               THEN 1 ELSE 0
             END
           ) AS legal_balls,
           SUM(
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-            + COALESCE(be.byes,0)
-            + COALESCE(be.leg_byes,0)
-            + COALESCE(be.penalty_runs,0)
+            COALESCE(be.runs, 0)
+            + COALESCE(be.wides, 0)
+            + COALESCE(be.no_balls, 0)
+            + COALESCE(be.byes, 0)
+            + COALESCE(be.leg_byes, 0)
+            + COALESCE(be.penalty_runs, 0)
           ) AS runs_conceded
         FROM ball_events be
         JOIN innings i
@@ -13683,16 +13681,13 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
           ON m.match_id = i.match_id
         JOIN players p
           ON p.player_id = be.bowler_id
-        JOIN player_match_roles pmr
-          ON pmr.match_id = m.match_id
-         AND pmr.player_id = p.player_id
         WHERE m.tournament_id = :tournament_id
-          AND pmr.team_id = :team_id
+          AND i.bowling_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING wickets > 0
         ORDER BY wickets DESC, runs_conceded ASC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     bowling = []
     for r in bowling_rows:
@@ -13700,14 +13695,14 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         overs = balls / 6.0 if balls else None
         econ = (r["runs_conceded"] / overs) if overs else None
         bowling.append({
-            "player_id": r["player_id"],
-            "player_name": r["player_name"],
-            "wickets": r["wickets"],
-            "overs": overs,
-            "economy": econ,
+        "player_id": r["player_id"],
+        "player_name": r["player_name"],
+        "wickets": r["wickets"],
+        "overs": overs,
+        "economy": econ,
         })
 
-    # ---------- Fielding leaders ----------
+    # ===== Fielding leaders (unchanged) =====
     fielding_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13752,7 +13747,6 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         "bowling": bowling,
         "fielding": fielding,
     }
-
 
 @app.post("/posttournament/team-summary", response_model=TeamTournamentSummaryResponse)
 def post_tournament_team_summary(payload: TeamTournamentSummaryRequest):

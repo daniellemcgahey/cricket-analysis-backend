@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Literal, Tuple
 from collections import defaultdict, Counter
 import os
+import re
 import sqlite3
 import math
 import statistics
@@ -12125,7 +12126,6 @@ def _compute_player_bowling_summary(conn, match_id: int, player_id: int) -> dict
         },
     }
 
-
 def _compute_player_fielding_summary(conn, match_id: int, player_id: int) -> dict:
   rows = conn.execute("""
     SELECT
@@ -12266,57 +12266,106 @@ def postgame_player_summary(
     conn.close()
 
 
-from fastapi import Query, HTTPException
+# ========= Post-tournament category helpers (mirror frontend logic) =========
+
+def _parse_category_tokens_py(name):
+  """
+  Python version of your frontend parseCategoryTokens(name).
+  """
+  s = str(name or "").lower()
+  u19 = bool(re.search(r"\bu-?19\b", s)) or ("u19" in s)
+  women = "women" in s
+  men = "men" in s
+  training = "training" in s
+  return {"u19": u19, "women": women, "men": men, "training": training}
+
+
+def _is_name_in_category_py(name, category):
+  """
+  Python version of isNameInCategory(name, category) from PostGame.
+  """
+  tokens = _parse_category_tokens_py(name)
+  u19 = tokens["u19"]
+  women = tokens["women"]
+  men = tokens["men"]
+  training = tokens["training"]
+
+  if category == "Men":
+    return (not u19) and men and (not women)
+  elif category == "Women":
+    return (not u19) and women
+  elif category == "U19 Men":
+    return u19 and men and (not women)
+  elif category == "U19 Women":
+    return u19 and women
+  elif category == "Training":
+    return training
+  else:
+    return False
+
+
 
 @app.get("/posttournament/tournaments")
 def post_tournament_tournaments(
-    teamCategory: str = Query(..., description="Team category, e.g. 'Men', 'Women'")
+  teamCategory: str = Query(..., description="Men | Women | U19 Men | U19 Women | Training"),
 ):
-    """
-    Returns tournaments that involve at least one team whose name contains the
-    category marker (e.g. 'Men', 'Women', 'U19 Men', 'Training', etc).
+  """
+  Returns tournaments that involve at least one team whose name falls into the
+  given category, using the SAME logic as the PostGame frontend:
 
-    We infer team category from the countries.country_name suffix, e.g.:
-      'Brasil Men', 'Brasil Women', 'Brasil U19 Men'
-    """
+    Men:       !u19 && men && !women
+    Women:     !u19 && women
+    U19 Men:   u19 && men && !women
+    U19 Women: u19 && women
+    Training:  training
+  """
 
-    conn = _db()
-    try:
-        # If your DB actually uses 'Mens' / 'Womens' etc, you can tweak this mapping:
-        marker = teamCategory
-        # Example tweak if needed:
-        # if teamCategory == "Men":
-        #     marker = "Mens"
-        # elif teamCategory == "Women":
-        #     marker = "Womens"
+  teamCategory = (teamCategory or "").strip()
 
-        rows = conn.execute("""
-            SELECT DISTINCT
-              t.tournament_id,
-              t.tournament_name
-            FROM tournaments t
-            JOIN matches m
-              ON m.tournament_id = t.tournament_id
-            JOIN countries ca
-              ON ca.country_id = m.team_a
-            JOIN countries cb
-              ON cb.country_id = m.team_b
-            WHERE ca.country_name LIKE '%' || ? || '%'
-               OR cb.country_name LIKE '%' || ? || '%'
-            ORDER BY t.tournament_name
-        """, (marker, marker)).fetchall()
+  conn = _db()
+  try:
+    rows = conn.execute("""
+      SELECT DISTINCT
+        t.tournament_id,
+        t.tournament_name,
+        ca.country_name AS team_a_name,
+        cb.country_name AS team_b_name
+      FROM tournaments t
+      JOIN matches m
+        ON m.tournament_id = t.tournament_id
+      JOIN countries ca
+        ON ca.country_id = m.team_a
+      JOIN countries cb
+        ON cb.country_id = m.team_b
+    """).fetchall()
 
-        tournaments = [
-            {
-                "id": int(r["tournament_id"]),
-                "name": r["tournament_name"],
-            }
-            for r in rows
-        ]
+    seen_ids = set()
+    tournaments = []
 
-        return {"tournaments": tournaments}
-    finally:
-        conn.close()
+    for r in rows:
+      tid = int(r["tournament_id"])
+      tname = r["tournament_name"]
+      a_name = r["team_a_name"] or ""
+      b_name = r["team_b_name"] or ""
+
+      in_cat_a = _is_name_in_category_py(a_name, teamCategory)
+      in_cat_b = _is_name_in_category_py(b_name, teamCategory)
+
+      if in_cat_a or in_cat_b:
+        if tid not in seen_ids:
+          seen_ids.add(tid)
+          tournaments.append({
+            "id": tid,
+            "name": tname,
+          })
+
+    # Sort tournaments by name for a nice dropdown
+    tournaments.sort(key=lambda x: (x["name"] or "").lower())
+
+    return {"tournaments": tournaments}
+  finally:
+    conn.close()
+
 
 
 @app.get("/posttournament/teams")
@@ -12354,7 +12403,6 @@ def post_tournament_teams(
     finally:
         conn.close()
 
-
 @app.get("/posttournament/players")
 def post_tournament_players(
     tournament_id: int = Query(..., description="tournaments.tournament_id"),
@@ -12391,7 +12439,6 @@ def post_tournament_players(
         return {"players": players}
     finally:
         conn.close()
-
 
 def _compute_tournament_batting_summary(
     conn,
@@ -12982,7 +13029,6 @@ def _compute_tournament_fielding_summary(
         "conversion_rate": round(conversion_rate, 1) if conversion_rate is not None else None,
     }
 
-
 @app.get("/posttournament/player-summary")
 def post_tournament_player_summary(
     tournament_id: int = Query(..., description="tournaments.tournament_id"),
@@ -13037,8 +13083,6 @@ def post_tournament_player_summary(
         }
     finally:
         conn.close()
-
-
 
 
 if __name__ == "__main__":

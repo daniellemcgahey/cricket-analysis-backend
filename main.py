@@ -13327,227 +13327,388 @@ def _compute_team_overview(conn, tournament_id: int, team_id: int, team_name: st
         "net_run_rate": nrr,
     }
 
-def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
-    # Innings-level: stable for total runs / average
-    inn = conn.execute("""
-        SELECT
-          COUNT(*) AS innings_count,
-          SUM(i.total_runs) AS total_runs
-        FROM innings i
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_name
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
+def balls_to_overs_str(balls: int | None) -> str:
+    """
+    Convert ball count to cricket-style overs string (X.Y, where Y is 0–5).
+    For example:
+      0 balls  -> "0.0"
+      6 balls  -> "1.0"
+      11 balls -> "1.5"
+    """
+    if not balls:
+        return "0.0"
+    overs = balls // 6
+    rem = balls % 6
+    return f"{overs}.{rem}"
 
-    innings_count = inn["innings_count"] or 0
-    total_runs = inn["total_runs"] or 0
-    avg_runs = total_runs / innings_count if innings_count else 0.0
 
-    # Ball-level: scoring %, boundary %
+def _compute_team_batting_summary(
+    conn,
+    tournament_id: int,
+    team_id: int,
+) -> dict:
+    """
+    Aggregate TEAM BATTING for a tournament.
+    Filters by players.country_id = team_id (so it works even if team names vary).
+    Includes phase-wise wickets and proper cricket overs notation.
+    """
+
     row = conn.execute("""
         SELECT
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
-          ) AS legal_balls,
-
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-                 AND COALESCE(be.dot_balls,0) = 0
-            THEN 1 ELSE 0 END
-          ) AS scoring_balls,
-
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-                 AND COALESCE(be.runs,0) IN (4,6)
-            THEN 1 ELSE 0 END
-          ) AS boundary_balls
-        FROM ball_events be
-        JOIN innings i ON i.innings_id = be.innings_id
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_name
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
-
-    legal_balls = row["legal_balls"] or 0
-    scoring_balls = row["scoring_balls"] or 0
-    boundary_balls = row["boundary_balls"] or 0
-
-    scoring_shot_pct = (
-        scoring_balls / legal_balls * 100.0 if legal_balls else 0.0
-    )
-    boundary_pct = (
-        boundary_balls / legal_balls * 100.0 if legal_balls else 0.0
-    )
-
-    # Phase breakdown
-    phase_rows = conn.execute("""
-        SELECT
-          CASE
-            WHEN be.is_powerplay = 1 THEN 'PP'
-            WHEN be.is_middle_overs = 1 THEN 'MO'
-            WHEN be.is_death_overs = 1 THEN 'DO'
-            ELSE 'OTHER'
-          END AS phase_key,
-          SUM(
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-            + COALESCE(be.byes,0)
-            + COALESCE(be.leg_byes,0)
-            + COALESCE(be.penalty_runs,0)
-          ) AS runs,
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
-          ) AS legal_balls
-        FROM ball_events be
-        JOIN innings i ON i.innings_id = be.innings_id
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_name
-        GROUP BY phase_key
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
-
-    phase = {}
-    for r in phase_rows:
-        key = r["phase_key"]
-        if key not in ("PP", "MO", "DO"):
-            continue
-        runs_p = r["runs"] or 0
-        balls_p = r["legal_balls"] or 0
-        overs_p = balls_p / 6.0 if balls_p else 0.0
-        rr_p = runs_p / overs_p if overs_p else 0.0
-        phase[key] = {
-            "runs": runs_p,
-            "legal_balls": balls_p,
-            "overs": overs_p,
-            "run_rate": rr_p,
-        }
-
-    return {
-        "innings_count": innings_count,
-        "total_runs": total_runs,
-        "avg_runs": avg_runs,
-        "scoring_shot_pct": scoring_shot_pct,
-        "boundary_pct": boundary_pct,
-        "phase": phase,
-    }
-
-def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
-    # Innings-level: runs conceded, overs, wickets
-    inn = conn.execute("""
-        SELECT
-          COUNT(*) AS innings_count,
-          SUM(i.total_runs) AS runs_conceded,
-          SUM(i.overs_bowled) AS overs_bowled,
-          SUM(i.wickets) AS wickets
-        FROM innings i
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_name
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
-
-    innings_count = inn["innings_count"] or 0
-    runs_conceded = inn["runs_conceded"] or 0
-    overs_bowled = inn["overs_bowled"] or 0.0
-    wickets = inn["wickets"] or 0
-
-    economy = runs_conceded / overs_bowled if overs_bowled else 0.0
-    avg_runs_conceded = runs_conceded / innings_count if innings_count else 0.0
-    avg_wickets = wickets / innings_count if innings_count else 0.0
-
-    # Ball-level: dot balls & phase
-    row = conn.execute("""
-        SELECT
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
-          ) AS legal_balls,
-          SUM(COALESCE(be.dot_balls,0)) AS dots
-        FROM ball_events be
-        JOIN innings i ON i.innings_id = be.innings_id
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_name
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
-
-    legal_balls = row["legal_balls"] or 0
-    dots = row["dots"] or 0
-    dot_pct = (dots / legal_balls * 100.0) if legal_balls else 0.0
-
-    phase_rows = conn.execute("""
-        SELECT
-          CASE
-            WHEN be.is_powerplay = 1 THEN 'PP'
-            WHEN be.is_middle_overs = 1 THEN 'MO'
-            WHEN be.is_death_overs = 1 THEN 'DO'
-            ELSE 'OTHER'
-          END AS phase_key,
-          SUM(
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-            + COALESCE(be.byes,0)
-            + COALESCE(be.leg_byes,0)
-            + COALESCE(be.penalty_runs,0)
-          ) AS runs_conceded,
-          SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
-          ) AS legal_balls,
+          -- TOTAL balls faced (legal deliveries), runs scored
           SUM(
             CASE
-              WHEN i.bowling_team = :team_name
-               AND be.dismissal_type IN (
-                    'bowled','lbw','caught','caught_and_bowled',
-                    'stumped','hit_wicket'
-               )
+              WHEN COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
               THEN 1 ELSE 0
             END
-          ) AS wickets
-        FROM ball_events be
-        JOIN innings i ON i.innings_id = be.innings_id
-        JOIN matches m ON m.match_id = i.match_id
-        WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_name
-        GROUP BY phase_key
-    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
+          ) AS balls_total,
+          SUM(COALESCE(be.runs, 0)) AS runs_total,
 
-    phase = {}
-    for r in phase_rows:
-        key = r["phase_key"]
-        if key not in ("PP", "MO", "DO"):
-            continue
-        runs_p = r["runs_conceded"] or 0
-        balls_p = r["legal_balls"] or 0
-        w_p = r["wickets"] or 0
-        overs_p = balls_p / 6.0 if balls_p else 0.0
-        econ_p = runs_p / overs_p if overs_p else 0.0
-        phase[key] = {
-            "runs_conceded": runs_p,
-            "legal_balls": balls_p,
-            "overs": overs_p,
-            "economy": econ_p,
-            "wickets": w_p,
+          -- TOTAL wickets lost (any dismissal on this ball)
+          SUM(
+            CASE
+              WHEN be.dismissal_type IS NOT NULL THEN 1
+              ELSE 0
+            END
+          ) AS wickets_total,
+
+          -- POWERPLAY (PP) balls, runs, wickets
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+               AND COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+              THEN COALESCE(be.runs, 0)
+              ELSE 0
+            END
+          ) AS runs_pp,
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_pp,
+
+          -- MIDDLE OVERS (MO) balls, runs, wickets
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+               AND COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mo,
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+              THEN COALESCE(be.runs, 0)
+              ELSE 0
+            END
+          ) AS runs_mo,
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_mo,
+
+          -- DEATH OVERS (DO) balls, runs, wickets
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+               AND COALESCE(be.wides, 0) = 0
+               AND COALESCE(be.no_balls, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_do,
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+              THEN COALESCE(be.runs, 0)
+              ELSE 0
+            END
+          ) AS runs_do,
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_do
+
+        FROM ball_events be
+        JOIN innings i
+          ON i.innings_id = be.innings_id
+        JOIN matches m
+          ON m.match_id = i.match_id
+        JOIN players p
+          ON p.player_id = be.batter_id
+        WHERE m.tournament_id = :tournament_id
+          AND p.country_id   = :team_id
+    """, {
+        "tournament_id": tournament_id,
+        "team_id": team_id,
+    }).fetchone()
+
+    if not row:
+        return {
+            "overall": {},
+            "phases": {},
         }
 
-    return {
-        "innings_count": innings_count,
-        "runs_conceded": runs_conceded,
-        "avg_runs_conceded": avg_runs_conceded,
-        "wickets": wickets,
-        "avg_wickets": avg_wickets,
-        "economy": economy,
-        "dot_pct": dot_pct,
-        "phase": phase,
+    balls_total = row["balls_total"] or 0
+    balls_pp    = row["balls_pp"] or 0
+    balls_mo    = row["balls_mo"] or 0
+    balls_do    = row["balls_do"] or 0
+
+    runs_total = row["runs_total"] or 0
+    runs_pp    = row["runs_pp"] or 0
+    runs_mo    = row["runs_mo"] or 0
+    runs_do    = row["runs_do"] or 0
+
+    wickets_total = row["wickets_total"] or 0
+    wickets_pp    = row["wickets_pp"] or 0
+    wickets_mo    = row["wickets_mo"] or 0
+    wickets_do    = row["wickets_do"] or 0
+
+    # Float overs (for run rate). DO NOT use cricket notation for calculations.
+    overs_total_float = (balls_total / 6.0) if balls_total else 0.0
+    overs_pp_float    = (balls_pp    / 6.0) if balls_pp    else 0.0
+    overs_mo_float    = (balls_mo    / 6.0) if balls_mo    else 0.0
+    overs_do_float    = (balls_do    / 6.0) if balls_do    else 0.0
+
+    batting_summary = {
+        "overall": {
+            "runs": runs_total,
+            "balls": balls_total,
+            "overs_str": balls_to_overs_str(balls_total),  # e.g. "31.5"
+            "wickets": wickets_total,
+            "run_rate": (runs_total / overs_total_float) if overs_total_float else None,
+        },
+        "phases": {
+            "pp": {
+                "runs": runs_pp,
+                "balls": balls_pp,
+                "overs_str": balls_to_overs_str(balls_pp),
+                "wickets": wickets_pp,
+                "run_rate": (runs_pp / overs_pp_float) if overs_pp_float else None,
+            },
+            "mo": {
+                "runs": runs_mo,
+                "balls": balls_mo,
+                "overs_str": balls_to_overs_str(balls_mo),
+                "wickets": wickets_mo,
+                "run_rate": (runs_mo / overs_mo_float) if overs_mo_float else None,
+            },
+            "do": {
+                "runs": runs_do,
+                "balls": balls_do,
+                "overs_str": balls_to_overs_str(balls_do),
+                "wickets": wickets_do,
+                "run_rate": (runs_do / overs_do_float) if overs_do_float else None,
+            },
+        },
     }
+
+    return batting_summary
+
+
+def _compute_team_bowling_summary(
+    conn,
+    tournament_id: int,
+    team_id: int,
+) -> dict:
+    """
+    Aggregate TEAM BOWLING for a tournament.
+    Filters by players.country_id = team_id (bowler side).
+    Includes phase-wise wickets and proper cricket overs notation.
+    """
+
+    row = conn.execute("""
+        SELECT
+          -- TOTAL balls bowled: exclude wides (no legal delivery on a wide)
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_total,
+
+          -- TOTAL runs conceded: bat + wides + no-balls
+          SUM(
+            COALESCE(be.runs, 0)
+            + COALESCE(be.wides, 0)
+            + COALESCE(be.no_balls, 0)
+          ) AS runs_conceded_total,
+
+          -- TOTAL wickets taken (any dismissal on this ball)
+          SUM(
+            CASE
+              WHEN be.dismissal_type IS NOT NULL THEN 1
+              ELSE 0
+            END
+          ) AS wickets_total,
+
+          -- POWERPLAY (PP)
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+               AND COALESCE(be.wides, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+              THEN COALESCE(be.runs, 0)
+                   + COALESCE(be.wides, 0)
+                   + COALESCE(be.no_balls, 0)
+              ELSE 0
+            END
+          ) AS runs_conceded_pp,
+          SUM(
+            CASE
+              WHEN be.phase = 'PP'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_pp,
+
+          -- MIDDLE OVERS (MO)
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+               AND COALESCE(be.wides, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mo,
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+              THEN COALESCE(be.runs, 0)
+                   + COALESCE(be.wides, 0)
+                   + COALESCE(be.no_balls, 0)
+              ELSE 0
+            END
+          ) AS runs_conceded_mo,
+          SUM(
+            CASE
+              WHEN be.phase = 'MO'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_mo,
+
+          -- DEATH OVERS (DO)
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+               AND COALESCE(be.wides, 0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_do,
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+              THEN COALESCE(be.runs, 0)
+                   + COALESCE(be.wides, 0)
+                   + COALESCE(be.no_balls, 0)
+              ELSE 0
+            END
+          ) AS runs_conceded_do,
+          SUM(
+            CASE
+              WHEN be.phase = 'DO'
+               AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets_do
+
+        FROM ball_events be
+        JOIN innings i
+          ON i.innings_id = be.innings_id
+        JOIN matches m
+          ON m.match_id = i.match_id
+        JOIN players p
+          ON p.player_id = be.bowler_id
+        WHERE m.tournament_id = :tournament_id
+          AND p.country_id   = :team_id
+    """, {
+        "tournament_id": tournament_id,
+        "team_id": team_id,
+    }).fetchone()
+
+    if not row:
+        return {
+            "overall": {},
+            "phases": {},
+        }
+
+    balls_total = row["balls_total"] or 0
+    balls_pp    = row["balls_pp"] or 0
+    balls_mo    = row["balls_mo"] or 0
+    balls_do    = row["balls_do"] or 0
+
+    runs_total = row["runs_conceded_total"] or 0
+    runs_pp    = row["runs_conceded_pp"] or 0
+    runs_mo    = row["runs_conceded_mo"] or 0
+    runs_do    = row["runs_conceded_do"] or 0
+
+    wickets_total = row["wickets_total"] or 0
+    wickets_pp    = row["wickets_pp"] or 0
+    wickets_mo    = row["wickets_mo"] or 0
+    wickets_do    = row["wickets_do"] or 0
+
+    # Float overs (for economy)
+    overs_total_float = (balls_total / 6.0) if balls_total else 0.0
+    overs_pp_float    = (balls_pp    / 6.0) if balls_pp    else 0.0
+    overs_mo_float    = (balls_mo    / 6.0) if balls_mo    else 0.0
+    overs_do_float    = (balls_do    / 6.0) if balls_do    else 0.0
+
+    bowling_summary = {
+        "overall": {
+            "runs_conceded": runs_total,
+            "balls": balls_total,
+            "overs_str": balls_to_overs_str(balls_total),
+            "wickets": wickets_total,
+            "economy": (runs_total / overs_total_float) if overs_total_float else None,
+        },
+        "phases": {
+            "pp": {
+                "runs_conceded": runs_pp,
+                "balls": balls_pp,
+                "overs_str": balls_to_overs_str(balls_pp),
+                "wickets": wickets_pp,
+                "economy": (runs_pp / overs_pp_float) if overs_pp_float else None,
+            },
+            "mo": {
+                "runs_conceded": runs_mo,
+                "balls": balls_mo,
+                "overs_str": balls_to_overs_str(balls_mo),
+                "wickets": wickets_mo,
+                "economy": (runs_mo / overs_mo_float) if overs_mo_float else None,
+            },
+            "do": {
+                "runs_conceded": runs_do,
+                "balls": balls_do,
+                "overs_str": balls_to_overs_str(balls_do),
+                "wickets": wickets_do,
+                "economy": (runs_do / overs_do_float) if overs_do_float else None,
+            },
+        },
+    }
+
+    return bowling_summary
+
 
 def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
     row = conn.execute("""
@@ -13595,6 +13756,7 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_
             "no_balls": disc["no_balls"] or 0,
         },
     }
+
 
 def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
     # ===== Batting leaders – use p.country_id (this matches your “correct” list) =====

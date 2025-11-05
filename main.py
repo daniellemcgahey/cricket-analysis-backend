@@ -12401,9 +12401,12 @@ def _compute_tournament_batting_summary(
 ) -> dict:
     """
     Aggregate batting over all matches in this tournament for this team + player.
-    Mirrors _compute_player_batting_summary but uses tournament_id + team_id instead of match_id.
+    Now includes:
+      - full scoring breakdown: 1s / 2s / 3s / 4s / 6s
+      - match-by-match summary with dismissal, runs, balls, scoring shot %
     """
 
+    # ---------- TOURNAMENT TOTALS ----------
     row = conn.execute("""
         SELECT
           -- Balls faced: batter on strike and NOT a wide
@@ -12417,6 +12420,9 @@ def _compute_tournament_batting_summary(
           -- Runs off the bat
           SUM(COALESCE(be.runs,0)) AS runs,
 
+          SUM(CASE WHEN be.runs = 1 THEN 1 ELSE 0 END) AS ones,
+          SUM(CASE WHEN be.runs = 2 THEN 1 ELSE 0 END) AS twos,
+          SUM(CASE WHEN be.runs = 3 THEN 1 ELSE 0 END) AS threes,
           SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
           SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
 
@@ -12505,8 +12511,11 @@ def _compute_tournament_batting_summary(
     if balls == 0 and runs == 0:
         return {"has_data": False, "source": {"reason": "no batting events"}}
 
-    fours = int(row["fours"] or 0)
-    sixes = int(row["sixes"] or 0)
+    ones   = int(row["ones"] or 0)
+    twos   = int(row["twos"] or 0)
+    threes = int(row["threes"] or 0)
+    fours  = int(row["fours"] or 0)
+    sixes  = int(row["sixes"] or 0)
     dot_balls = int(row["dot_balls"] or 0)
     boundary_balls = int(row["boundary_balls"] or 0)
 
@@ -12519,10 +12528,10 @@ def _compute_tournament_batting_summary(
 
     # -------- Per-phase scoring shot % --------
     def ss_pct(balls_phase, dots_phase):
-      if not balls_phase:
-        return None
-      dot_p = dots_phase * 100.0 / balls_phase
-      return round(100.0 - dot_p, 1)
+        if not balls_phase:
+            return None
+        dot_p = dots_phase * 100.0 / balls_phase
+        return round(100.0 - dot_p, 1)
 
     balls_pp   = int(row["balls_pp"] or 0)
     dots_pp    = int(row["dots_pp"] or 0)
@@ -12535,25 +12544,6 @@ def _compute_tournament_batting_summary(
     ss_mid   = ss_pct(balls_mid, dots_mid)
     ss_death = ss_pct(balls_death, dots_death)
 
-    # Simple dismissal summary across the tournament.
-    outs_row = conn.execute("""
-        SELECT COUNT(*) AS outs
-        FROM ball_events be
-        JOIN innings i ON be.innings_id = i.innings_id
-        JOIN matches m ON i.match_id = m.match_id
-        JOIN player_match_roles pmr
-          ON pmr.match_id = m.match_id
-         AND pmr.player_id = be.dismissed_player_id
-        WHERE m.tournament_id = ?
-          AND pmr.team_id = ?
-          AND be.dismissed_player_id = ?
-          AND be.dismissal_type IS NOT NULL
-    """, (tournament_id, team_id, player_id)).fetchone()
-
-    outs = int(outs_row["outs"] or 0) if outs_row else 0
-    dismissal_str = f"Dismissed {outs} time(s) in this tournament." if outs > 0 else None
-
-    # We assume you already have BattingPhaseBreakdown Pydantic model
     phase_breakdown = BattingPhaseBreakdown(
         powerplay_runs=int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
         powerplay_balls=balls_pp or None,
@@ -12568,10 +12558,109 @@ def _compute_tournament_batting_summary(
         death_overs_scoring_shot_pct=ss_death,
     )
 
+    # ---------- MATCH-BY-MATCH SUMMARY ----------
+    match_rows = conn.execute("""
+        SELECT
+          m.match_id,
+          m.match_date,
+          m.team_a,
+          m.team_b,
+          ca.country_name AS team_a_name,
+          cb.country_name AS team_b_name,
+          pmr.team_id AS player_team_id,
+
+          -- per-match balls / runs / dots
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
+          SUM(COALESCE(be.runs,0)) AS runs,
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0)=0
+                   AND COALESCE(be.runs,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS dots
+
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = be.batter_id
+        JOIN countries ca ON ca.country_id = m.team_a
+        JOIN countries cb ON cb.country_id = m.team_b
+        WHERE m.tournament_id = ?
+          AND pmr.team_id = ?
+          AND be.batter_id = ?
+        GROUP BY
+          m.match_id,
+          m.match_date,
+          m.team_a,
+          m.team_b,
+          ca.country_name,
+          cb.country_name,
+          pmr.team_id
+        ORDER BY m.match_date, m.match_id
+    """, (tournament_id, team_id, player_id)).fetchall()
+
+    match_summaries = []
+
+    for mr in match_rows:
+        match_id = int(mr["match_id"])
+        balls_m = int(mr["balls"] or 0)
+        runs_m = int(mr["runs"] or 0)
+        dots_m = int(mr["dots"] or 0)
+
+        # determine opponent name from player_team_id
+        player_team_id = int(mr["player_team_id"])
+        team_a_id = int(mr["team_a"])
+        team_b_id = int(mr["team_b"])
+        if player_team_id == team_a_id:
+            opponent_name = mr["team_b_name"]
+        else:
+            opponent_name = mr["team_a_name"]
+
+        scoring_pct = None
+        if balls_m > 0:
+            scoring_pct = round((balls_m - dots_m) * 100.0 / balls_m, 1)
+
+        # find dismissal type in this specific match (or Not Out)
+        dism_row = conn.execute("""
+            SELECT dismissal_type, over_number, balls_this_over
+            FROM ball_events be
+            JOIN innings i ON be.innings_id = i.innings_id
+            WHERE i.match_id = ?
+              AND be.dismissed_player_id = ?
+            ORDER BY be.over_number, be.balls_this_over
+            LIMIT 1
+        """, (match_id, player_id)).fetchone()
+
+        if dism_row:
+            dtype_raw = dism_row["dismissal_type"]
+            dtype = str(dtype_raw).strip().title() if dtype_raw else "Dismissed"
+        else:
+            dtype = "Not Out"
+
+        match_summaries.append({
+            "match_id": match_id,
+            "opponent": opponent_name,
+            "dismissal": dtype,
+            "runs": runs_m,
+            "balls": balls_m,
+            "scoring_shot_pct": scoring_pct,
+        })
+
     return {
         "has_data": True,
         "runs": runs,
         "balls": balls,
+        "ones": ones,
+        "twos": twos,
+        "threes": threes,
         "fours": fours,
         "sixes": sixes,
         "strike_rate": strike_rate,
@@ -12580,9 +12669,10 @@ def _compute_tournament_batting_summary(
         "phase_breakdown": phase_breakdown,
         "batting_intent_score": float(avg_intent) if avg_intent is not None else None,
         "batting_bpi": float(total_bpi) if total_bpi is not None else None,
-        "dismissal": dismissal_str,
+        # we keep this simple text if you still want a quick overall summary later
+        "dismissal": None,
+        "match_summaries": match_summaries,
     }
-
 
 def _compute_tournament_bowling_summary(
     conn,

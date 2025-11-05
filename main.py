@@ -13597,152 +13597,20 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_
     }
 
 def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
-    # ===== Batting leaders (using players.country_id) =====
-    batting_rows = conn.execute("""
-        SELECT
-          p.player_id,
-          p.player_name,
-          SUM(COALESCE(be.runs, 0)) AS runs,
-          SUM(
-            CASE
-              WHEN COALESCE(be.wides, 0) = 0
-               AND COALESCE(be.no_balls, 0) = 0
-              THEN 1 ELSE 0
-            END
-          ) AS balls
-        FROM ball_events be
-        JOIN innings i
-          ON i.innings_id = be.innings_id
-        JOIN matches m
-          ON m.match_id = i.match_id
-        JOIN players p
-          ON p.player_id = be.batter_id
-        WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
-        GROUP BY p.player_id, p.player_name
-        HAVING runs > 0
-        ORDER BY runs DESC, balls ASC
-        LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
-
-    print("DEBUG LEADERS BATTING (country_id)",
-          "tour", tournament_id,
-          "team_id", team_id,
-          "team_name", team_name,
-          "rows", [dict(r) for r in batting_rows])
-
-    batting = []
-    for r in batting_rows:
-        balls = r["balls"] or 0
-        sr = (r["runs"] * 100.0 / balls) if balls else None
-        batting.append({
-            "player_id": r["player_id"],
-            "player_name": r["player_name"],
-            "runs": r["runs"],
-            "balls": balls,
-            "strike_rate": sr,
-        })
-
-    # ===== Bowling leaders =====
-    bowling_rows = conn.execute("""
-        SELECT
-          p.player_id,
-          p.player_name,
-          SUM(
-            CASE
-              WHEN be.dismissal_type IN (
-                   'bowled', 'lbw', 'caught', 'caught_and_bowled',
-                   'stumped', 'hit_wicket'
-              )
-              THEN 1 ELSE 0
-            END
-          ) AS wickets,
-          SUM(
-            CASE
-              WHEN COALESCE(be.wides, 0) = 0
-               AND COALESCE(be.no_balls, 0) = 0
-              THEN 1 ELSE 0
-            END
-          ) AS legal_balls,
-          SUM(
-            COALESCE(be.runs, 0)
-            + COALESCE(be.wides, 0)
-            + COALESCE(be.no_balls, 0)
-            + COALESCE(be.byes, 0)
-            + COALESCE(be.leg_byes, 0)
-            + COALESCE(be.penalty_runs, 0)
-          ) AS runs_conceded
-        FROM ball_events be
-        JOIN innings i
-          ON i.innings_id = be.innings_id
-        JOIN matches m
-          ON m.match_id = i.match_id
-        JOIN players p
-          ON p.player_id = be.bowler_id
-        WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
-        GROUP BY p.player_id, p.player_name
-        HAVING wickets > 0
-        ORDER BY wickets DESC, runs_conceded ASC
-        LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
-
-    bowling = []
-    for r in bowling_rows:
-        balls = r["legal_balls"] or 0
-        overs = balls / 6.0 if balls else None
-        econ = (r["runs_conceded"] / overs) if overs else None
-        bowling.append({
-            "player_id": r["player_id"],
-            "player_name": r["player_name"],
-            "wickets": r["wickets"],
-            "overs": overs,
-            "economy": econ,
-        })
-
-    # ===== Fielding leaders =====
-    fielding_rows = conn.execute("""
-        SELECT
-          p.player_id,
-          p.player_name,
-          SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches,
-          SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_outs
-        FROM ball_fielding_events bfe
-        JOIN ball_events be
-          ON be.ball_id = bfe.ball_id
-        JOIN innings i
-          ON i.innings_id = be.innings_id
-        JOIN matches m
-          ON m.match_id = i.match_id
-        JOIN fielding_contributions fc
-          ON fc.ball_id = be.ball_id
-        JOIN players p
-          ON p.player_id = fc.fielder_id
-        WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
-        GROUP BY p.player_id, p.player_name
-        HAVING (catches + run_outs) > 0
-        ORDER BY (catches + run_outs) DESC
-        LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
-
-    fielding = []
-    for r in fielding_rows:
-        total = (r["catches"] or 0) + (r["run_outs"] or 0)
-        fielding.append({
-            "player_id": r["player_id"],
-            "player_name": r["player_name"],
-            "dismissals": total,
-            "catches": r["catches"] or 0,
-            "run_outs": r["run_outs"] or 0,
-        })
-
+    print(">>> _compute_team_leaders TEST FUNCTION CALLED", tournament_id, team_id, team_name)
     return {
-        "batting": batting,
-        "bowling": bowling,
-        "fielding": fielding,
+        "batting": [
+            {
+                "player_id": 0,
+                "player_name": "*** TEST LEADER ***",
+                "runs": 999,
+                "balls": 99,
+                "strike_rate": 100.0,
+            }
+        ],
+        "bowling": [],
+        "fielding": [],
     }
-
 
 
 @app.post("/posttournament/team-summary", response_model=TeamTournamentSummaryResponse)

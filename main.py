@@ -13604,7 +13604,8 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
     Bowling:  wickets + Econ (sorted by wickets)
     Fielding: catches + run outs (sorted by total dismissals)
 
-    Team membership is determined by players.country_id == team_id.
+    Batting/Bowling team membership is via innings team label
+    (i.batting_team / i.bowling_team == team_name).
     """
 
     # ===== Batting leaders =====
@@ -13628,12 +13629,12 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         JOIN players p
           ON p.player_id = be.batter_id
         WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
+          AND i.batting_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING runs > 0
         ORDER BY runs DESC, balls ASC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     batting = []
     for r in batting_rows:
@@ -13646,7 +13647,13 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
             "balls": balls,
             "strike_rate": sr,
         })
-
+        
+    print("DEBUG LEADERS BATTING",
+        "tour", tournament_id,
+        "team_id", team_id,
+        "team_name", team_name,
+        "rows", [dict(r) for r in batting_rows])
+    
     # ===== Bowling leaders =====
     bowling_rows = conn.execute("""
         SELECT
@@ -13684,12 +13691,12 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         JOIN players p
           ON p.player_id = be.bowler_id
         WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
+          AND i.bowling_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING wickets > 0
         ORDER BY wickets DESC, runs_conceded ASC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     bowling = []
     for r in bowling_rows:
@@ -13722,8 +13729,11 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
           ON fc.ball_id = be.ball_id
         JOIN players p
           ON p.player_id = fc.fielder_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = fc.fielder_id
         WHERE m.tournament_id = :tournament_id
-          AND p.country_id = :team_id
+          AND pmr.team_id = :team_id
         GROUP BY p.player_id, p.player_name
         HAVING (catches + run_outs) > 0
         ORDER BY (catches + run_outs) DESC

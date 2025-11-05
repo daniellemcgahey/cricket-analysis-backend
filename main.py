@@ -13604,8 +13604,10 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
     Bowling:  wickets + Econ (sorted by wickets)
     Fielding: catches + run outs (sorted by total dismissals)
 
-    Batting/Bowling team membership is via innings team label
-    (i.batting_team / i.bowling_team == team_name).
+    IMPORTANT:
+    - Batting/Bowling membership is via innings.*_team == team_name
+      (same logic as your manual checks).
+    - No p.country_id filter, no player_match_roles for batting/bowling.
     """
 
     # ===== Batting leaders =====
@@ -13636,6 +13638,13 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         LIMIT 3
     """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
+    # Debug to verify it matches your manual query
+    print("DEBUG LEADERS BATTING",
+          "tour", tournament_id,
+          "team_id", team_id,
+          "team_name", team_name,
+          "rows", [dict(r) for r in batting_rows])
+
     batting = []
     for r in batting_rows:
         balls = r["balls"] or 0
@@ -13647,13 +13656,7 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
             "balls": balls,
             "strike_rate": sr,
         })
-        
-    print("DEBUG LEADERS BATTING",
-        "tour", tournament_id,
-        "team_id", team_id,
-        "team_name", team_name,
-        "rows", [dict(r) for r in batting_rows])
-    
+
     # ===== Bowling leaders =====
     bowling_rows = conn.execute("""
         SELECT
@@ -13756,7 +13759,6 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         "bowling": bowling,
         "fielding": fielding,
     }
-
 
 @app.post("/posttournament/team-summary", response_model=TeamTournamentSummaryResponse)
 def post_tournament_team_summary(payload: TeamTournamentSummaryRequest):

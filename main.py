@@ -13611,33 +13611,29 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
     # ---------- Batting leaders ----------
     batting_rows = conn.execute("""
         SELECT
-          p.player_id,
-          p.player_name,
-          SUM(COALESCE(be.runs,0)) AS runs,
-          SUM(
-            CASE
-              WHEN COALESCE(be.wides,0) = 0
-               AND COALESCE(be.no_balls,0) = 0
-              THEN 1 ELSE 0
-            END
-          ) AS balls
+        p.player_id,
+        p.player_name,
+        SUM(COALESCE(be.runs,0)) AS runs,
+        SUM(
+            CASE WHEN COALESCE(be.wides,0) = 0
+                AND COALESCE(be.no_balls,0) = 0
+            THEN 1 ELSE 0 END
+        ) AS balls
         FROM ball_events be
-        JOIN innings i
-          ON i.innings_id = be.innings_id
-        JOIN matches m
-          ON m.match_id = i.match_id
-        JOIN players p
-          ON p.player_id = be.batter_id
+        JOIN innings i ON i.innings_id = be.innings_id
+        JOIN matches m ON m.match_id = i.match_id
+        JOIN players p ON p.player_id = be.batter_id
         JOIN player_match_roles pmr
-          ON pmr.match_id = m.match_id
-         AND pmr.player_id = p.player_id
+        ON pmr.match_id = m.match_id
+        AND pmr.player_id = p.player_id
         WHERE m.tournament_id = :tournament_id
-          AND pmr.team_id = :team_id
+        AND pmr.team_id = :team_id
         GROUP BY p.player_id, p.player_name
         HAVING runs > 0
-        ORDER BY runs DESC
+        ORDER BY runs DESC, balls ASC
         LIMIT 3
     """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+
 
     batting = []
     for r in batting_rows:

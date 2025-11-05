@@ -2137,7 +2137,6 @@ def probable_xi(country_name: str, team_category: str = None, last_games: int = 
 
     return {"player_ids": xi_out}
 
-
 @app.get("/team-players")
 def get_players_for_team(country_name: str, team_category: Optional[str] = None):
     db_path = os.path.join(os.path.dirname(__file__), "cricket_analysis.db")
@@ -12271,24 +12270,41 @@ from fastapi import Query, HTTPException
 
 @app.get("/posttournament/tournaments")
 def post_tournament_tournaments(
-    teamCategory: str = Query(..., description="Team category, e.g. 'Women'")
+    teamCategory: str = Query(..., description="Team category, e.g. 'Men', 'Women'")
 ):
     """
-    Returns tournaments for a given teamCategory, in the same style as other endpoints.
-    Expected by the frontend as:
-      { "tournaments": [ { "id": ..., "name": "..." }, ... ] }
+    Returns tournaments that involve at least one team whose name contains the
+    category marker (e.g. 'Men', 'Women', 'U19 Men', 'Training', etc).
+
+    We infer team category from the countries.country_name suffix, e.g.:
+      'Brasil Men', 'Brasil Women', 'Brasil U19 Men'
     """
+
     conn = _db()
     try:
+        # If your DB actually uses 'Mens' / 'Womens' etc, you can tweak this mapping:
+        marker = teamCategory
+        # Example tweak if needed:
+        # if teamCategory == "Men":
+        #     marker = "Mens"
+        # elif teamCategory == "Women":
+        #     marker = "Womens"
+
         rows = conn.execute("""
             SELECT DISTINCT
               t.tournament_id,
               t.tournament_name
             FROM tournaments t
-            JOIN matches m ON m.tournament_id = t.tournament_id
-            WHERE t.team_category = ?
+            JOIN matches m
+              ON m.tournament_id = t.tournament_id
+            JOIN countries ca
+              ON ca.country_id = m.team_a
+            JOIN countries cb
+              ON cb.country_id = m.team_b
+            WHERE ca.country_name LIKE '%' || ? || '%'
+               OR cb.country_name LIKE '%' || ? || '%'
             ORDER BY t.tournament_name
-        """, (teamCategory,)).fetchall()
+        """, (marker, marker)).fetchall()
 
         tournaments = [
             {
@@ -12301,6 +12317,7 @@ def post_tournament_tournaments(
         return {"tournaments": tournaments}
     finally:
         conn.close()
+
 
 @app.get("/posttournament/teams")
 def post_tournament_teams(

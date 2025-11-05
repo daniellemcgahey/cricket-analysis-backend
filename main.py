@@ -13212,8 +13212,15 @@ def post_tournament_player_summary(
     finally:
         conn.close()
 
-def _compute_team_overview(conn, tournament_id: int, team_id: int) -> dict:
-    # Basic match results
+def _lookup_team_name(conn, team_id: int) -> str | None:
+    row = conn.execute(
+        "SELECT country_name FROM countries WHERE country_id = ?",
+        (team_id,),
+    ).fetchone()
+    return row["country_name"] if row else None
+
+def _compute_team_overview(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
+    # Match results based on numeric IDs
     row = conn.execute("""
         SELECT
           COUNT(*) AS matches_played,
@@ -13233,22 +13240,75 @@ def _compute_team_overview(conn, tournament_id: int, team_id: int) -> dict:
     no_result = row["no_result"] or 0
     win_pct = (wins / matches_played * 100.0) if matches_played else 0.0
 
-    # Net run rate from innings table
+    # Primary: innings-based NRR using team_name
     rr = conn.execute("""
         SELECT
-          SUM(CASE WHEN i.batting_team = :team_id THEN i.total_runs ELSE 0 END) AS runs_for,
-          SUM(CASE WHEN i.batting_team = :team_id THEN i.overs_bowled ELSE 0 END) AS overs_faced,
-          SUM(CASE WHEN i.bowling_team = :team_id THEN i.total_runs ELSE 0 END) AS runs_against,
-          SUM(CASE WHEN i.bowling_team = :team_id THEN i.overs_bowled ELSE 0 END) AS overs_bowled
+          SUM(CASE WHEN i.batting_team = :team_name THEN i.total_runs ELSE 0 END) AS runs_for,
+          SUM(CASE WHEN i.batting_team = :team_name THEN i.overs_bowled ELSE 0 END) AS overs_faced,
+          SUM(CASE WHEN i.bowling_team = :team_name THEN i.total_runs ELSE 0 END) AS runs_against,
+          SUM(CASE WHEN i.bowling_team = :team_name THEN i.overs_bowled ELSE 0 END) AS overs_bowled
         FROM innings i
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchone()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
 
     runs_for = rr["runs_for"] or 0
     runs_against = rr["runs_against"] or 0
     overs_faced = rr["overs_faced"] or 0.0
     overs_bowled = rr["overs_bowled"] or 0.0
+
+    # Fallback: derive from ball_events if innings is empty / not populated
+    if (runs_for == 0 and runs_against == 0) or (overs_faced == 0 and overs_bowled == 0):
+        rr_be = conn.execute("""
+            SELECT
+              SUM(
+                CASE WHEN i.batting_team = :team_name THEN
+                  COALESCE(be.runs,0)
+                  + COALESCE(be.wides,0)
+                  + COALESCE(be.no_balls,0)
+                  + COALESCE(be.byes,0)
+                  + COALESCE(be.leg_byes,0)
+                  + COALESCE(be.penalty_runs,0)
+                ELSE 0 END
+              ) AS runs_for,
+
+              SUM(
+                CASE WHEN i.batting_team = :team_name
+                     AND COALESCE(be.wides,0) = 0
+                     AND COALESCE(be.no_balls,0) = 0
+                THEN 1 ELSE 0 END
+              ) AS balls_faced,
+
+              SUM(
+                CASE WHEN i.bowling_team = :team_name THEN
+                  COALESCE(be.runs,0)
+                  + COALESCE(be.wides,0)
+                  + COALESCE(be.no_balls,0)
+                  + COALESCE(be.byes,0)
+                  + COALESCE(be.leg_byes,0)
+                  + COALESCE(be.penalty_runs,0)
+                ELSE 0 END
+              ) AS runs_against,
+
+              SUM(
+                CASE WHEN i.bowling_team = :team_name
+                     AND COALESCE(be.wides,0) = 0
+                     AND COALESCE(be.no_balls,0) = 0
+                THEN 1 ELSE 0 END
+              ) AS balls_bowled
+            FROM ball_events be
+            JOIN innings i ON i.innings_id = be.innings_id
+            JOIN matches m ON m.match_id = i.match_id
+            WHERE m.tournament_id = :tournament_id
+        """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
+
+        runs_for = rr_be["runs_for"] or 0
+        runs_against = rr_be["runs_against"] or 0
+        balls_faced = rr_be["balls_faced"] or 0
+        balls_bowled = rr_be["balls_bowled"] or 0
+
+        overs_faced = balls_faced / 6.0 if balls_faced else 0.0
+        overs_bowled = balls_bowled / 6.0 if balls_bowled else 0.0
 
     rr_for = runs_for / overs_faced if overs_faced else 0.0
     rr_against = runs_against / overs_bowled if overs_bowled else 0.0
@@ -13267,20 +13327,25 @@ def _compute_team_overview(conn, tournament_id: int, team_id: int) -> dict:
         "net_run_rate": nrr,
     }
 
-def _compute_team_batting_summary(conn, tournament_id: int, team_id: int) -> dict:
+def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
+    # Innings-level: stable for total runs / average
+    inn = conn.execute("""
+        SELECT
+          COUNT(*) AS innings_count,
+          SUM(i.total_runs) AS total_runs
+        FROM innings i
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE m.tournament_id = :tournament_id
+          AND i.batting_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
+
+    innings_count = inn["innings_count"] or 0
+    total_runs = inn["total_runs"] or 0
+    avg_runs = total_runs / innings_count if innings_count else 0.0
+
+    # Ball-level: scoring %, boundary %
     row = conn.execute("""
         SELECT
-          COUNT(DISTINCT i.innings_id) AS innings_count,
-
-          SUM(
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-            + COALESCE(be.byes,0)
-            + COALESCE(be.leg_byes,0)
-            + COALESCE(be.penalty_runs,0)
-          ) AS total_runs,
-
           SUM(
             CASE WHEN COALESCE(be.wides,0) = 0
                  AND COALESCE(be.no_balls,0) = 0
@@ -13300,25 +13365,25 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int) -> dic
                  AND COALESCE(be.runs,0) IN (4,6)
             THEN 1 ELSE 0 END
           ) AS boundary_balls
-
         FROM ball_events be
         JOIN innings i ON i.innings_id = be.innings_id
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_id
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchone()
+          AND i.batting_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
 
-    innings_count = row["innings_count"] or 0
-    total_runs = row["total_runs"] or 0
     legal_balls = row["legal_balls"] or 0
     scoring_balls = row["scoring_balls"] or 0
     boundary_balls = row["boundary_balls"] or 0
 
-    avg_runs = total_runs / innings_count if innings_count else 0.0
-    scoring_shot_pct = (scoring_balls / legal_balls * 100.0) if legal_balls else 0.0
-    boundary_pct = (boundary_balls / legal_balls * 100.0) if legal_balls else 0.0
+    scoring_shot_pct = (
+        scoring_balls / legal_balls * 100.0 if legal_balls else 0.0
+    )
+    boundary_pct = (
+        boundary_balls / legal_balls * 100.0 if legal_balls else 0.0
+    )
 
-    # Phase breakdown using is_powerplay / is_middle_overs / is_death_overs
+    # Phase breakdown
     phase_rows = conn.execute("""
         SELECT
           CASE
@@ -13344,9 +13409,9 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int) -> dic
         JOIN innings i ON i.innings_id = be.innings_id
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_id
+          AND i.batting_team = :team_name
         GROUP BY phase_key
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     phase = {}
     for r in phase_rows:
@@ -13373,59 +13438,49 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int) -> dic
         "phase": phase,
     }
 
-def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int) -> dict:
+def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
+    # Innings-level: runs conceded, overs, wickets
+    inn = conn.execute("""
+        SELECT
+          COUNT(*) AS innings_count,
+          SUM(i.total_runs) AS runs_conceded,
+          SUM(i.overs_bowled) AS overs_bowled,
+          SUM(i.wickets) AS wickets
+        FROM innings i
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE m.tournament_id = :tournament_id
+          AND i.bowling_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
+
+    innings_count = inn["innings_count"] or 0
+    runs_conceded = inn["runs_conceded"] or 0
+    overs_bowled = inn["overs_bowled"] or 0.0
+    wickets = inn["wickets"] or 0
+
+    economy = runs_conceded / overs_bowled if overs_bowled else 0.0
+    avg_runs_conceded = runs_conceded / innings_count if innings_count else 0.0
+    avg_wickets = wickets / innings_count if innings_count else 0.0
+
+    # Ball-level: dot balls & phase
     row = conn.execute("""
         SELECT
-          COUNT(DISTINCT i.innings_id) AS innings_count,
-
-          SUM(
-            COALESCE(be.runs,0)
-            + COALESCE(be.wides,0)
-            + COALESCE(be.no_balls,0)
-            + COALESCE(be.byes,0)
-            + COALESCE(be.leg_byes,0)
-            + COALESCE(be.penalty_runs,0)
-          ) AS runs_conceded,
-
           SUM(
             CASE WHEN COALESCE(be.wides,0) = 0
                  AND COALESCE(be.no_balls,0) = 0
             THEN 1 ELSE 0 END
           ) AS legal_balls,
-
-          SUM(COALESCE(be.dot_balls,0)) AS dots,
-
-          SUM(
-            CASE
-              WHEN i.bowling_team = :team_id
-               AND be.dismissal_type IN (
-                    'bowled','lbw','caught','caught_and_bowled',
-                    'stumped','hit_wicket'
-               )
-              THEN 1 ELSE 0
-            END
-          ) AS wickets
-
+          SUM(COALESCE(be.dot_balls,0)) AS dots
         FROM ball_events be
         JOIN innings i ON i.innings_id = be.innings_id
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_id
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchone()
+          AND i.bowling_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
 
-    innings_count = row["innings_count"] or 0
-    runs_conceded = row["runs_conceded"] or 0
     legal_balls = row["legal_balls"] or 0
     dots = row["dots"] or 0
-    wickets = row["wickets"] or 0
-
-    overs = legal_balls / 6.0 if legal_balls else 0.0
-    econ = runs_conceded / overs if overs else 0.0
     dot_pct = (dots / legal_balls * 100.0) if legal_balls else 0.0
-    avg_runs_conceded = runs_conceded / innings_count if innings_count else 0.0
-    avg_wickets = wickets / innings_count if innings_count else 0.0
 
-    # Phase breakdown
     phase_rows = conn.execute("""
         SELECT
           CASE
@@ -13449,7 +13504,7 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int) -> dic
           ) AS legal_balls,
           SUM(
             CASE
-              WHEN i.bowling_team = :team_id
+              WHEN i.bowling_team = :team_name
                AND be.dismissal_type IN (
                     'bowled','lbw','caught','caught_and_bowled',
                     'stumped','hit_wicket'
@@ -13461,9 +13516,9 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int) -> dic
         JOIN innings i ON i.innings_id = be.innings_id
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_id
+          AND i.bowling_team = :team_name
         GROUP BY phase_key
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     phase = {}
     for r in phase_rows:
@@ -13489,12 +13544,12 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int) -> dic
         "avg_runs_conceded": avg_runs_conceded,
         "wickets": wickets,
         "avg_wickets": avg_wickets,
-        "economy": econ,
+        "economy": economy,
         "dot_pct": dot_pct,
         "phase": phase,
     }
 
-def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int) -> dict:
+def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
     row = conn.execute("""
         SELECT
           SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches,
@@ -13524,8 +13579,8 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int) -> di
         JOIN innings i ON i.innings_id = be.innings_id
         JOIN matches m ON m.match_id = i.match_id
         WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_id
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchone()
+          AND i.bowling_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
 
     return {
         "catches": row["catches"] or 0,
@@ -13541,8 +13596,8 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int) -> di
         },
     }
 
-def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
-    # Batting leaders: by total runs
+def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
+    # Batting leaders
     batting_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13558,12 +13613,12 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
         JOIN matches m ON m.match_id = i.match_id
         JOIN players p ON p.player_id = be.batter_id
         WHERE m.tournament_id = :tournament_id
-          AND i.batting_team = :team_id
+          AND i.batting_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING runs > 0
         ORDER BY runs DESC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     batting = []
     for r in batting_rows:
@@ -13577,7 +13632,7 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
             "strike_rate": sr,
         })
 
-    # Bowling leaders: by wickets
+    # Bowling leaders
     bowling_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13609,12 +13664,12 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
         JOIN matches m ON m.match_id = i.match_id
         JOIN players p ON p.player_id = be.bowler_id
         WHERE m.tournament_id = :tournament_id
-          AND i.bowling_team = :team_id
+          AND i.bowling_team = :team_name
         GROUP BY p.player_id, p.player_name
         HAVING wickets > 0
         ORDER BY wickets DESC, runs_conceded ASC
         LIMIT 3
-    """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchall()
 
     bowling = []
     for r in bowling_rows:
@@ -13629,7 +13684,7 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
             "economy": econ,
         })
 
-    # Fielding leaders: via player_match_roles
+    # Fielding leaders – still keyed by team_id via player_match_roles
     fielding_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13672,24 +13727,39 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int) -> dict:
 
 @app.post("/posttournament/team-summary", response_model=TeamTournamentSummaryResponse)
 def post_tournament_team_summary(payload: TeamTournamentSummaryRequest):
-    """
-    Summarise one team's tournament:
-    - overview (matches, wins, NRR)
-    - batting (avg runs, scoring %, boundary %, phase)
-    - bowling (econ, dot %, wickets, phase)
-    - fielding (catches, run outs, discipline)
-    - leaders (top bat/bowl/field)
-    """
     tournament_id = int(payload.tournamentId)
     team_id = int(payload.teamId)
 
     conn = _db()
     try:
-        overview = _compute_team_overview(conn, tournament_id, team_id)
-        batting = _compute_team_batting_summary(conn, tournament_id, team_id)
-        bowling = _compute_team_bowling_summary(conn, tournament_id, team_id)
-        fielding = _compute_team_fielding_summary(conn, tournament_id, team_id)
-        leaders = _compute_team_leaders(conn, tournament_id, team_id)
+        team_name = _lookup_team_name(conn, team_id)
+        if not team_name:
+            # Unknown team -> return empty-ish summary
+            empty = {
+                "overview": {
+                    "matches_played": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "no_result": 0,
+                    "win_pct": 0.0,
+                    "runs_for": 0,
+                    "runs_against": 0,
+                    "run_rate_for": 0.0,
+                    "run_rate_against": 0.0,
+                    "net_run_rate": 0.0,
+                },
+                "batting": {},
+                "bowling": {},
+                "fielding": {},
+                "leaders": {"batting": [], "bowling": [], "fielding": []},
+            }
+            return TeamTournamentSummaryResponse(**empty)
+
+        overview = _compute_team_overview(conn, tournament_id, team_id, team_name)
+        batting  = _compute_team_batting_summary(conn, tournament_id, team_id, team_name)
+        bowling  = _compute_team_bowling_summary(conn, tournament_id, team_id, team_name)
+        fielding = _compute_team_fielding_summary(conn, tournament_id, team_id, team_name)
+        leaders  = _compute_team_leaders(conn, tournament_id, team_id, team_name)
 
         return TeamTournamentSummaryResponse(
             overview=overview,
@@ -13700,6 +13770,7 @@ def post_tournament_team_summary(payload: TeamTournamentSummaryRequest):
         )
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     import uvicorn

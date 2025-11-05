@@ -13597,17 +13597,7 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_
     }
 
 def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
-    """
-    Leaders for one team in a tournament.
-
-    Batting:  runs + SR (sorted by runs)
-    Bowling:  wickets + Econ (sorted by wickets)
-    Fielding: catches + run outs (sorted by total dismissals)
-
-    Team membership is defined by players.country_id == team_id.
-    """
-
-    # ===== Batting leaders =====
+    # ===== Batting leaders (using players.country_id) =====
     batting_rows = conn.execute("""
         SELECT
           p.player_id,
@@ -13635,7 +13625,7 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
         LIMIT 3
     """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
 
-    print("DEBUG LEADERS BATTING (country_id-based)",
+    print("DEBUG LEADERS BATTING (country_id)",
           "tour", tournament_id,
           "team_id", team_id,
           "team_name", team_name,

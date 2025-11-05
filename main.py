@@ -12267,6 +12267,673 @@ def postgame_player_summary(
     conn.close()
 
 
+from fastapi import Query, HTTPException
+
+@app.get("/posttournament/tournaments")
+def post_tournament_tournaments(
+    teamCategory: str = Query(..., description="Team category, e.g. 'Women'")
+):
+    """
+    Returns tournaments for a given teamCategory, in the same style as other endpoints.
+    Expected by the frontend as:
+      { "tournaments": [ { "id": ..., "name": "..." }, ... ] }
+    """
+    conn = _db()
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT
+              t.tournament_id,
+              t.tournament_name
+            FROM tournaments t
+            JOIN matches m ON m.tournament_id = t.tournament_id
+            WHERE t.team_category = ?
+            ORDER BY t.tournament_name
+        """, (teamCategory,)).fetchall()
+
+        tournaments = [
+            {
+                "id": int(r["tournament_id"]),
+                "name": r["tournament_name"],
+            }
+            for r in rows
+        ]
+
+        return {"tournaments": tournaments}
+    finally:
+        conn.close()
+
+@app.get("/posttournament/teams")
+def post_tournament_teams(
+    tournament_id: int = Query(..., description="tournaments.tournament_id"),
+):
+    """
+    Returns teams (countries) that played in this tournament.
+    Shape:
+      { "teams": [ { "id": country_id, "name": country_name }, ... ] }
+    """
+    conn = _db()
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT
+              c.country_id,
+              c.country_name
+            FROM matches m
+            JOIN countries c
+              ON c.country_id = m.team_a
+              OR c.country_id = m.team_b
+            WHERE m.tournament_id = ?
+            ORDER BY c.country_name
+        """, (tournament_id,)).fetchall()
+
+        teams = [
+            {
+                "id": int(r["country_id"]),
+                "name": r["country_name"],
+            }
+            for r in rows
+        ]
+
+        return {"teams": teams}
+    finally:
+        conn.close()
+
+
+@app.get("/posttournament/players")
+def post_tournament_players(
+    tournament_id: int = Query(..., description="tournaments.tournament_id"),
+    team_id: int = Query(..., description="countries.country_id"),
+):
+    """
+    Returns players who appeared for this team in this tournament.
+    Uses player_match_roles to stay consistent with your postgame endpoints.
+    Shape:
+      { "players": [ { "id": player_id, "name": player_name }, ... ] }
+    """
+    conn = _db()
+    try:
+        rows = conn.execute("""
+            SELECT DISTINCT
+              pmr.player_id,
+              p.player_name
+            FROM player_match_roles pmr
+            JOIN matches m ON m.match_id = pmr.match_id
+            JOIN players p ON p.player_id = pmr.player_id
+            WHERE m.tournament_id = ?
+              AND pmr.team_id = ?
+            ORDER BY p.player_name
+        """, (tournament_id, team_id)).fetchall()
+
+        players = [
+            {
+                "id": int(r["player_id"]),
+                "name": r["player_name"],
+            }
+            for r in rows
+        ]
+
+        return {"players": players}
+    finally:
+        conn.close()
+
+
+def _compute_tournament_batting_summary(
+    conn,
+    tournament_id: int,
+    team_id: int,
+    player_id: int,
+) -> dict:
+    """
+    Aggregate batting over all matches in this tournament for this team + player.
+    Mirrors _compute_player_batting_summary but uses tournament_id + team_id instead of match_id.
+    """
+
+    row = conn.execute("""
+        SELECT
+          -- Balls faced: batter on strike and NOT a wide
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides, 0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
+
+          -- Runs off the bat
+          SUM(COALESCE(be.runs,0)) AS runs,
+
+          SUM(CASE WHEN be.runs = 4 THEN 1 ELSE 0 END) AS fours,
+          SUM(CASE WHEN be.runs = 6 THEN 1 ELSE 0 END) AS sixes,
+
+          -- Dot balls for batter: ball faced AND runs=0
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
+          SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+
+          AVG(be.batting_intent_score) AS avg_intent,
+          SUM(COALESCE(be.batting_bpi,0)) AS total_bpi,
+
+          -- Phase runs (off the bat)
+          SUM(CASE WHEN be.is_powerplay    = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_pp,
+          SUM(CASE WHEN be.is_middle_overs = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_mid,
+          SUM(CASE WHEN be.is_death_overs  = 1 THEN COALESCE(be.runs,0) ELSE 0 END) AS runs_death,
+
+          -- Phase balls & dots (for Scoring Shot %)
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_pp,
+
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_mid,
+
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1 AND COALESCE(be.wides,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_death
+
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = be.batter_id
+        WHERE m.tournament_id = ?
+          AND pmr.team_id = ?
+          AND be.batter_id = ?
+    """, (tournament_id, team_id, player_id)).fetchone()
+
+    if not row:
+        return {"has_data": False, "source": {"reason": "no batting events row"}}
+
+    balls = int(row["balls"] or 0)
+    runs  = int(row["runs"] or 0)
+
+    if balls == 0 and runs == 0:
+        return {"has_data": False, "source": {"reason": "no batting events"}}
+
+    fours = int(row["fours"] or 0)
+    sixes = int(row["sixes"] or 0)
+    dot_balls = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+
+    strike_rate = round(runs * 100.0 / balls, 1) if balls > 0 else None
+    boundary_pct = round(boundary_balls * 100.0 / balls, 1) if balls > 0 else None
+    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+
+    avg_intent = row["avg_intent"]
+    total_bpi = row["total_bpi"]
+
+    # -------- Per-phase scoring shot % --------
+    def ss_pct(balls_phase, dots_phase):
+      if not balls_phase:
+        return None
+      dot_p = dots_phase * 100.0 / balls_phase
+      return round(100.0 - dot_p, 1)
+
+    balls_pp   = int(row["balls_pp"] or 0)
+    dots_pp    = int(row["dots_pp"] or 0)
+    balls_mid  = int(row["balls_mid"] or 0)
+    dots_mid   = int(row["dots_mid"] or 0)
+    balls_death = int(row["balls_death"] or 0)
+    dots_death = int(row["dots_death"] or 0)
+
+    ss_pp    = ss_pct(balls_pp, dots_pp)
+    ss_mid   = ss_pct(balls_mid, dots_mid)
+    ss_death = ss_pct(balls_death, dots_death)
+
+    # Simple dismissal summary across the tournament.
+    outs_row = conn.execute("""
+        SELECT COUNT(*) AS outs
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = be.dismissed_player_id
+        WHERE m.tournament_id = ?
+          AND pmr.team_id = ?
+          AND be.dismissed_player_id = ?
+          AND be.dismissal_type IS NOT NULL
+    """, (tournament_id, team_id, player_id)).fetchone()
+
+    outs = int(outs_row["outs"] or 0) if outs_row else 0
+    dismissal_str = f"Dismissed {outs} time(s) in this tournament." if outs > 0 else None
+
+    # We assume you already have BattingPhaseBreakdown Pydantic model
+    phase_breakdown = BattingPhaseBreakdown(
+        powerplay_runs=int(row["runs_pp"] or 0) if row["runs_pp"] is not None else None,
+        powerplay_balls=balls_pp or None,
+        powerplay_scoring_shot_pct=ss_pp,
+
+        middle_overs_runs=int(row["runs_mid"] or 0) if row["runs_mid"] is not None else None,
+        middle_overs_balls=balls_mid or None,
+        middle_overs_scoring_shot_pct=ss_mid,
+
+        death_overs_runs=int(row["runs_death"] or 0) if row["runs_death"] is not None else None,
+        death_overs_balls=balls_death or None,
+        death_overs_scoring_shot_pct=ss_death,
+    )
+
+    return {
+        "has_data": True,
+        "runs": runs,
+        "balls": balls,
+        "fours": fours,
+        "sixes": sixes,
+        "strike_rate": strike_rate,
+        "boundary_percentage": boundary_pct,
+        "dot_ball_percentage": dot_pct,
+        "phase_breakdown": phase_breakdown,
+        "batting_intent_score": float(avg_intent) if avg_intent is not None else None,
+        "batting_bpi": float(total_bpi) if total_bpi is not None else None,
+        "dismissal": dismissal_str,
+    }
+
+
+def _compute_tournament_bowling_summary(
+    conn,
+    tournament_id: int,
+    team_id: int,
+    player_id: int,
+) -> dict:
+    """
+    Aggregate bowling over all matches in this tournament for this team + player.
+    """
+
+    row = conn.execute("""
+        SELECT
+          -- Balls bowled: exclude wides
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
+
+          -- Runs conceded (bowler): runs off bat + wides + no-balls
+          SUM(
+            COALESCE(be.runs,0)
+            + COALESCE(be.wides,0)
+            + COALESCE(be.no_balls,0)
+          ) AS runs_conceded,
+
+          -- Dot balls: legal delivery, no runs, no wides, no no-balls
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
+          SUM(COALESCE(be.wides,0)) AS wides,
+          SUM(COALESCE(be.no_balls,0)) AS no_balls,
+
+          SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
+
+          -- Phase splits (balls & dots & runs & wickets)
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1 AND COALESCE(be.wides,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0)=0
+                   AND COALESCE(be.runs,0)=0
+                   AND COALESCE(be.no_balls,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_pp,
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+              THEN COALESCE(be.runs,0)
+                   + COALESCE(be.wides,0)
+                   + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_pp,
+
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1 AND COALESCE(be.wides,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0)=0
+                   AND COALESCE(be.runs,0)=0
+                   AND COALESCE(be.no_balls,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_mid,
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+              THEN COALESCE(be.runs,0)
+                   + COALESCE(be.wides,0)
+                   + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_mid,
+
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1 AND COALESCE(be.wides,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS balls_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0)=0
+                   AND COALESCE(be.runs,0)=0
+                   AND COALESCE(be.no_balls,0)=0
+              THEN 1 ELSE 0
+            END
+          ) AS dots_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+              THEN COALESCE(be.runs,0)
+                   + COALESCE(be.wides,0)
+                   + COALESCE(be.no_balls,0)
+              ELSE 0
+            END
+          ) AS runs_death
+
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = be.bowler_id
+        WHERE m.tournament_id = ?
+          AND pmr.team_id = ?
+          AND be.bowler_id = ?
+    """, (tournament_id, team_id, player_id)).fetchone()
+
+    if not row:
+        return {"has_data": False, "source": {"reason": "no bowling events row"}}
+
+    balls = int(row["balls"] or 0)
+    runs_conceded = int(row["runs_conceded"] or 0)
+
+    if balls == 0 and runs_conceded == 0:
+        return {"has_data": False, "source": {"reason": "no bowling events"}}
+
+    wides = int(row["wides"] or 0)
+    no_balls = int(row["no_balls"] or 0)
+    dot_balls = int(row["dot_balls"] or 0)
+    boundary_balls = int(row["boundary_balls"] or 0)
+
+    overs_float = _balls_to_overs(balls)
+    economy = None
+    if balls > 0:
+        overs_real = balls / 6.0
+        economy = round(runs_conceded / overs_real, 2)
+
+    dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
+
+    # per-phase
+    balls_pp   = int(row["balls_pp"] or 0)
+    dots_pp    = int(row["dots_pp"] or 0)
+    runs_pp    = int(row["runs_pp"] or 0)
+
+    balls_mid  = int(row["balls_mid"] or 0)
+    dots_mid   = int(row["dots_mid"] or 0)
+    runs_mid   = int(row["runs_mid"] or 0)
+
+    balls_death = int(row["balls_death"] or 0)
+    dots_death  = int(row["dots_death"] or 0)
+    runs_death  = int(row["runs_death"] or 0)
+
+    def dot_pct_phase(balls_phase, dots_phase):
+        if not balls_phase:
+            return None
+        return round(dots_phase * 100.0 / balls_phase, 1)
+
+    pp_dot_pct   = dot_pct_phase(balls_pp, dots_pp)
+    mid_dot_pct  = dot_pct_phase(balls_mid, dots_mid)
+    death_dot_pct= dot_pct_phase(balls_death, dots_death)
+
+    # wickets across tournament
+    w_row = conn.execute("""
+        SELECT COUNT(*) AS wickets
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        JOIN player_match_roles pmr
+          ON pmr.match_id = m.match_id
+         AND pmr.player_id = be.bowler_id
+        WHERE m.tournament_id = ?
+          AND pmr.team_id = ?
+          AND be.bowler_id = ?
+          AND be.dismissal_type IS NOT NULL
+    """, (tournament_id, team_id, player_id)).fetchone()
+
+    wickets = int(w_row["wickets"] or 0) if w_row else 0
+
+    phase_breakdown = {
+        "powerplay_overs": _balls_to_overs(balls_pp),
+        "powerplay_dot_balls": dots_pp or 0,
+        "powerplay_runs": runs_pp or 0,
+        "powerplay_wickets": None,  # can compute per-phase wickets later if needed
+        "powerplay_dot_ball_pct": pp_dot_pct,
+
+        "middle_overs_overs": _balls_to_overs(balls_mid),
+        "middle_overs_dot_balls": dots_mid or 0,
+        "middle_overs_runs": runs_mid or 0,
+        "middle_overs_wickets": None,
+        "middle_overs_dot_ball_pct": mid_dot_pct,
+
+        "death_overs_overs": _balls_to_overs(balls_death),
+        "death_overs_dot_balls": dots_death or 0,
+        "death_overs_runs": runs_death or 0,
+        "death_overs_wickets": None,
+        "death_overs_dot_ball_pct": death_dot_pct,
+    }
+
+    return {
+        "has_data": True,
+        "overs": overs_float,
+        "dot_balls": dot_balls,
+        "runs_conceded": runs_conceded,
+        "wickets": wickets,
+        "economy": economy,
+        "dot_ball_percentage": dot_pct,
+        "wides": wides,
+        "no_balls": no_balls,
+        "boundary_balls": boundary_balls,
+        "phase_breakdown": phase_breakdown,
+    }
+
+def _compute_tournament_fielding_summary(
+    conn,
+    tournament_id: int,
+    team_id: int,
+    player_id: int,
+) -> dict:
+    """
+    Aggregate fielding over all matches in this tournament for this team + player.
+    Uses:
+      fielding_contributions (ball_id, fielder_id)
+      ball_fielding_events   (ball_id, event_id)
+    """
+
+    rows = conn.execute("""
+        SELECT
+          bfe.event_id AS event_id
+        FROM fielding_contributions fc
+        JOIN ball_fielding_events bfe ON bfe.ball_id = fc.ball_id
+        JOIN ball_events be ON be.ball_id = fc.ball_id
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE m.tournament_id = ?
+          AND i.bowling_team = ?
+          AND fc.fielder_id = ?
+    """, (tournament_id, team_id, player_id)).fetchall()
+
+    if not rows:
+        return {"has_data": False}
+
+    counts = {eid: 0 for eid in range(1, 16)}
+    for r in rows:
+        eid = r["event_id"]
+        if eid in counts:
+            counts[eid] += 1
+
+    balls_fielded = sum(counts.values())
+    clean_pickups = counts[1]
+    catches_taken = counts[2]
+    run_outs = counts[3]
+    taken_half_chance = counts[4]
+    direct_hits = counts[5]
+    drop_catch = counts[6]
+    missed_catch = counts[7]
+    missed_run_out = counts[8]
+    missed_half_chance = counts[9]
+    fumbles = counts[10]
+    missed_fielding = counts[11]
+    overthrows = counts[12]
+    boundary_saves = counts[13]
+    stumpings = counts[14]
+    missed_stumping = counts[15]
+
+    dismissals = catches_taken + run_outs + stumpings + taken_half_chance
+    missed_chances = (
+        drop_catch
+        + missed_catch
+        + missed_run_out
+        + missed_half_chance
+        + missed_stumping
+    )
+
+    clean_hands_pct = (
+        _safe_div(clean_pickups * 100.0, balls_fielded)
+        if balls_fielded > 0 else None
+    )
+    conversion_rate = (
+        _safe_div(dismissals * 100.0, dismissals + missed_chances)
+        if (dismissals + missed_chances) > 0 else None
+    )
+
+    return {
+        "has_data": True,
+        "balls_fielded": balls_fielded,
+        "clean_pickups": clean_pickups,
+        "fumbles": fumbles,
+        "overthrows_conceded": overthrows,
+        "catches_taken": catches_taken,
+        "missed_catches": drop_catch + missed_catch,
+        "run_outs_direct": direct_hits,
+        "run_outs_assist": run_outs,
+        "clean_hands_pct": round(clean_hands_pct, 1) if clean_hands_pct is not None else None,
+        "conversion_rate": round(conversion_rate, 1) if conversion_rate is not None else None,
+    }
+
+
+@app.get("/posttournament/player-summary")
+def post_tournament_player_summary(
+    tournament_id: int = Query(..., description="tournaments.tournament_id"),
+    team_id: int = Query(..., description="countries.country_id"),
+    player_id: int = Query(..., description="players.player_id"),
+    team_category: str = Query(..., description="Team category (unused, for completeness)"),
+):
+    """
+    Returns the tournament-level batting / bowling / fielding summary for a player
+    in the given team & tournament.
+
+    Shape:
+      {
+        "player_name": "...",
+        "team_name": "...",
+        "batting": { ... },
+        "bowling": { ... },
+        "fielding": { ... }
+      }
+    """
+
+    conn = _db()
+    try:
+        player_row = conn.execute("""
+            SELECT player_name
+            FROM players
+            WHERE player_id = ?
+        """, (player_id,)).fetchone()
+
+        if not player_row:
+            raise HTTPException(status_code=404, detail="Player not found")
+
+        team_row = conn.execute("""
+            SELECT country_name
+            FROM countries
+            WHERE country_id = ?
+        """, (team_id,)).fetchone()
+
+        if not team_row:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        batting  = _compute_tournament_batting_summary(conn, tournament_id, team_id, player_id)
+        bowling  = _compute_tournament_bowling_summary(conn, tournament_id, team_id, player_id)
+        fielding = _compute_tournament_fielding_summary(conn, tournament_id, team_id, player_id)
+
+        return {
+            "player_name": player_row["player_name"],
+            "team_name": team_row["country_name"],
+            "batting": batting,
+            "bowling": bowling,
+            "fielding": fielding,
+        }
+    finally:
+        conn.close()
+
+
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=10000)

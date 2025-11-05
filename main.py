@@ -12729,8 +12729,13 @@ def _compute_tournament_bowling_summary(
 ) -> dict:
     """
     Aggregate bowling over all matches in this tournament for this team + player.
+    Includes:
+      - overall figures
+      - phase breakdown (Powerplay / Middle / Death) with wickets
+      - per-match summaries for UI ("vs X 3.0-10-27-2, Dot ball % + bar")
     """
 
+    # ---- Overall + phase aggregates ----
     row = conn.execute("""
         SELECT
           -- Balls bowled: exclude wides
@@ -12763,10 +12768,21 @@ def _compute_tournament_bowling_summary(
 
           SUM(CASE WHEN be.runs IN (4,6) THEN 1 ELSE 0 END) AS boundary_balls,
 
-          -- Phase splits (balls & dots & runs & wickets)
+          -- Total wickets in the tournament for this bowler
           SUM(
             CASE
-              WHEN be.is_powerplay = 1 AND COALESCE(be.wides,0)=0
+              WHEN be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets,
+
+          -- Phase splits (balls & dots & runs & wickets)
+
+          -- Powerplay
+          SUM(
+            CASE
+              WHEN be.is_powerplay = 1
+                   AND COALESCE(be.wides,0)=0
               THEN 1 ELSE 0
             END
           ) AS balls_pp,
@@ -12788,10 +12804,19 @@ def _compute_tournament_bowling_summary(
               ELSE 0
             END
           ) AS runs_pp,
-
           SUM(
             CASE
-              WHEN be.is_middle_overs = 1 AND COALESCE(be.wides,0)=0
+              WHEN be.is_powerplay = 1
+                   AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_pp,
+
+          -- Middle overs
+          SUM(
+            CASE
+              WHEN be.is_middle_overs = 1
+                   AND COALESCE(be.wides,0)=0
               THEN 1 ELSE 0
             END
           ) AS balls_mid,
@@ -12813,10 +12838,19 @@ def _compute_tournament_bowling_summary(
               ELSE 0
             END
           ) AS runs_mid,
-
           SUM(
             CASE
-              WHEN be.is_death_overs = 1 AND COALESCE(be.wides,0)=0
+              WHEN be.is_middle_overs = 1
+                   AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_mid,
+
+          -- Death overs
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND COALESCE(be.wides,0)=0
               THEN 1 ELSE 0
             END
           ) AS balls_death,
@@ -12837,7 +12871,14 @@ def _compute_tournament_bowling_summary(
                    + COALESCE(be.no_balls,0)
               ELSE 0
             END
-          ) AS runs_death
+          ) AS runs_death,
+          SUM(
+            CASE
+              WHEN be.is_death_overs = 1
+                   AND be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wkts_death
 
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
@@ -12863,6 +12904,7 @@ def _compute_tournament_bowling_summary(
     no_balls = int(row["no_balls"] or 0)
     dot_balls = int(row["dot_balls"] or 0)
     boundary_balls = int(row["boundary_balls"] or 0)
+    wickets = int(row["wickets"] or 0)
 
     overs_float = _balls_to_overs(balls)
     economy = None
@@ -12872,64 +12914,128 @@ def _compute_tournament_bowling_summary(
 
     dot_pct = round(dot_balls * 100.0 / balls, 1) if balls > 0 else None
 
-    # per-phase
+    # ---- Per-phase values ----
     balls_pp   = int(row["balls_pp"] or 0)
     dots_pp    = int(row["dots_pp"] or 0)
     runs_pp    = int(row["runs_pp"] or 0)
+    wkts_pp    = int(row["wkts_pp"] or 0)
 
     balls_mid  = int(row["balls_mid"] or 0)
     dots_mid   = int(row["dots_mid"] or 0)
     runs_mid   = int(row["runs_mid"] or 0)
+    wkts_mid   = int(row["wkts_mid"] or 0)
 
     balls_death = int(row["balls_death"] or 0)
     dots_death  = int(row["dots_death"] or 0)
     runs_death  = int(row["runs_death"] or 0)
+    wkts_death  = int(row["wkts_death"] or 0)
 
     def dot_pct_phase(balls_phase, dots_phase):
         if not balls_phase:
             return None
         return round(dots_phase * 100.0 / balls_phase, 1)
 
-    pp_dot_pct   = dot_pct_phase(balls_pp, dots_pp)
-    mid_dot_pct  = dot_pct_phase(balls_mid, dots_mid)
-    death_dot_pct= dot_pct_phase(balls_death, dots_death)
+    pp_dot_pct    = dot_pct_phase(balls_pp, dots_pp)
+    mid_dot_pct   = dot_pct_phase(balls_mid, dots_mid)
+    death_dot_pct = dot_pct_phase(balls_death, dots_death)
 
-    # wickets across tournament
-    w_row = conn.execute("""
-        SELECT COUNT(*) AS wickets
+    phase_breakdown = {
+        "powerplay_overs": _balls_to_overs(balls_pp),
+        "powerplay_dot_balls": dots_pp or 0,
+        "powerplay_runs": runs_pp or 0,
+        "powerplay_wickets": wkts_pp or 0,
+        "powerplay_dot_ball_pct": pp_dot_pct,
+
+        "middle_overs_overs": _balls_to_overs(balls_mid),
+        "middle_overs_dot_balls": dots_mid or 0,
+        "middle_overs_runs": runs_mid or 0,
+        "middle_overs_wickets": wkts_mid or 0,
+        "middle_overs_dot_ball_pct": mid_dot_pct,
+
+        "death_overs_overs": _balls_to_overs(balls_death),
+        "death_overs_dot_balls": dots_death or 0,
+        "death_overs_runs": runs_death or 0,
+        "death_overs_wickets": wkts_death or 0,
+        "death_overs_dot_ball_pct": death_dot_pct,
+    }
+
+    # ---- Per-match summaries for the UI ----
+    match_rows = conn.execute("""
+        SELECT
+          m.match_id,
+          -- Opponent name: if this bowler's team is team_a, opponent is team_b, and vice versa
+          CASE
+            WHEN pmr.team_id = m.team_a THEN cb.country_name
+            WHEN pmr.team_id = m.team_b THEN ca.country_name
+            ELSE NULL
+          END AS opponent_name,
+
+          -- Balls bowled in this match (exclude wides)
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0 THEN 1
+              ELSE 0
+            END
+          ) AS balls,
+
+          -- Runs conceded in this match
+          SUM(
+            COALESCE(be.runs,0)
+            + COALESCE(be.wides,0)
+            + COALESCE(be.no_balls,0)
+          ) AS runs_conceded,
+
+          -- Dot balls
+          SUM(
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+                   AND COALESCE(be.runs,0) = 0
+                   AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
+          ) AS dot_balls,
+
+          -- Wickets in this match
+          SUM(
+            CASE
+              WHEN be.dismissal_type IS NOT NULL
+              THEN 1 ELSE 0
+            END
+          ) AS wickets
         FROM ball_events be
         JOIN innings i ON be.innings_id = i.innings_id
         JOIN matches m ON i.match_id = m.match_id
         JOIN player_match_roles pmr
           ON pmr.match_id = m.match_id
          AND pmr.player_id = be.bowler_id
+        JOIN countries ca ON ca.country_id = m.team_a
+        JOIN countries cb ON cb.country_id = m.team_b
         WHERE m.tournament_id = ?
           AND pmr.team_id = ?
           AND be.bowler_id = ?
-          AND be.dismissal_type IS NOT NULL
-    """, (tournament_id, team_id, player_id)).fetchone()
+        GROUP BY m.match_id, opponent_name
+        ORDER BY m.match_id
+    """, (tournament_id, team_id, player_id)).fetchall()
 
-    wickets = int(w_row["wickets"] or 0) if w_row else 0
+    match_summaries: list[dict] = []
+    for r in match_rows:
+        mb = int(r["balls"] or 0)
+        mruns = int(r["runs_conceded"] or 0)
+        mdots = int(r["dot_balls"] or 0)
+        mwkts = int(r["wickets"] or 0)
 
-    phase_breakdown = {
-        "powerplay_overs": _balls_to_overs(balls_pp),
-        "powerplay_dot_balls": dots_pp or 0,
-        "powerplay_runs": runs_pp or 0,
-        "powerplay_wickets": None,  # can compute per-phase wickets later if needed
-        "powerplay_dot_ball_pct": pp_dot_pct,
+        overs_match = _balls_to_overs(mb)
+        dot_pct_match = round(mdots * 100.0 / mb, 1) if mb > 0 else None
 
-        "middle_overs_overs": _balls_to_overs(balls_mid),
-        "middle_overs_dot_balls": dots_mid or 0,
-        "middle_overs_runs": runs_mid or 0,
-        "middle_overs_wickets": None,
-        "middle_overs_dot_ball_pct": mid_dot_pct,
-
-        "death_overs_overs": _balls_to_overs(balls_death),
-        "death_overs_dot_balls": dots_death or 0,
-        "death_overs_runs": runs_death or 0,
-        "death_overs_wickets": None,
-        "death_overs_dot_ball_pct": death_dot_pct,
-    }
+        match_summaries.append({
+            "match_id": int(r["match_id"]),
+            "opponent": r["opponent_name"],
+            "overs": overs_match,
+            "dot_balls": mdots,
+            "runs_conceded": mruns,
+            "wickets": mwkts,
+            "dot_ball_pct": dot_pct_match,
+        })
 
     return {
         "has_data": True,
@@ -12943,7 +13049,18 @@ def _compute_tournament_bowling_summary(
         "no_balls": no_balls,
         "boundary_balls": boundary_balls,
         "phase_breakdown": phase_breakdown,
+        "match_summaries": match_summaries,
+        "source": {
+            "tournament_id": tournament_id,
+            "team_id": team_id,
+            "player_id": player_id,
+            "balls": balls,
+            "runs_conceded": runs_conceded,
+            "dot_balls": dot_balls,
+            "wickets": wickets,
+        },
     }
+
 
 def _compute_tournament_fielding_summary(
     conn,

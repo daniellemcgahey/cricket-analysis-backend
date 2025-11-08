@@ -13098,6 +13098,29 @@ def _compute_tournament_fielding_summary(
           AND i.bowling_team = ?
           AND fc.fielder_id = ?
     """, (tournament_id, team_id, player_id)).fetchall()
+    
+    # --- Backfill missing catches / run outs / stumpings from ball_events (Lite Mode safeguard) ---
+    extra_rows = conn.execute("""
+        SELECT
+            CASE
+                WHEN LOWER(be.dismissal_type) IN ('caught','catch') THEN 2
+                WHEN LOWER(be.dismissal_type) IN ('run out','runout') THEN 3
+                WHEN LOWER(be.dismissal_type) IN ('stumped','stumping') THEN 14
+                ELSE NULL
+            END AS event_id
+        FROM ball_events be
+        JOIN innings i ON be.innings_id = i.innings_id
+        JOIN matches m ON i.match_id = m.match_id
+        WHERE m.tournament_id = ?
+        AND i.bowling_team = ?
+        AND be.fielder_id = ?
+        AND event_id IS NOT NULL
+        AND be.ball_id NOT IN (
+            SELECT ball_id FROM ball_fielding_events
+        )
+    """, (tournament_id, team_id, player_id)).fetchall()
+
+    rows += extra_rows  # merge into main list
 
     if not rows:
         return {"has_data": False}

@@ -3235,7 +3235,6 @@ class BallByBallInterface:
             return "."
         return str(runs)
 
-
     def validate_non_missed_ball(self):
         """Validate required fields for normal balls"""
         errors = []
@@ -3608,7 +3607,6 @@ class BallByBallInterface:
                     self.end_match(winner=self.match_data.bowling_team)
 
         self.save_match_state_to_db()
-
 
     def end_match(self, winner):
         self.set_submit_enabled(False)
@@ -4747,7 +4745,6 @@ class BallByBallInterface:
         # Update display
         self.update_display()
 
-   
     def select_new_bowler(self):
         """Show bowler selection with proper stats handling"""
         selector = ttkb.Toplevel(self.window)
@@ -5297,8 +5294,16 @@ class BallByBallInterface:
                 # only read UI in full mode
                 fielding_style = (self.fielding_style_combo.get() or None) if hasattr(self, "fielding_style_combo") else None
 
-            # === Fielder (don’t force in lite) ===
-            fielder_id = ball_data.get('fielder') if not lite else None
+            # === Fielder (always respect ball_data if provided) ===
+            # Prefer an explicit 'fielder_id' key, fall back to 'fielder'
+            fielder_id = ball_data.get('fielder_id', ball_data.get('fielder'))
+
+            # Ensure it's either int or None
+            try:
+                fielder_id = int(fielder_id) if fielder_id is not None else None
+            except (TypeError, ValueError):
+                fielder_id = None
+
             ball_data['fielding_events'] = ball_data.get('fielding_events', [])
 
             # === Dynamic Game Phase Tagging (compute if not already present) ===
@@ -5545,7 +5550,6 @@ class BallByBallInterface:
             return 0
         finally:
             conn.close()
-
 
     def save_state(self):
         """Deep copy all relevant data for proper undo"""

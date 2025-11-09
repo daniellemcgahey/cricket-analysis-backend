@@ -13426,7 +13426,7 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
         total_runs * 120.0 / legal_balls if legal_balls else 0.0
     )
 
-    # Phase breakdown – now with wickets and correct overs display
+    # Phase breakdown – now WITH scoring shot % per phase
     phase_rows = conn.execute("""
         SELECT
           CASE
@@ -13453,6 +13453,14 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
             THEN 1 ELSE 0 END
           ) AS legal_balls,
 
+          -- Scoring balls in this phase (same definition as global)
+          SUM(
+            CASE WHEN COALESCE(be.wides,0) = 0
+                 AND COALESCE(be.no_balls,0) = 0
+                 AND COALESCE(be.dot_balls,0) = 0
+            THEN 1 ELSE 0 END
+          ) AS scoring_balls,
+
           -- Wickets lost in this phase (ball-based only, non-ball dismissals excluded)
           SUM(
             CASE WHEN be.dismissed_player_id IS NOT NULL
@@ -13474,17 +13482,20 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
 
         runs_p = r["runs"] or 0
         balls_p = r["legal_balls"] or 0
+        scoring_p = r["scoring_balls"] or 0
         wkts_p = r["wickets"] or 0
 
         overs_p = _balls_to_overs(balls_p) if balls_p else 0.0      # cricket-style
         rr_p = (runs_p * 6.0 / balls_p) if balls_p else 0.0          # true run rate
+        ss_pct_p = (scoring_p * 100.0 / balls_p) if balls_p else 0.0
 
         phase[key] = {
             "runs": runs_p,
             "legal_balls": balls_p,
-            "overs": overs_p,       # e.g. 1.5, 3.2, etc.
-            "run_rate": rr_p,       # runs per 6 balls
+            "overs": overs_p,            # e.g. 1.5, 3.2, etc.
+            "run_rate": rr_p,            # runs per 6 balls
             "wickets": wkts_p,
+            "scoring_shot_pct": ss_pct_p # NEW: scoring shot % for this phase
         }
 
     return {
@@ -13501,6 +13512,7 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
         "boundary_pct": boundary_pct,
         "phase": phase,
     }
+
 
 
 def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:

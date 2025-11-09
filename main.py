@@ -13379,7 +13379,7 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
 
     innings_count = inn["innings_count"] or 0
     total_runs = inn["total_runs"] or 0
-    avg_runs = total_runs / innings_count if innings_count else 0.0
+    avg_runs = total_runs / innings_count if innings_count else 0.0  # old per-innings metric
 
     # Ball-level: scoring %, boundary %
     row = conn.execute("""
@@ -13419,6 +13419,11 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
     )
     boundary_pct = (
         boundary_balls / legal_balls * 100.0 if legal_balls else 0.0
+    )
+
+    # NEW: normalised runs scored per 20 legal overs
+    runs_scored_per_20_overs = (
+        total_runs * 120.0 / legal_balls if legal_balls else 0.0
     )
 
     # Phase breakdown – now with wickets and correct overs display
@@ -13479,20 +13484,27 @@ def _compute_team_batting_summary(conn, tournament_id: int, team_id: int, team_n
             "legal_balls": balls_p,
             "overs": overs_p,       # e.g. 1.5, 3.2, etc.
             "run_rate": rr_p,       # runs per 6 balls
-            "wickets": wkts_p,      # NEW: phase wickets for team batting
+            "wickets": wkts_p,
         }
 
     return {
         "innings_count": innings_count,
         "total_runs": total_runs,
+
+        # Old per-innings metric (you can still show it if you want)
         "avg_runs": avg_runs,
+
+        # NEW preferred metric
+        "runs_scored_per_20_overs": runs_scored_per_20_overs,
+
         "scoring_shot_pct": scoring_shot_pct,
         "boundary_pct": boundary_pct,
         "phase": phase,
     }
 
+
 def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
-    # Innings-level: runs conceded, overs, wickets
+    # ===== Innings-level: runs conceded, overs, wickets =====
     inn = conn.execute("""
         SELECT
           COUNT(*) AS innings_count,
@@ -13507,21 +13519,27 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
 
     innings_count = inn["innings_count"] or 0
     runs_conceded = inn["runs_conceded"] or 0
-    overs_bowled = inn["overs_bowled"] or 0.0   # this is coming from your innings table
+    overs_bowled = inn["overs_bowled"] or 0.0   # from innings table (scorecard)
     wickets = inn["wickets"] or 0
 
-    economy = runs_conceded / overs_bowled if overs_bowled else 0.0
-    avg_runs_conceded = runs_conceded / innings_count if innings_count else 0.0
-    avg_wickets = wickets / innings_count if innings_count else 0.0
+    # Classic economy + per-innings stats (you can keep or ignore)
+    economy = (runs_conceded / overs_bowled) if overs_bowled else 0.0
+    avg_runs_conceded = (runs_conceded / innings_count) if innings_count else 0.0
+    avg_wickets = (wickets / innings_count) if innings_count else 0.0
 
-    # Ball-level: dot balls & phase
+    # ===== Ball-level: legal balls & dots =====
     row = conn.execute("""
         SELECT
+          -- Legal balls (exclude wides and no-balls)
           SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+               AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
           ) AS legal_balls,
+
+          -- Dot balls (you're storing this in be.dot_balls)
           SUM(COALESCE(be.dot_balls,0)) AS dots
         FROM ball_events be
         JOIN innings i ON i.innings_id = be.innings_id
@@ -13534,6 +13552,11 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
     dots = row["dots"] or 0
     dot_pct = (dots / legal_balls * 100.0) if legal_balls else 0.0
 
+    # NEW: runs conceded per 20 legal overs (normalised metric)
+    # If legal_balls is 0, keep this as 0.0 to avoid crashes.
+    runs_conceded_per_20_overs = (runs_conceded * 120.0 / legal_balls) if legal_balls else 0.0
+
+    # ===== Phase breakdown (PP / MO / DO) =====
     phase_rows = conn.execute("""
         SELECT
           CASE
@@ -13553,9 +13576,11 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
           ) AS runs_conceded,
 
           SUM(
-            CASE WHEN COALESCE(be.wides,0) = 0
-                 AND COALESCE(be.no_balls,0) = 0
-            THEN 1 ELSE 0 END
+            CASE
+              WHEN COALESCE(be.wides,0) = 0
+               AND COALESCE(be.no_balls,0) = 0
+              THEN 1 ELSE 0
+            END
           ) AS legal_balls,
 
           SUM(
@@ -13586,13 +13611,13 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
         balls_p = r["legal_balls"] or 0
         w_p = r["wickets"] or 0
 
-        overs_p = _balls_to_overs(balls_p) if balls_p else 0.0         # cricket-style
-        econ_p = (runs_p * 6.0 / balls_p) if balls_p else 0.0           # runs per over (correct)
+        overs_p = _balls_to_overs(balls_p) if balls_p else 0.0         # cricket-style e.g. 3.2
+        econ_p = (runs_p * 6.0 / balls_p) if balls_p else 0.0           # runs per over
 
         phase[key] = {
             "runs_conceded": runs_p,
             "legal_balls": balls_p,
-            "overs": overs_p,         # e.g. 1.5 instead of 1.8
+            "overs": overs_p,
             "economy": econ_p,
             "wickets": w_p,
         }
@@ -13600,19 +13625,73 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
     return {
         "innings_count": innings_count,
         "runs_conceded": runs_conceded,
+
+        # Old metric (per innings) – you can stop showing this if you want:
         "avg_runs_conceded": avg_runs_conceded,
+
+        # NEW metric – what you actually care about:
+        "runs_conceded_per_20_overs": runs_conceded_per_20_overs,
+
         "wickets": wickets,
         "avg_wickets": avg_wickets,
-        "economy": economy,
+        "economy": economy,          # classic runs per over actually bowled
         "dot_pct": dot_pct,
         "phase": phase,
     }
 
+
 def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
+    """
+    Team fielding summary for the tournament.
+
+    Lite mode:
+      - Catches / run outs / stumpings come from ball_events.dismissal_type
+      - Discipline (wides / no-balls) from ball_events
+      - Advanced fielding (clean pickups, drops, fumbles, overthrows) still come
+        from ball_fielding_events if present; otherwise they'll just be 0.
+    """
+
+    # ---- 1) Dismissal-based counts (works in lite mode) ----
+    dismissals = conn.execute("""
+        SELECT
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN (
+                   'caught','catch','caught_and_bowled',
+                   'caught and bowled','caught & bowled'
+              )
+              THEN 1 ELSE 0
+            END
+          ) AS catches,
+
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN ('run out','runout')
+              THEN 1 ELSE 0
+            END
+          ) AS run_outs,
+
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN ('stumped','stumping')
+              THEN 1 ELSE 0
+            END
+          ) AS stumpings
+        FROM ball_events be
+        JOIN innings i ON i.innings_id = be.innings_id
+        JOIN matches m ON m.match_id = i.match_id
+        WHERE m.tournament_id = :tournament_id
+          AND i.bowling_team = :team_name
+    """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
+
+    catches = dismissals["catches"] or 0
+    run_outs = dismissals["run_outs"] or 0
+    stumpings = dismissals["stumpings"] or 0
+
+    # ---- 2) Advanced fielding events (full mode only; zero in lite) ----
+    # We no longer try to get catches/run_outs from here – only the "extra" stuff.
     row = conn.execute("""
         SELECT
-          SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches,
-          SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_outs,
           SUM(CASE WHEN bfe.event_id = 6 THEN 1 ELSE 0 END) AS drop_catches,
           SUM(CASE WHEN bfe.event_id = 8 THEN 1 ELSE 0 END) AS missed_run_outs,
           SUM(CASE WHEN bfe.event_id = 1 THEN 1 ELSE 0 END) AS clean_pickups,
@@ -13630,6 +13709,13 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_
           AND pmr.team_id = :team_id
     """, {"tournament_id": tournament_id, "team_id": team_id}).fetchone()
 
+    drop_catches    = row["drop_catches"]    or 0
+    missed_run_outs = row["missed_run_outs"] or 0
+    clean_pickups   = row["clean_pickups"]   or 0
+    fumbles         = row["fumbles"]         or 0
+    overthrows      = row["overthrows"]      or 0
+
+    # ---- 3) Discipline (same as before) ----
     disc = conn.execute("""
         SELECT
           SUM(COALESCE(be.wides,0)) AS wides,
@@ -13641,19 +13727,26 @@ def _compute_team_fielding_summary(conn, tournament_id: int, team_id: int, team_
           AND i.bowling_team = :team_name
     """, {"tournament_id": tournament_id, "team_name": team_name}).fetchone()
 
+    wides = disc["wides"] or 0
+    no_balls = disc["no_balls"] or 0
+
     return {
-        "catches": row["catches"] or 0,
-        "run_outs": row["run_outs"] or 0,
-        "drop_catches": row["drop_catches"] or 0,
-        "missed_run_outs": row["missed_run_outs"] or 0,
-        "clean_pickups": row["clean_pickups"] or 0,
-        "fumbles": row["fumbles"] or 0,
-        "overthrows": row["overthrows"] or 0,
+        "catches": catches,
+        "run_outs": run_outs,
+        "stumpings": stumpings,  # NEW
+
+        "drop_catches": drop_catches,
+        "missed_run_outs": missed_run_outs,
+        "clean_pickups": clean_pickups,
+        "fumbles": fumbles,
+        "overthrows": overthrows,
+
         "discipline": {
-            "wides": disc["wides"] or 0,
-            "no_balls": disc["no_balls"] or 0,
+            "wides": wides,
+            "no_balls": no_balls,
         },
     }
+
 
 def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str) -> dict:
     # ===== Batting leaders – use p.country_id (this matches your “correct” list) =====
@@ -13759,42 +13852,71 @@ def _compute_team_leaders(conn, tournament_id: int, team_id: int, team_name: str
             "economy": econ,
         })
 
-    # ===== Fielding leaders =====
+    # ===== Fielding leaders (catches + run outs + stumpings) =====
     fielding_rows = conn.execute("""
         SELECT
           p.player_id,
           p.player_name,
-          SUM(CASE WHEN bfe.event_id = 2 THEN 1 ELSE 0 END) AS catches,
-          SUM(CASE WHEN bfe.event_id = 3 THEN 1 ELSE 0 END) AS run_outs
-        FROM ball_fielding_events bfe
-        JOIN ball_events be
-          ON be.ball_id = bfe.ball_id
+
+          -- Catches (including caught & bowled variants)
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN (
+                   'caught','catch',
+                   'caught_and_bowled','caught and bowled','caught & bowled'
+              )
+              THEN 1 ELSE 0
+            END
+          ) AS catches,
+
+          -- Run outs
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN ('run out','runout')
+              THEN 1 ELSE 0
+            END
+          ) AS run_outs,
+
+          -- Stumpings
+          SUM(
+            CASE
+              WHEN LOWER(TRIM(be.dismissal_type)) IN ('stumped','stumping')
+              THEN 1 ELSE 0
+            END
+          ) AS stumpings
+
+        FROM ball_events be
         JOIN innings i
           ON i.innings_id = be.innings_id
         JOIN matches m
           ON m.match_id = i.match_id
-        JOIN fielding_contributions fc
-          ON fc.ball_id = be.ball_id
         JOIN players p
-          ON p.player_id = fc.fielder_id
+          ON p.player_id = be.fielder_id
         WHERE m.tournament_id = :tournament_id
           AND p.country_id = :team_id
         GROUP BY p.player_id, p.player_name
-        HAVING (catches + run_outs) > 0
-        ORDER BY (catches + run_outs) DESC
+        HAVING (catches + run_outs + stumpings) > 0
+        ORDER BY (catches + run_outs + stumpings) DESC
         LIMIT 3
     """, {"tournament_id": tournament_id, "team_id": team_id}).fetchall()
 
     fielding = []
     for r in fielding_rows:
-        total = (r["catches"] or 0) + (r["run_outs"] or 0)
+        catches   = r["catches"]   or 0
+        run_outs  = r["run_outs"]  or 0
+        stumpings = r["stumpings"] or 0
+        total = catches + run_outs + stumpings
+
         fielding.append({
             "player_id": r["player_id"],
             "player_name": r["player_name"],
             "dismissals": total,
-            "catches": r["catches"] or 0,
-            "run_outs": r["run_outs"] or 0,
+            "catches": catches,
+            "run_outs": run_outs,
+            "stumpings": stumpings,
         })
+
+
 
     return {
         "batting": batting,

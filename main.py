@@ -13565,7 +13565,6 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
     dot_pct = (dots / legal_balls * 100.0) if legal_balls else 0.0
 
     # NEW: runs conceded per 20 legal overs (normalised metric)
-    # If legal_balls is 0, keep this as 0.0 to avoid crashes.
     runs_conceded_per_20_overs = (runs_conceded * 120.0 / legal_balls) if legal_balls else 0.0
 
     # ===== Phase breakdown (PP / MO / DO) =====
@@ -13578,6 +13577,7 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
             ELSE 'OTHER'
           END AS phase_key,
 
+          -- Runs conceded in this phase (including extras)
           SUM(
             COALESCE(be.runs,0)
             + COALESCE(be.wides,0)
@@ -13587,6 +13587,7 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
             + COALESCE(be.penalty_runs,0)
           ) AS runs_conceded,
 
+          -- Legal balls in this phase
           SUM(
             CASE
               WHEN COALESCE(be.wides,0) = 0
@@ -13595,6 +13596,10 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
             END
           ) AS legal_balls,
 
+          -- Dot balls in this phase (use the same definition as overall)
+          SUM(COALESCE(be.dot_balls,0)) AS dots,
+
+          -- Wickets in this phase
           SUM(
             CASE
               WHEN i.bowling_team = :team_name
@@ -13621,10 +13626,12 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
 
         runs_p = r["runs_conceded"] or 0
         balls_p = r["legal_balls"] or 0
+        dots_p = r["dots"] or 0
         w_p = r["wickets"] or 0
 
         overs_p = _balls_to_overs(balls_p) if balls_p else 0.0         # cricket-style e.g. 3.2
         econ_p = (runs_p * 6.0 / balls_p) if balls_p else 0.0           # runs per over
+        dot_pct_p = (dots_p * 100.0 / balls_p) if balls_p else 0.0      # NEW: phase dot %
 
         phase[key] = {
             "runs_conceded": runs_p,
@@ -13632,6 +13639,8 @@ def _compute_team_bowling_summary(conn, tournament_id: int, team_id: int, team_n
             "overs": overs_p,
             "economy": econ_p,
             "wickets": w_p,
+            "dot_pct": dot_pct_p,   # NEW
+            "dots": dots_p,         # optional but handy
         }
 
     return {
